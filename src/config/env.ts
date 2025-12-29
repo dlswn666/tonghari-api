@@ -45,6 +45,10 @@ export const env = {
     QUEUE_CONCURRENCY: getEnvNumber('QUEUE_CONCURRENCY', 5),
     QUEUE_MAX_SIZE: getEnvNumber('QUEUE_MAX_SIZE', 100),
     
+    // GIS & Public Data API
+    VWORLD_API_KEY: process.env.VWORLD_API_KEY || '',
+    DATA_PORTAL_API_KEY: process.env.DATA_PORTAL_API_KEY || '',
+
     // 헬퍼
     isDevelopment: process.env.NODE_ENV === 'development',
     isProduction: process.env.NODE_ENV === 'production',
