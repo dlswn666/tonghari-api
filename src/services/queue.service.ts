@@ -115,15 +115,14 @@ class QueueService {
 
             console.log(`[작업 ${jobId}] 처리 완료. 성공: ${result.kakaoSuccessCount}, 실패: ${result.failCount}`);
 
-            // Supabase에 로그 저장
+            // Supabase에 로그 저장 (templateName은 발송 결과에서 가져옴)
             try {
                 await supabaseService.saveAlimtalkLog({
                     union_id: request.unionId,
                     sender_id: request.senderId,
                     template_code: request.templateCode,
-                    template_name: request.templateName,
-                    title: request.title,
-                    content: request.content,
+                    template_name: result.templateName || request.templateCode,
+                    title: result.templateName || request.templateCode,
                     notice_id: request.noticeId,
                     sender_channel_name: '조합온', // 기본값
                     total_count: result.totalRecipients,

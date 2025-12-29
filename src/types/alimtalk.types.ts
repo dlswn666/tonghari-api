@@ -3,21 +3,17 @@
 // ============================================================
 
 /**
- * 알림톡 수신자 정보
+ * 알림톡 수신자 정보 (단순화)
+ * 클라이언트에서는 변수만 전달하고, 서버에서 템플릿 기반으로 메시지 구성
  */
 export interface AlimtalkRecipient {
     phoneNumber: string;
     name: string;
     variables?: Record<string, string>;
-    failoverSubject?: string; // 대체 발송 제목 (LMS용)
-    failoverMessage?: string; // 대체 발송 내용 (LMS용)
-    content?: string; // 템플릿 메시지 내용 (변수 포함)
-    buttons?: AlimtalkButton[]; // 버튼 정보
-    emtitle?: string; // 강조표기형 알림톡 서브타이틀
 }
 
 /**
- * 알림톡 버튼 정보
+ * 알림톡 버튼 정보 (DB/알리고 API용)
  */
 export interface AlimtalkButton {
     ordering?: number; // 버튼 순서 (1 ~ 5)
@@ -31,31 +27,31 @@ export interface AlimtalkButton {
 }
 
 /**
- * 알리고 API 수신자 타입 (배치 처리용)
+ * 알리고 API 수신자 타입 (내부 처리용)
+ * 서버에서 템플릿 정보와 변수를 조합하여 구성
  */
 export interface Recipient {
     phoneNumber: string;
     name?: string;
     variables?: Record<string, string>;
-    failoverSubject?: string; // 대체 발송 제목 (LMS용)
-    failoverMessage?: string; // 대체 발송 내용 (LMS용)
-    content?: string; // 템플릿 메시지 내용 (변수 포함)
-    buttons?: AlimtalkButton[]; // 버튼 정보
-    emtitle?: string; // 강조표기형 알림톡 서브타이틀
+    // 서버에서 템플릿 기반으로 자동 구성되는 필드들
+    content?: string;
+    buttons?: AlimtalkButton[];
+    emtitle?: string;
+    failoverSubject?: string;
+    failoverMessage?: string;
 }
 
 /**
- * 알림톡 발송 요청 파라미터
+ * 알림톡 발송 요청 파라미터 (단순화)
+ * 클라이언트에서는 templateCode와 수신자 정보만 전달
  */
 export interface SendAlimtalkRequest {
     unionId: string;
     senderId: string;
     templateCode: string;
-    templateName: string;
-    title: string;
-    content?: string;
-    noticeId?: number;
     recipients: AlimtalkRecipient[];
+    noticeId?: number;
 }
 
 /**

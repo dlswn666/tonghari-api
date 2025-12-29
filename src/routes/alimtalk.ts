@@ -99,14 +99,13 @@ router.post('/send-sync', async (req: Request, res: Response, next: NextFunction
             aligoResult.smsSuccessCount
         );
 
-        // 로그 저장
+        // 로그 저장 (templateName은 발송 결과에서 가져옴)
         const logId = await supabaseService.saveAlimtalkLog({
             union_id: body.unionId,
             sender_id: body.senderId,
             template_code: body.templateCode,
-            template_name: body.templateName,
-            title: body.title,
-            content: body.content,
+            template_name: aligoResult.templateName || body.templateCode,
+            title: aligoResult.templateName || body.templateCode,
             notice_id: body.noticeId,
             sender_channel_name: senderKeyInfo.channelName,
             total_count: body.recipients.length,

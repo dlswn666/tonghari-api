@@ -37,6 +37,7 @@ export interface SendResult {
     failCount: number;
     totalActualCost: number; // 전체 실제 비용 (알리고 응답의 total 합산)
     batchResults: BatchResult[];
+    templateName?: string; // 템플릿명 (DB에서 조회)
 }
 
 /**
@@ -296,20 +297,34 @@ class AligoService {
      * 500건씩 분할하여 순차 발송
      */
     async sendAlimtalk(request: SendAlimtalkRequest): Promise<SendResult> {
-        const { unionId, templateCode, title, recipients } = request;
+        const { unionId, templateCode, recipients } = request;
 
         // 템플릿 정보 조회 (DB에서)
         const template = await supabaseService.getTemplateByCode(templateCode);
         
         if (!template) {
-            console.warn(`[알림톡 발송] 템플릿을 찾을 수 없음: ${templateCode}, 기본 발송 진행`);
-        } else {
-            console.log(`[알림톡 발송] 템플릿 정보 조회 완료: ${templateCode}`);
-            console.log(`  - 템플릿 타입: ${template.template_type || 'N/A'}`);
-            console.log(`  - 강조 유형: ${template.template_em_type || 'N/A'}`);
-            console.log(`  - 강조 제목: ${template.template_title || 'N/A'}`);
-            console.log(`  - 버튼 수: ${template.buttons?.length || 0}개`);
+            console.error(`[알림톡 발송] 템플릿을 찾을 수 없음: ${templateCode}`);
+            return {
+                success: false,
+                totalRecipients: recipients.length,
+                totalBatches: 0,
+                kakaoSuccessCount: 0,
+                smsSuccessCount: 0,
+                failCount: recipients.length,
+                totalActualCost: 0,
+                batchResults: [],
+            };
         }
+
+        console.log(`[알림톡 발송] 템플릿 정보 조회 완료: ${templateCode}`);
+        console.log(`  - 템플릿명: ${template.template_name}`);
+        console.log(`  - 템플릿 타입: ${template.template_type || 'N/A'}`);
+        console.log(`  - 강조 유형: ${template.template_em_type || 'N/A'}`);
+        console.log(`  - 강조 제목: ${template.template_title || 'N/A'}`);
+        console.log(`  - 버튼 수: ${template.buttons?.length || 0}개`);
+
+        // 템플릿에서 title 생성 (템플릿명 사용)
+        const title = template.template_name;
 
         // Sender Key 조회
         const senderKeyInfo = await this.getSenderKey(unionId);
@@ -361,6 +376,7 @@ class AligoService {
             failCount: totalFail,
             totalActualCost,
             batchResults,
+            templateName: template.template_name,
         };
     }
 
