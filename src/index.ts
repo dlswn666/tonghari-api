@@ -27,6 +27,10 @@ app.use(errorHandler);
 const server = app.listen(env.PORT, () => {
     logger.info('Alimtalk Proxy Server started');
     logger.info(`Environment: ${env.NODE_ENV}, Port: ${env.PORT}`);
+    
+    // GIS 환경 변수 상태 로깅
+    logger.info(`GIS Config - VWORLD_API_KEY: ${env.VWORLD_API_KEY ? 'SET' : 'NOT SET'}`);
+    logger.info(`GIS Config - DATA_PORTAL_API_KEY: ${env.DATA_PORTAL_API_KEY ? 'SET' : 'NOT SET'}`);
 });
 
 // Graceful shutdown

@@ -264,6 +264,135 @@ class SupabaseService {
 
         return pricing;
     }
+
+    // ============================================
+    // GIS 관련 메서드
+    // ============================================
+
+    /**
+     * 필지 정보 UPSERT (land_lots 테이블)
+     */
+    async upsertLandLot(landLot: {
+        pnu: string;
+        address: string;
+        area?: number;
+        official_price?: number;
+        boundary?: any;
+    }): Promise<boolean> {
+        try {
+            const { error } = await this.client
+                .from('land_lots')
+                .upsert({
+                    pnu: landLot.pnu,
+                    address: landLot.address,
+                    area: landLot.area,
+                    official_price: landLot.official_price,
+                    boundary: landLot.boundary,
+                    updated_at: new Date().toISOString(),
+                }, {
+                    onConflict: 'pnu',
+                });
+
+            if (error) {
+                logger.error(`land_lots upsert failed (PNU: ${landLot.pnu})`, error);
+                return false;
+            }
+
+            logger.debug(`land_lots upserted: ${landLot.pnu}`);
+            return true;
+        } catch (error) {
+            logger.error(`land_lots upsert error (PNU: ${landLot.pnu})`, error);
+            return false;
+        }
+    }
+
+    /**
+     * 조합-필지 관계 생성 (union_land_lots 테이블)
+     */
+    async createUnionLandLot(unionId: string, pnu: string, addressText?: string): Promise<boolean> {
+        try {
+            // 이미 존재하는지 확인
+            const { data: existing } = await this.client
+                .from('union_land_lots')
+                .select('id')
+                .eq('union_id', unionId)
+                .eq('pnu', pnu)
+                .single();
+
+            if (existing) {
+                logger.debug(`union_land_lots already exists: ${unionId} - ${pnu}`);
+                return true;
+            }
+
+            const { error } = await this.client
+                .from('union_land_lots')
+                .insert({
+                    union_id: unionId,
+                    pnu: pnu,
+                    address_text: addressText,
+                });
+
+            if (error) {
+                logger.error(`union_land_lots insert failed (${unionId}, ${pnu})`, error);
+                return false;
+            }
+
+            logger.debug(`union_land_lots created: ${unionId} - ${pnu}`);
+            return true;
+        } catch (error) {
+            logger.error(`union_land_lots insert error (${unionId}, ${pnu})`, error);
+            return false;
+        }
+    }
+
+    /**
+     * sync_jobs 상태 업데이트
+     */
+    async updateSyncJobStatus(
+        jobId: string,
+        status: 'PROCESSING' | 'COMPLETED' | 'FAILED',
+        progress: number,
+        errorLog?: string,
+        previewData?: any
+    ): Promise<boolean> {
+        try {
+            const updateData: any = {
+                status,
+                progress,
+                updated_at: new Date().toISOString(),
+            };
+
+            if (errorLog !== undefined) {
+                updateData.error_log = errorLog;
+            }
+
+            if (previewData !== undefined) {
+                updateData.preview_data = previewData;
+            }
+
+            const { error } = await this.client
+                .from('sync_jobs')
+                .update(updateData)
+                .eq('id', jobId);
+
+            if (error) {
+                logger.error(`sync_jobs update failed (${jobId})`, error);
+                return false;
+            }
+
+            return true;
+        } catch (error) {
+            logger.error(`sync_jobs update error (${jobId})`, error);
+            return false;
+        }
+    }
+
+    /**
+     * Supabase 클라이언트 직접 접근 (필요 시)
+     */
+    getClient(): SupabaseClient {
+        return this.client;
+    }
 }
 
 export const supabaseService = new SupabaseService();
