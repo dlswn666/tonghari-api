@@ -5,6 +5,9 @@ import { aligoService, SendResult } from './aligo.service';
 import { supabaseService } from './supabase.service';
 import { SendAlimtalkRequest } from '../types/alimtalk.types';
 import { JobInfo, JobStatus, QueueStatus } from '../types/queue.types';
+import { createLogger } from '../utils/logger';
+
+const logger = createLogger('QUEUE');
 
 /**
  * 알림톡 발송 큐 서비스
@@ -35,15 +38,15 @@ class QueueService {
 
         // 큐 이벤트 리스너
         this.queue.on('active', () => {
-            console.log(`[큐] 작업 시작. 대기: ${this.queue.pending}, 실행 중: ${this.queue.pending + 1}`);
+            logger.debug(`작업 활성화. 대기: ${this.queue.pending}, 실행 중: ${this.queue.size}`);
         });
 
         this.queue.on('idle', () => {
-            console.log('[큐] 모든 작업 완료 (Idle 상태)');
+            logger.info('모든 작업 완료 (Idle)');
         });
 
         this.queue.on('error', (error) => {
-            console.error('[큐] 오류 발생:', error);
+            logger.error('큐 오류 발생', error);
         });
     }
 
@@ -63,7 +66,7 @@ class QueueService {
     async addJob(request: SendAlimtalkRequest): Promise<JobInfo | null> {
         // 큐 크기 확인
         if (this.isFull()) {
-            console.warn('[큐] 큐가 가득 찼습니다. 작업 추가 거부.');
+            logger.warn('큐가 가득 찼습니다. 작업 추가 거부.');
             return null;
         }
 
@@ -84,13 +87,13 @@ class QueueService {
         // 작업 저장
         this.jobs.set(jobId, jobInfo);
 
-        console.log(`[큐] 작업 추가: ${jobId} (수신자: ${request.recipients.length}명)`);
+        logger.info(`작업 추가: ${jobId} (수신자: ${request.recipients.length}명, 템플릿: ${request.templateCode})`);
 
         // 큐에 작업 추가 (비동기 처리)
         this.queue.add(async () => {
             await this.processJob(jobId, request);
         }).catch((error) => {
-            console.error(`[큐] 작업 실패 (${jobId}):`, error);
+            logger.error(`작업 실패 (${jobId})`, error);
             this.updateJobStatus(jobId, 'failed', undefined, error instanceof Error ? error.message : '알 수 없는 오류');
         });
 
@@ -101,21 +104,21 @@ class QueueService {
      * 작업 처리
      */
     private async processJob(jobId: string, request: SendAlimtalkRequest): Promise<void> {
-        console.log(`[작업 ${jobId}] 처리 시작`);
+        logger.info(`[작업 ${jobId}] 처리 시작`);
 
         // 상태 업데이트: processing
         this.updateJobStatus(jobId, 'processing');
 
         try {
-            // 알림톡 발송 실행
+            // 알림톡 발송 실행 (내부에서 배치별 로깅 수행)
             const result = await aligoService.sendAlimtalk(request);
 
             // 상태 업데이트: completed
             this.updateJobStatus(jobId, 'completed', result);
 
-            console.log(`[작업 ${jobId}] 처리 완료. 성공: ${result.kakaoSuccessCount}, 실패: ${result.failCount}`);
+            logger.info(`[작업 ${jobId}] 처리 완료. 성공: ${result.kakaoSuccessCount}, 실패: ${result.failCount}, 비용: ${result.totalActualCost}원`);
 
-            // Supabase에 로그 저장 (templateName은 발송 결과에서 가져옴)
+            // Supabase에 로그 저장
             try {
                 await supabaseService.saveAlimtalkLog({
                     union_id: request.unionId,
@@ -124,7 +127,7 @@ class QueueService {
                     template_name: result.templateName || request.templateCode,
                     title: result.templateName || request.templateCode,
                     notice_id: request.noticeId,
-                    sender_channel_name: '조합온', // 기본값
+                    sender_channel_name: '조합온',
                     total_count: result.totalRecipients,
                     kakao_success_count: result.kakaoSuccessCount,
                     sms_success_count: result.smsSuccessCount,
@@ -133,14 +136,14 @@ class QueueService {
                     recipient_details: request.recipients,
                     aligo_response: result.batchResults,
                 });
-                console.log(`[작업 ${jobId}] 로그 저장 완료`);
+                logger.debug(`[작업 ${jobId}] Supabase 로그 저장 완료`);
             } catch (logError) {
-                console.error(`[작업 ${jobId}] 로그 저장 실패:`, logError);
+                logger.error(`[작업 ${jobId}] Supabase 로그 저장 실패`, logError);
             }
 
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : '알 수 없는 오류';
-            console.error(`[작업 ${jobId}] 처리 실패:`, error);
+            logger.error(`[작업 ${jobId}] 처리 실패`, error);
             this.updateJobStatus(jobId, 'failed', undefined, errorMessage);
             throw error;
         }
@@ -227,7 +230,7 @@ class QueueService {
         }
 
         if (cleaned > 0) {
-            console.log(`[큐] ${cleaned}개의 완료된 작업 정리됨`);
+            logger.info(`${cleaned}개의 완료된 작업 정리됨`);
         }
     }
 }

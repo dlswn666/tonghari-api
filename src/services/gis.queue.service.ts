@@ -4,6 +4,9 @@ import { env } from '../config/env';
 import { gisService } from './gis.service';
 import { supabaseService } from './supabase.service';
 import { GisSyncRequest, GisJobInfo } from '../types/gis.types';
+import { createLogger } from '../utils/logger';
+
+const logger = createLogger('GIS-QUEUE');
 
 /**
  * GIS 수집 큐 서비스
@@ -42,14 +45,15 @@ class GisQueueService {
                 status: 'PROCESSING',
                 progress: 0
             });
+            logger.info(`GIS 작업 추가: ${jobId} (필지 수: ${request.addresses.length})`);
         } catch (error) {
-            console.error('sync_jobs 등록 실패:', error);
+            logger.error(`sync_jobs 등록 실패 (${jobId})`, error);
         }
 
         this.queue.add(async () => {
             await this.processSyncJob(jobId, request);
         }).catch(err => {
-            console.error(`GIS Job ${jobId} 실패:`, err);
+            logger.error(`GIS 작업 ${jobId} 치명적 오류`, err);
             this.updateJobStatus(jobId, { status: 'failed', error: err.message });
         });
 
@@ -60,14 +64,22 @@ class GisQueueService {
         const job = this.jobs.get(jobId);
         if (!job) return;
 
+        logger.info(`[GIS ${jobId}] 수집 프로세스 시작`);
         this.updateJobStatus(jobId, { status: 'processing', startedAt: new Date() });
 
         for (let i = 0; i < request.addresses.length; i++) {
             const address = request.addresses[i];
+            const currentIndex = i + 1;
+            
             try {
+                logger.debug(`[GIS ${jobId}] (${currentIndex}/${job.totalCount}) 주소 처리 중: ${address}`);
+
                 // Step 1: Geocoding (Address -> PNU)
                 const geocodeData = await gisService.getPNUFromAddress(address);
-                if (!geocodeData) continue;
+                if (!geocodeData) {
+                    logger.warn(`[GIS ${jobId}] (${currentIndex}/${job.totalCount}) 지오코딩 실패: ${address}`);
+                    continue;
+                }
                 
                 // 실제로는 브이월드 API 사양에 맞춰 PNU를 보충 수집하는 로직 필요
                 const pnu = geocodeData.pnu; 
@@ -78,6 +90,11 @@ class GisQueueService {
                 job.processedCount++;
                 const progress = Math.round((job.processedCount / job.totalCount) * 100);
                 
+                // 10% 단위로 또는 마지막일 때 로깅
+                if (progress % 10 === 0 || job.processedCount === job.totalCount) {
+                    logger.info(`[GIS ${jobId}] 진행 중: ${progress}% (${job.processedCount}/${job.totalCount})`);
+                }
+
                 // Supabase 상태 업데이트
                 // @ts-ignore
                 await (supabaseService as any).client.from('sync_jobs').update({
@@ -86,10 +103,11 @@ class GisQueueService {
                 }).eq('id', jobId);
 
             } catch (err) {
-                console.error(`주소 처리 실패 (${address}):`, err);
+                logger.error(`[GIS ${jobId}] 주소 처리 오류 (${address})`, err);
             }
         }
 
+        logger.info(`[GIS ${jobId}] 모든 필지 수집 완료`);
         this.updateJobStatus(jobId, { status: 'completed', completedAt: new Date() });
         // @ts-ignore
         await (supabaseService as any).client.from('sync_jobs').update({

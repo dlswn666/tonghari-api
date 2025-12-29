@@ -1,6 +1,9 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { env } from '../config/env';
 import { AlimtalkLogInput, AlimtalkTemplate, PricingMap } from '../types/alimtalk.types';
+import { createLogger } from '../utils/logger';
+
+const logger = createLogger('SUPABASE');
 
 /**
  * Supabase 서비스
@@ -36,7 +39,7 @@ class SupabaseService {
 
             return data.decrypted_secret;
         } catch (error) {
-            console.error('Vault 조회 오류:', error);
+            logger.error(`Vault 조회 오류 (unionId: ${unionId})`, error);
             return null;
         }
     }
@@ -54,13 +57,13 @@ class SupabaseService {
 
             if (error || !data) {
                 // Vault에서 조회 실패 시 환경 변수 사용
-                console.warn('Vault에서 기본 Sender Key 조회 실패, 환경 변수 사용');
+                logger.warn('Vault에서 기본 Sender Key 조회 실패, 환경 변수 사용');
                 return env.DEFAULT_SENDER_KEY;
             }
 
             return data.decrypted_secret;
         } catch (error) {
-            console.error('기본 Sender Key 조회 오류:', error);
+            logger.error('기본 Sender Key 조회 오류', error);
             return env.DEFAULT_SENDER_KEY;
         }
     }
@@ -82,7 +85,7 @@ class SupabaseService {
 
             return data.kakao_channel_id;
         } catch (error) {
-            console.error('조합 채널명 조회 오류:', error);
+            logger.error(`조합 채널명 조회 오류 (unionId: ${unionId})`, error);
             return env.DEFAULT_CHANNEL_NAME;
         }
     }
@@ -115,7 +118,7 @@ class SupabaseService {
             .single();
 
         if (error) {
-            console.error('알림톡 로그 저장 오류:', error);
+            logger.error('알림톡 로그 저장 오류', error);
             throw new Error('알림톡 로그 저장에 실패했습니다.');
         }
 
@@ -201,7 +204,7 @@ class SupabaseService {
             .select('id');
 
         if (error) {
-            console.error('템플릿 삭제 오류:', error);
+            logger.error('템플릿 삭제 오류', error);
             return 0;
         }
 
@@ -221,13 +224,13 @@ class SupabaseService {
                 .single();
 
             if (error || !data) {
-                console.error(`템플릿 조회 실패: ${templateCode}`, error);
+                logger.error(`템플릿 조회 실패: ${templateCode}`, error);
                 return null;
             }
 
             return data as AlimtalkTemplate;
         } catch (error) {
-            console.error('템플릿 조회 오류:', error);
+            logger.error(`템플릿 조회 오류 (${templateCode})`, error);
             return null;
         }
     }
@@ -239,7 +242,7 @@ class SupabaseService {
         const { data, error } = await this.client.rpc('get_current_pricing');
 
         if (error || !data) {
-            console.warn('단가 조회 실패, 기본값 사용');
+            logger.warn('단가 조회 실패, 기본값 사용');
             return {
                 KAKAO: 15,
                 SMS: 20,

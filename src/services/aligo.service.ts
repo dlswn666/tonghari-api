@@ -5,6 +5,9 @@ import { supabaseService } from './supabase.service';
 import { SendAlimtalkRequest, AlimtalkTemplate, Recipient } from '../types/alimtalk.types';
 import { AligoSendResponse, AligoTemplateListResponse, SenderKeyInfo } from '../types/aligo.types';
 import { formatPhoneNumber } from '../utils/phone';
+import { createLogger } from '../utils/logger';
+
+const logger = createLogger('ALIGO');
 
 const ALIGO_BASE_URL = 'https://kakaoapi.aligo.in';
 
@@ -242,16 +245,16 @@ class AligoService {
 
             const result = response.data;
 
-            console.log(`[배치 ${batchIndex + 1}] 알리고 API 응답:`, JSON.stringify(result, null, 2));
+            logger.debug(`[배치 ${batchIndex + 1}] API 응답: ${JSON.stringify(result)}`);
 
             // 응답 분석
             if (result.code === 0 && result.info) {
                 const kakaoSuccessCount = result.info.scnt || 0;
                 const failCount = result.info.fcnt || 0;
-                const smsSuccessCount = 0; // 상세 결과에서 확인 필요
-                const actualCost = result.info.total || 0; // 알리고 응답의 실제 비용
+                const smsSuccessCount = 0; 
+                const actualCost = result.info.total || 0; 
 
-                console.log(`[배치 ${batchIndex + 1}] 실제 비용: ${actualCost}원`);
+                logger.info(`[배치 ${batchIndex + 1}] 발송 완료 (성공: ${kakaoSuccessCount}, 실패: ${failCount}, 비용: ${actualCost}원)`);
 
                 return {
                     batchIndex,
@@ -263,7 +266,7 @@ class AligoService {
                     aligoResponse: result,
                 };
             } else {
-                console.error(`[배치 ${batchIndex + 1}] 알리고 API 오류:`, result.message);
+                logger.error(`[배치 ${batchIndex + 1}] API 오류: ${result.message}`, result);
                 return {
                     batchIndex,
                     success: false,
@@ -277,7 +280,7 @@ class AligoService {
             }
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : '알 수 없는 오류';
-            console.error(`[배치 ${batchIndex + 1}] 알리고 API 호출 오류:`, error);
+            logger.error(`[배치 ${batchIndex + 1}] API 호출 예외 발생`, error);
             return {
                 batchIndex,
                 success: false,
@@ -303,7 +306,7 @@ class AligoService {
         const template = await supabaseService.getTemplateByCode(templateCode);
         
         if (!template) {
-            console.error(`[알림톡 발송] 템플릿을 찾을 수 없음: ${templateCode}`);
+            logger.error(`[알림톡 발송] 템플릿을 찾을 수 없음: ${templateCode}`);
             return {
                 success: false,
                 totalRecipients: recipients.length,
@@ -316,12 +319,8 @@ class AligoService {
             };
         }
 
-        console.log(`[알림톡 발송] 템플릿 정보 조회 완료: ${templateCode}`);
-        console.log(`  - 템플릿명: ${template.template_name}`);
-        console.log(`  - 템플릿 타입: ${template.template_type || 'N/A'}`);
-        console.log(`  - 강조 유형: ${template.template_em_type || 'N/A'}`);
-        console.log(`  - 강조 제목: ${template.template_title || 'N/A'}`);
-        console.log(`  - 버튼 수: ${template.buttons?.length || 0}개`);
+        logger.info(`[알림톡 발송] 템플릿 사용: ${template.template_name} (${templateCode})`);
+        logger.debug(`  - 유형: ${template.template_type}, 강조: ${template.template_em_type}`);
 
         // 템플릿에서 title 생성 (템플릿명 사용)
         const title = template.template_name;
@@ -333,7 +332,7 @@ class AligoService {
         const batches = this.chunkArray(recipients, BATCH_SIZE);
         const totalBatches = batches.length;
 
-        console.log(`[알림톡 발송] 총 ${recipients.length}명, ${totalBatches}개 배치로 분할`);
+        logger.info(`[알림톡 발송] 총 ${recipients.length}명, ${totalBatches}개 배치 실행`);
 
         const batchResults: BatchResult[] = [];
         let totalKakaoSuccess = 0;
@@ -344,8 +343,6 @@ class AligoService {
         // 순차적으로 배치 처리 (병렬 처리 시 알리고 API 부하 고려)
         for (let i = 0; i < batches.length; i++) {
             const batch = batches[i];
-            console.log(`[배치 ${i + 1}/${totalBatches}] ${batch.length}명 발송 시작`);
-
             const result = await this.sendBatch(batch, templateCode, title, senderKeyInfo, i, template);
 
             batchResults.push(result);
@@ -363,9 +360,7 @@ class AligoService {
         // 전체 성공 여부 (모든 배치가 성공해야 전체 성공)
         const allSuccess = batchResults.every((r) => r.success);
 
-        console.log(
-            `[알림톡 발송 완료] 성공: ${totalKakaoSuccess}, SMS: ${totalSmsSuccess}, 실패: ${totalFail}, 비용: ${totalActualCost}원`
-        );
+        logger.info(`[알림톡 발송 완료] 총 성공: ${totalKakaoSuccess}, 실패: ${totalFail}, 비용: ${totalActualCost}원`);
 
         return {
             success: allSuccess,
@@ -399,12 +394,12 @@ class AligoService {
 
             const result = response.data;
 
-            console.log('알리고 템플릿 조회 응답:', JSON.stringify(result, null, 2));
-
             if (result.code !== 0 || !result.list) {
-                console.error('템플릿 조회 실패:', result.message);
+                logger.error(`템플릿 조회 실패: ${result.message}`);
                 return [];
             }
+
+            logger.info(`템플릿 목록 동기화 완료 (${result.list.length}개)`);
 
             // 알리고 템플릿을 내부 형식으로 변환 (알리고 API 응답 구조 그대로 저장)
             return result.list.map((template) => ({

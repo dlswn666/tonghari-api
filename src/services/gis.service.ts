@@ -1,6 +1,9 @@
 import axios from 'axios';
 import { env } from '../config/env';
 import supabaseService from './supabase.service';
+import { createLogger } from '../utils/logger';
+
+const logger = createLogger('GIS-API');
 
 /**
  * GIS 및 공공데이터 수집 서비스
@@ -43,7 +46,7 @@ class GisService {
             }
             return null;
         } catch (error) {
-            console.error('Geocoder API 오류:', error);
+            logger.error(`Geocoder API 오류 (주소: ${address})`, error);
             return null;
         }
     }
@@ -68,7 +71,7 @@ class GisService {
             });
             return response.data;
         } catch (error) {
-            console.error('Vworld Data API 오류:', error);
+            logger.error(`Vworld Data API 오류 (PNU: ${pnu})`, error);
             return null;
         }
     }
@@ -97,7 +100,7 @@ class GisService {
             });
             return response.data.response?.body?.items?.item || [];
         } catch (error) {
-            console.error('건축물대장 표제부 조회 오류:', error);
+            logger.error(`건축물대장 표제부 조회 오류 (PNU: ${pnu})`, error);
             return [];
         }
     }
@@ -126,7 +129,7 @@ class GisService {
             });
             return response.data.response?.body?.items?.item || [];
         } catch (error) {
-            console.error('건축물대장 전유부 조회 오류:', error);
+            logger.error(`건축물대장 전유부 조회 오류 (PNU: ${pnu})`, error);
             return [];
         }
     }
@@ -150,7 +153,7 @@ class GisService {
             });
             return response.data.response?.body?.items?.item || [];
         } catch (error) {
-            console.error(`${type} 소유자 정보 조회 오류:`, error);
+            logger.error(`${type} 소유자 정보 조회 오류 (PNU: ${pnu})`, error);
             return [];
         }
     }
