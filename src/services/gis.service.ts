@@ -13,7 +13,7 @@ class GisService {
     private dataPortalApiKey: string;
 
     constructor() {
-        this.vworldApiKey = env.VWORLD_API_KEY;
+        this.vworldApiKey = env.V_WORLD_API_KEY;
         this.dataPortalApiKey = env.DATA_PORTAL_API_KEY;
     }
 
@@ -21,7 +21,7 @@ class GisService {
      * 주소 -> PNU 변환 및 좌표 획득 (Vworld Geocoder)
      */
     async getPNUFromAddress(address: string): Promise<{ pnu: string; x: string; y: string } | null> {
-        if (!this.vworldApiKey) throw new Error('VWORLD_API_KEY is not configured.');
+        if (!this.vworldApiKey) throw new Error('V_WORLD_API_KEY is not configured.');
 
         try {
             const response = await axios.get('https://api.vworld.kr/req/address', {
@@ -32,8 +32,8 @@ class GisService {
                     address: address,
                     type: 'ROAD', // 도로명 주소 기반
                     key: this.vworldApiKey,
-                    format: 'json'
-                }
+                    format: 'json',
+                },
             });
 
             const data = response.data;
@@ -55,7 +55,7 @@ class GisService {
      * PNU -> GeoJSON 경계 데이터 획득 (Vworld Data API)
      */
     async getGeoJSON(pnu: string): Promise<any> {
-        if (!this.vworldApiKey) throw new Error('VWORLD_API_KEY is not configured.');
+        if (!this.vworldApiKey) throw new Error('V_WORLD_API_KEY is not configured.');
 
         try {
             const response = await axios.get('https://api.vworld.kr/req/data', {
@@ -66,8 +66,8 @@ class GisService {
                     key: this.vworldApiKey,
                     format: 'json',
                     domain: 'localhost',
-                    attrFilter: `pnu:like:${pnu}`
-                }
+                    attrFilter: `pnu:like:${pnu}`,
+                },
             });
             return response.data;
         } catch (error) {
@@ -81,7 +81,7 @@ class GisService {
      */
     async getBuildingTitle(pnu: string): Promise<any[]> {
         if (!this.dataPortalApiKey) throw new Error('DATA_PORTAL_API_KEY is not configured.');
-        
+
         try {
             const bcode = pnu.substring(0, 10);
             const bun = pnu.substring(11, 15);
@@ -95,8 +95,8 @@ class GisService {
                     bun: bun,
                     ji: ji,
                     numOfRows: 100,
-                    _type: 'json'
-                }
+                    _type: 'json',
+                },
             });
             return response.data.response?.body?.items?.item || [];
         } catch (error) {
@@ -124,8 +124,8 @@ class GisService {
                     bun: bun,
                     ji: ji,
                     numOfRows: 1000, // 최대치
-                    _type: 'json'
-                }
+                    _type: 'json',
+                },
             });
             return response.data.response?.body?.items?.item || [];
         } catch (error) {
@@ -138,9 +138,10 @@ class GisService {
      * 토지/건축물 소유자 정보 수집
      */
     async getOwnerInfo(pnu: string, type: 'LAND' | 'BUILDING'): Promise<any[]> {
-        const endpoint = type === 'LAND' 
-            ? 'http://apis.data.go.kr/1611000/LndkndOwnerInfoService/getLndkndOwnerInfo'
-            : 'http://apis.data.go.kr/1611000/ArchOwnerInfoService/getArchOwnerInfo';
+        const endpoint =
+            type === 'LAND'
+                ? 'http://apis.data.go.kr/1611000/LndkndOwnerInfoService/getLndkndOwnerInfo'
+                : 'http://apis.data.go.kr/1611000/ArchOwnerInfoService/getArchOwnerInfo';
 
         try {
             const response = await axios.get(endpoint, {
@@ -148,8 +149,8 @@ class GisService {
                     serviceKey: this.dataPortalApiKey,
                     pnu: pnu,
                     numOfRows: 100,
-                    _type: 'json'
-                }
+                    _type: 'json',
+                },
             });
             return response.data.response?.body?.items?.item || [];
         } catch (error) {
