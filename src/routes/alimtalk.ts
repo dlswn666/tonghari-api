@@ -23,16 +23,16 @@ router.post('/send', async (req: Request, res: Response, next: NextFunction) => 
 
         // 필수 파라미터 검증
         if (!body.unionId || !body.templateCode || !body.recipients || body.recipients.length === 0) {
-            sendError(res, '필수 파라미터가 누락되었습니다.', 'INVALID_PARAMS', 400);
+            sendError(res, 'Required parameters are missing.', 'INVALID_PARAMS', 400);
             return;
         }
 
-        console.log(`알림톡 발송 요청: 템플릿=${body.templateCode}, 수신자=${body.recipients.length}명`);
+        console.log(`Alimtalk send request: template=${body.templateCode}, recipients=${body.recipients.length}`);
 
         // 큐 상태 확인
         const queueStatus = queueService.getQueueStatus();
         if (queueStatus.isFull) {
-            sendError(res, '처리 대기열이 가득 찼습니다. 잠시 후 다시 시도해주세요.', 'QUEUE_FULL', 503);
+            sendError(res, 'Queue is full. Please try again later.', 'QUEUE_FULL', 503);
             return;
         }
 
@@ -40,18 +40,18 @@ router.post('/send', async (req: Request, res: Response, next: NextFunction) => 
         const jobInfo = await queueService.addJob(body);
 
         if (!jobInfo) {
-            sendError(res, '작업을 추가할 수 없습니다.', 'QUEUE_ERROR', 500);
+            sendError(res, 'Failed to add job to queue.', 'QUEUE_ERROR', 500);
             return;
         }
 
-        console.log(`알림톡 발송 작업 추가됨: jobId=${jobInfo.jobId}`);
+        console.log(`Alimtalk job added: jobId=${jobInfo.jobId}`);
 
         // 즉시 응답 (비동기 처리)
         sendSuccess(res, {
             jobId: jobInfo.jobId,
             status: jobInfo.status,
             recipientCount: jobInfo.recipientCount,
-            message: '발송 요청이 접수되었습니다. 상태 조회 API를 통해 결과를 확인하세요.',
+            message: 'Send request has been accepted. Please check the result via status API.',
             queueStatus: {
                 pending: queueStatus.pending,
                 running: queueStatus.running,
@@ -75,17 +75,17 @@ router.post('/send-sync', async (req: Request, res: Response, next: NextFunction
 
         // 필수 파라미터 검증
         if (!body.unionId || !body.templateCode || !body.recipients || body.recipients.length === 0) {
-            sendError(res, '필수 파라미터가 누락되었습니다.', 'INVALID_PARAMS', 400);
+            sendError(res, 'Required parameters are missing.', 'INVALID_PARAMS', 400);
             return;
         }
 
         // 수신자 수 제한 (동기 처리는 500건까지만)
         if (body.recipients.length > 500) {
-            sendError(res, '동기 처리는 500건까지만 가능합니다. /send 엔드포인트를 사용하세요.', 'TOO_MANY_RECIPIENTS', 400);
+            sendError(res, 'Sync processing supports up to 500 recipients. Please use /send endpoint.', 'TOO_MANY_RECIPIENTS', 400);
             return;
         }
 
-        console.log(`알림톡 동기 발송 요청: 템플릿=${body.templateCode}, 수신자=${body.recipients.length}명`);
+        console.log(`Alimtalk sync send request: template=${body.templateCode}, recipients=${body.recipients.length}`);
 
         // 알리고 API 호출
         const aligoResult = await aligoService.sendAlimtalk(body);
@@ -117,7 +117,7 @@ router.post('/send-sync', async (req: Request, res: Response, next: NextFunction
             aligo_response: aligoResult.batchResults,
         });
 
-        console.log(`알림톡 동기 발송 완료: 로그ID=${logId}, 성공=${aligoResult.kakaoSuccessCount}, 실패=${aligoResult.failCount}`);
+        console.log(`Alimtalk sync send completed: logId=${logId}, success=${aligoResult.kakaoSuccessCount}, fail=${aligoResult.failCount}`);
 
         sendSuccess(res, {
             logId,
@@ -143,14 +143,14 @@ router.get('/send/status/:jobId', async (req: Request, res: Response, next: Next
         const { jobId } = req.params;
 
         if (!jobId) {
-            sendError(res, 'jobId가 필요합니다.', 'INVALID_PARAMS', 400);
+            sendError(res, 'jobId is required.', 'INVALID_PARAMS', 400);
             return;
         }
 
         const jobInfo = queueService.getJobStatus(jobId);
 
         if (!jobInfo) {
-            sendError(res, '작업을 찾을 수 없습니다.', 'JOB_NOT_FOUND', 404);
+            sendError(res, 'Job not found.', 'JOB_NOT_FOUND', 404);
             return;
         }
 
@@ -196,11 +196,11 @@ router.get('/queue/status', async (req: Request, res: Response, next: NextFuncti
  */
 router.post('/sync-templates', async (req: Request, res: Response, next: NextFunction) => {
     try {
-        console.log('템플릿 동기화 시작');
+        console.log('Template sync started');
 
         // 알리고에서 템플릿 목록 조회
         const aligoTemplates = await aligoService.getTemplateList();
-        console.log(`알리고에서 ${aligoTemplates.length}개 템플릿 조회`);
+        console.log(`Fetched ${aligoTemplates.length} templates from Aligo`);
 
         if (aligoTemplates.length === 0) {
             sendSuccess(res, {
@@ -228,7 +228,7 @@ router.post('/sync-templates', async (req: Request, res: Response, next: NextFun
             syncedAt: new Date().toISOString(),
         };
 
-        console.log('템플릿 동기화 완료:', result);
+        console.log('Template sync completed:', result);
 
         sendSuccess(res, result);
     } catch (error) {

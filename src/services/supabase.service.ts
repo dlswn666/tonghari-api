@@ -39,7 +39,7 @@ class SupabaseService {
 
             return data.decrypted_secret;
         } catch (error) {
-            logger.error(`Vault 조회 오류 (unionId: ${unionId})`, error);
+            logger.error(`Vault lookup error (unionId: ${unionId})`, error);
             return null;
         }
     }
@@ -57,13 +57,13 @@ class SupabaseService {
 
             if (error || !data) {
                 // Vault에서 조회 실패 시 환경 변수 사용
-                logger.warn('Vault에서 기본 Sender Key 조회 실패, 환경 변수 사용');
+                logger.warn('Failed to fetch default Sender Key from Vault, using environment variable');
                 return env.DEFAULT_SENDER_KEY;
             }
 
             return data.decrypted_secret;
         } catch (error) {
-            logger.error('기본 Sender Key 조회 오류', error);
+            logger.error('Error fetching default Sender Key', error);
             return env.DEFAULT_SENDER_KEY;
         }
     }
@@ -85,7 +85,7 @@ class SupabaseService {
 
             return data.kakao_channel_id;
         } catch (error) {
-            logger.error(`조합 채널명 조회 오류 (unionId: ${unionId})`, error);
+            logger.error(`Error fetching union channel name (unionId: ${unionId})`, error);
             return env.DEFAULT_CHANNEL_NAME;
         }
     }
@@ -118,8 +118,8 @@ class SupabaseService {
             .single();
 
         if (error) {
-            logger.error('알림톡 로그 저장 오류', error);
-            throw new Error('알림톡 로그 저장에 실패했습니다.');
+            logger.error('Failed to save alimtalk log', error);
+            throw new Error('Failed to save alimtalk log.');
         }
 
         return data.id;
@@ -204,7 +204,7 @@ class SupabaseService {
             .select('id');
 
         if (error) {
-            logger.error('템플릿 삭제 오류', error);
+            logger.error('Template deletion error', error);
             return 0;
         }
 
@@ -224,13 +224,13 @@ class SupabaseService {
                 .single();
 
             if (error || !data) {
-                logger.error(`템플릿 조회 실패: ${templateCode}`, error);
+                logger.error(`Template fetch failed: ${templateCode}`, error);
                 return null;
             }
 
             return data as AlimtalkTemplate;
         } catch (error) {
-            logger.error(`템플릿 조회 오류 (${templateCode})`, error);
+            logger.error(`Template fetch error (${templateCode})`, error);
             return null;
         }
     }
@@ -242,7 +242,7 @@ class SupabaseService {
         const { data, error } = await this.client.rpc('get_current_pricing');
 
         if (error || !data) {
-            logger.warn('단가 조회 실패, 기본값 사용');
+            logger.warn('Pricing fetch failed, using default values');
             return {
                 KAKAO: 15,
                 SMS: 20,

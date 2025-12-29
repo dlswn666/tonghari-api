@@ -38,15 +38,15 @@ class QueueService {
 
         // 큐 이벤트 리스너
         this.queue.on('active', () => {
-            logger.debug(`작업 활성화. 대기: ${this.queue.pending}, 실행 중: ${this.queue.size}`);
+            logger.debug(`Job activated. Pending: ${this.queue.pending}, Running: ${this.queue.size}`);
         });
 
         this.queue.on('idle', () => {
-            logger.info('모든 작업 완료 (Idle)');
+            logger.info('All jobs completed (Idle)');
         });
 
         this.queue.on('error', (error) => {
-            logger.error('큐 오류 발생', error);
+            logger.error('Queue error occurred', error);
         });
     }
 
@@ -66,7 +66,7 @@ class QueueService {
     async addJob(request: SendAlimtalkRequest): Promise<JobInfo | null> {
         // 큐 크기 확인
         if (this.isFull()) {
-            logger.warn('큐가 가득 찼습니다. 작업 추가 거부.');
+            logger.warn('Queue is full. Job addition rejected.');
             return null;
         }
 
@@ -87,14 +87,14 @@ class QueueService {
         // 작업 저장
         this.jobs.set(jobId, jobInfo);
 
-        logger.info(`작업 추가: ${jobId} (수신자: ${request.recipients.length}명, 템플릿: ${request.templateCode})`);
+        logger.info(`Job added: ${jobId} (Recipients: ${request.recipients.length}, Template: ${request.templateCode})`);
 
         // 큐에 작업 추가 (비동기 처리)
         this.queue.add(async () => {
             await this.processJob(jobId, request);
         }).catch((error) => {
-            logger.error(`작업 실패 (${jobId})`, error);
-            this.updateJobStatus(jobId, 'failed', undefined, error instanceof Error ? error.message : '알 수 없는 오류');
+            logger.error(`Job failed (${jobId})`, error);
+            this.updateJobStatus(jobId, 'failed', undefined, error instanceof Error ? error.message : 'Unknown error');
         });
 
         return jobInfo;
@@ -104,7 +104,7 @@ class QueueService {
      * 작업 처리
      */
     private async processJob(jobId: string, request: SendAlimtalkRequest): Promise<void> {
-        logger.info(`[작업 ${jobId}] 처리 시작`);
+        logger.info(`[Job ${jobId}] Processing started`);
 
         // 상태 업데이트: processing
         this.updateJobStatus(jobId, 'processing');
@@ -116,7 +116,7 @@ class QueueService {
             // 상태 업데이트: completed
             this.updateJobStatus(jobId, 'completed', result);
 
-            logger.info(`[작업 ${jobId}] 처리 완료. 성공: ${result.kakaoSuccessCount}, 실패: ${result.failCount}, 비용: ${result.totalActualCost}원`);
+            logger.info(`[Job ${jobId}] Processing completed. Success: ${result.kakaoSuccessCount}, Fail: ${result.failCount}, Cost: ${result.totalActualCost} KRW`);
 
             // Supabase에 로그 저장
             try {
@@ -136,14 +136,14 @@ class QueueService {
                     recipient_details: request.recipients,
                     aligo_response: result.batchResults,
                 });
-                logger.debug(`[작업 ${jobId}] Supabase 로그 저장 완료`);
+                logger.debug(`[Job ${jobId}] Supabase log saved successfully`);
             } catch (logError) {
-                logger.error(`[작업 ${jobId}] Supabase 로그 저장 실패`, logError);
+                logger.error(`[Job ${jobId}] Failed to save log to Supabase`, logError);
             }
 
         } catch (error) {
-            const errorMessage = error instanceof Error ? error.message : '알 수 없는 오류';
-            logger.error(`[작업 ${jobId}] 처리 실패`, error);
+            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+            logger.error(`[Job ${jobId}] Processing failed`, error);
             this.updateJobStatus(jobId, 'failed', undefined, errorMessage);
             throw error;
         }
@@ -230,7 +230,7 @@ class QueueService {
         }
 
         if (cleaned > 0) {
-            logger.info(`${cleaned}개의 완료된 작업 정리됨`);
+            logger.info(`${cleaned} completed jobs cleaned up`);
         }
     }
 }

@@ -21,7 +21,7 @@ class GisService {
      * 주소 -> PNU 변환 및 좌표 획득 (Vworld Geocoder)
      */
     async getPNUFromAddress(address: string): Promise<{ pnu: string; x: string; y: string } | null> {
-        if (!this.vworldApiKey) throw new Error('VWORLD_API_KEY가 설정되지 않았습니다.');
+        if (!this.vworldApiKey) throw new Error('VWORLD_API_KEY is not configured.');
 
         try {
             const response = await axios.get('https://api.vworld.kr/req/address', {
@@ -46,7 +46,7 @@ class GisService {
             }
             return null;
         } catch (error) {
-            logger.error(`Geocoder API 오류 (주소: ${address})`, error);
+            logger.error(`Geocoder API error (address: ${address})`, error);
             return null;
         }
     }
@@ -55,7 +55,7 @@ class GisService {
      * PNU -> GeoJSON 경계 데이터 획득 (Vworld Data API)
      */
     async getGeoJSON(pnu: string): Promise<any> {
-        if (!this.vworldApiKey) throw new Error('VWORLD_API_KEY가 설정되지 않았습니다.');
+        if (!this.vworldApiKey) throw new Error('VWORLD_API_KEY is not configured.');
 
         try {
             const response = await axios.get('https://api.vworld.kr/req/data', {
@@ -71,7 +71,7 @@ class GisService {
             });
             return response.data;
         } catch (error) {
-            logger.error(`Vworld Data API 오류 (PNU: ${pnu})`, error);
+            logger.error(`Vworld Data API error (PNU: ${pnu})`, error);
             return null;
         }
     }
@@ -80,7 +80,7 @@ class GisService {
      * 표제부 조회 (공공데이터포털)
      */
     async getBuildingTitle(pnu: string): Promise<any[]> {
-        if (!this.dataPortalApiKey) throw new Error('DATA_PORTAL_API_KEY가 설정되지 않았습니다.');
+        if (!this.dataPortalApiKey) throw new Error('DATA_PORTAL_API_KEY is not configured.');
         
         try {
             const bcode = pnu.substring(0, 10);
@@ -100,7 +100,7 @@ class GisService {
             });
             return response.data.response?.body?.items?.item || [];
         } catch (error) {
-            logger.error(`건축물대장 표제부 조회 오류 (PNU: ${pnu})`, error);
+            logger.error(`Building registry title info fetch error (PNU: ${pnu})`, error);
             return [];
         }
     }
@@ -109,7 +109,7 @@ class GisService {
      * 전유부 조회 (호수 리스트)
      */
     async getBuildingUnits(pnu: string): Promise<any[]> {
-        if (!this.dataPortalApiKey) throw new Error('DATA_PORTAL_API_KEY가 설정되지 않았습니다.');
+        if (!this.dataPortalApiKey) throw new Error('DATA_PORTAL_API_KEY is not configured.');
 
         try {
             const bcode = pnu.substring(0, 10);
@@ -129,7 +129,7 @@ class GisService {
             });
             return response.data.response?.body?.items?.item || [];
         } catch (error) {
-            logger.error(`건축물대장 전유부 조회 오류 (PNU: ${pnu})`, error);
+            logger.error(`Building registry unit info fetch error (PNU: ${pnu})`, error);
             return [];
         }
     }
@@ -153,7 +153,7 @@ class GisService {
             });
             return response.data.response?.body?.items?.item || [];
         } catch (error) {
-            logger.error(`${type} 소유자 정보 조회 오류 (PNU: ${pnu})`, error);
+            logger.error(`${type} owner info fetch error (PNU: ${pnu})`, error);
             return [];
         }
     }

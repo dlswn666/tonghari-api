@@ -25,7 +25,7 @@ class AuthService {
         if (!token) {
             return {
                 valid: false,
-                error: '토큰이 제공되지 않았습니다.',
+                error: 'Token was not provided.',
                 errorCode: 'NO_TOKEN',
             };
         }
@@ -38,7 +38,7 @@ class AuthService {
             if (!decoded.unionId || !decoded.userId) {
                 return {
                     valid: false,
-                    error: '토큰에 필수 정보가 누락되었습니다.',
+                    error: 'Required information is missing in token.',
                     errorCode: 'MALFORMED_TOKEN',
                 };
             }
@@ -51,7 +51,7 @@ class AuthService {
             if (error instanceof jwt.TokenExpiredError) {
                 return {
                     valid: false,
-                    error: '토큰이 만료되었습니다.',
+                    error: 'Token has expired.',
                     errorCode: 'EXPIRED_TOKEN',
                 };
             }
@@ -59,14 +59,14 @@ class AuthService {
             if (error instanceof jwt.JsonWebTokenError) {
                 return {
                     valid: false,
-                    error: '유효하지 않은 토큰입니다.',
+                    error: 'Invalid token.',
                     errorCode: 'INVALID_TOKEN',
                 };
             }
 
             return {
                 valid: false,
-                error: '토큰 검증 중 오류가 발생했습니다.',
+                error: 'An error occurred during token verification.',
                 errorCode: 'INVALID_TOKEN',
             };
         }

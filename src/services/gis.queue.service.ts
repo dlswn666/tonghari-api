@@ -45,15 +45,15 @@ class GisQueueService {
                 status: 'PROCESSING',
                 progress: 0
             });
-            logger.info(`GIS 작업 추가: ${jobId} (필지 수: ${request.addresses.length})`);
+            logger.info(`GIS job added: ${jobId} (parcels: ${request.addresses.length})`);
         } catch (error) {
-            logger.error(`sync_jobs 등록 실패 (${jobId})`, error);
+            logger.error(`sync_jobs registration failed (${jobId})`, error);
         }
 
         this.queue.add(async () => {
             await this.processSyncJob(jobId, request);
         }).catch(err => {
-            logger.error(`GIS 작업 ${jobId} 치명적 오류`, err);
+            logger.error(`GIS job ${jobId} fatal error`, err);
             this.updateJobStatus(jobId, { status: 'failed', error: err.message });
         });
 
@@ -64,7 +64,7 @@ class GisQueueService {
         const job = this.jobs.get(jobId);
         if (!job) return;
 
-        logger.info(`[GIS ${jobId}] 수집 프로세스 시작`);
+        logger.info(`[GIS ${jobId}] Collection process started`);
         this.updateJobStatus(jobId, { status: 'processing', startedAt: new Date() });
 
         for (let i = 0; i < request.addresses.length; i++) {
@@ -72,12 +72,12 @@ class GisQueueService {
             const currentIndex = i + 1;
             
             try {
-                logger.debug(`[GIS ${jobId}] (${currentIndex}/${job.totalCount}) 주소 처리 중: ${address}`);
+                logger.debug(`[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Processing address: ${address}`);
 
                 // Step 1: Geocoding (Address -> PNU)
                 const geocodeData = await gisService.getPNUFromAddress(address);
                 if (!geocodeData) {
-                    logger.warn(`[GIS ${jobId}] (${currentIndex}/${job.totalCount}) 지오코딩 실패: ${address}`);
+                    logger.warn(`[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Geocoding failed: ${address}`);
                     continue;
                 }
                 
@@ -92,7 +92,7 @@ class GisQueueService {
                 
                 // 10% 단위로 또는 마지막일 때 로깅
                 if (progress % 10 === 0 || job.processedCount === job.totalCount) {
-                    logger.info(`[GIS ${jobId}] 진행 중: ${progress}% (${job.processedCount}/${job.totalCount})`);
+                    logger.info(`[GIS ${jobId}] Progress: ${progress}% (${job.processedCount}/${job.totalCount})`);
                 }
 
                 // Supabase 상태 업데이트
@@ -103,11 +103,11 @@ class GisQueueService {
                 }).eq('id', jobId);
 
             } catch (err) {
-                logger.error(`[GIS ${jobId}] 주소 처리 오류 (${address})`, err);
+                logger.error(`[GIS ${jobId}] Address processing error (${address})`, err);
             }
         }
 
-        logger.info(`[GIS ${jobId}] 모든 필지 수집 완료`);
+        logger.info(`[GIS ${jobId}] All parcels collection completed`);
         this.updateJobStatus(jobId, { status: 'completed', completedAt: new Date() });
         // @ts-ignore
         await (supabaseService as any).client.from('sync_jobs').update({

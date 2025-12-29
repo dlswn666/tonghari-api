@@ -25,23 +25,23 @@ app.use(errorHandler);
 
 // 서버 시작
 const server = app.listen(env.PORT, () => {
-    logger.info('알림톡 프록시 서버 시작됨');
-    logger.info(`환경: ${env.NODE_ENV}, 포트: ${env.PORT}`);
+    logger.info('Alimtalk Proxy Server started');
+    logger.info(`Environment: ${env.NODE_ENV}, Port: ${env.PORT}`);
 });
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
-    logger.warn('SIGTERM 시그널 수신. 서버 종료 중...');
+    logger.warn('SIGTERM signal received. Shutting down server...');
     server.close(() => {
-        logger.info('서버가 정상적으로 종료되었습니다.');
+        logger.info('Server closed successfully');
         process.exit(0);
     });
 });
 
 process.on('SIGINT', () => {
-    logger.warn('SIGINT 시그널 수신. 서버 종료 중...');
+    logger.warn('SIGINT signal received. Shutting down server...');
     server.close(() => {
-        logger.info('서버가 정상적으로 종료되었습니다.');
+        logger.info('Server closed successfully');
         process.exit(0);
     });
 });
