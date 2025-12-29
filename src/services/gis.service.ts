@@ -13,7 +13,7 @@ class GisService {
     private dataPortalApiKey: string;
 
     constructor() {
-        this.vworldApiKey = env.V_WORLD_API_KEY;
+        this.vworldApiKey = env.VWORLD_API_KEY;
         this.dataPortalApiKey = env.DATA_PORTAL_API_KEY;
     }
 
@@ -21,7 +21,7 @@ class GisService {
      * 주소 -> PNU 변환 및 좌표 획득 (Vworld Geocoder)
      */
     async getPNUFromAddress(address: string): Promise<{ pnu: string; x: string; y: string } | null> {
-        if (!this.vworldApiKey) throw new Error('V_WORLD_API_KEY is not configured.');
+        if (!this.vworldApiKey) throw new Error('VWORLD_API_KEY is not configured.');
 
         try {
             const response = await axios.get('https://api.vworld.kr/req/address', {
@@ -55,7 +55,7 @@ class GisService {
      * PNU -> GeoJSON 경계 데이터 획득 (Vworld Data API)
      */
     async getGeoJSON(pnu: string): Promise<any> {
-        if (!this.vworldApiKey) throw new Error('V_WORLD_API_KEY is not configured.');
+        if (!this.vworldApiKey) throw new Error('VWORLD_API_KEY is not configured.');
 
         try {
             const response = await axios.get('https://api.vworld.kr/req/data', {

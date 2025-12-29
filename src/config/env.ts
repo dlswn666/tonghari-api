@@ -46,7 +46,7 @@ export const env = {
     QUEUE_MAX_SIZE: getEnvNumber('QUEUE_MAX_SIZE', 100),
 
     // GIS & Public Data API
-    V_WORLD_API_KEY: process.env.V_WORLD_API_KEY || '',
+    VWORLD_API_KEY: process.env.VWORLD_API_KEY || '',
     DATA_PORTAL_API_KEY: process.env.DATA_PORTAL_API_KEY || '',
 
     // 헬퍼
