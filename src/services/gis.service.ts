@@ -705,200 +705,60 @@ class GisService {
     }
 
     /**
-     * 토지/건축물 소유자 정보 수집
-     * - 토지: Vworld 토지소유정보 WFS API 사용
-     * - 건축물: 공공데이터포털 미제공으로 빈 배열 반환
-     */
-    async getOwnerInfo(pnu: string, type: 'LAND' | 'BUILDING'): Promise<unknown[]> {
-        // 건축물 소유정보는 공공데이터포털에서 미제공
-        if (type === 'BUILDING') {
-            logger.debug(`Building owner info API not available, skipping (PNU: ${pnu})`);
-            return [];
-        }
-
-        // 토지 소유정보는 Vworld API 사용
-        return await this.getLandOwnerInfoFromVworld(pnu);
-    }
-
-    /**
-     * Vworld 토지소유정보 WFS API
-     * https://www.vworld.kr - 토지소유정보조회서비스
-     */
-    async getLandOwnerInfoFromVworld(pnu: string): Promise<unknown[]> {
-        if (!this.vworldApiKey) {
-            logger.debug('VWORLD_API_KEY is not configured for land owner info lookup');
-            return [];
-        }
-
-        if (!pnu || pnu.length < 19) {
-            logger.debug(`Invalid PNU for land owner info lookup: ${pnu}`);
-            return [];
-        }
-
-        try {
-            // Vworld 토지소유정보 WFS API
-            const response = await axios.get('https://api.vworld.kr/ned/wfs/getLndOwnshipInfoWFS', {
-                params: {
-                    service: 'WFS',
-                    version: '1.1.0',
-                    request: 'GetFeature',
-                    typeName: 'lp_ldreg_ownership',
-                    maxFeatures: 100,
-                    outputFormat: 'application/json',
-                    filter: `<Filter><PropertyIsEqualTo><PropertyName>pnu</PropertyName><Literal>${pnu}</Literal></PropertyIsEqualTo></Filter>`,
-                    key: this.vworldApiKey,
-                },
-                timeout: 15000,
-            });
-
-            const data = response.data;
-
-            // GeoJSON FeatureCollection 응답 처리
-            if (data?.features && data.features.length > 0) {
-                logger.debug(`Land owner info found from Vworld for PNU ${pnu}: ${data.features.length} records`);
-                return data.features.map((f: any) => f.properties);
-            }
-
-            // 응답 형식이 다른 경우 (XML to JSON)
-            if (data?.response?.body?.items?.item) {
-                const items = Array.isArray(data.response.body.items.item)
-                    ? data.response.body.items.item
-                    : [data.response.body.items.item];
-                logger.debug(`Land owner info found from Vworld for PNU ${pnu}: ${items.length} records`);
-                return items;
-            }
-
-            logger.debug(`No land owner info found from Vworld for PNU: ${pnu}`);
-            return [];
-        } catch (error: any) {
-            const status = error.response?.status;
-            const statusText = error.response?.statusText;
-            const errorData = error.response?.data;
-
-            logger.error(`Vworld land owner info fetch error (PNU: ${pnu})`, {
-                status,
-                statusText,
-                errorData: typeof errorData === 'string' ? errorData.substring(0, 500) : errorData,
-                message: error.message,
-            });
-            return [];
-        }
-    }
-
-    /**
-     * 토지 면적 조회 (Vworld 연속지적도 API)
+     * Vworld 토지대장 정보 조회 (면적 + 소유자수)
      * @param pnu 필지고유번호 (19자리)
-     * @returns 면적 (m²) 또는 null
+     * @returns 면적(㎡), 소유자수(명) 또는 null
      */
-    async getLandArea(pnu: string): Promise<number | null> {
+    async getLandRegistryInfo(pnu: string): Promise<{ area: number; ownerCount: number } | null> {
         if (!this.vworldApiKey) {
-            logger.debug('VWORLD_API_KEY is not configured for land area lookup');
+            logger.debug('VWORLD_API_KEY is not configured for land registry lookup');
             return null;
         }
 
         if (!pnu || pnu.length < 19) {
-            logger.debug(`Invalid PNU for land area lookup: ${pnu}`);
+            logger.debug(`Invalid PNU for land registry lookup: ${pnu}`);
             return null;
         }
 
         try {
-            // Vworld 연속지적도 API에서 면적 정보 조회
-            const response = await axios.get('https://api.vworld.kr/req/data', {
+            // Vworld 토지대장 API (ladfrlList)
+            const response = await axios.get('https://api.vworld.kr/ned/data/ladfrlList', {
                 params: {
-                    service: 'data',
-                    request: 'GetFeature',
-                    data: 'LP_PA_CBND_BUBUN',
-                    key: this.vworldApiKey,
+                    pnu: pnu,
                     format: 'json',
-                    domain: 'localhost',
-                    attrFilter: `pnu:=:${pnu}`,
-                    geometry: false,
-                    size: 1,
+                    numOfRows: 10,
+                    pageNo: 1,
+                    key: this.vworldApiKey,
+                    domain: 'johapon.kr',
                 },
                 timeout: 15000,
             });
 
             const data = response.data;
 
-            if (data.response?.status === 'OK' && data.response.result?.featureCollection?.features?.length > 0) {
-                const feature = data.response.result.featureCollection.features[0];
-                // 면적 속성명: lndar, area, pnu_ar 등 다양할 수 있음
-                const area = feature.properties?.lndar || feature.properties?.area || feature.properties?.pnu_ar;
-
-                if (area !== undefined && area !== null) {
-                    logger.debug(`Land area found for PNU ${pnu}: ${area} m²`);
-                    return Number(area);
-                }
+            // 응답 에러 체크
+            if (data?.ladfrlVOList?.error) {
+                logger.warn(
+                    `Land registry API error for PNU ${pnu}: ${data.ladfrlVOList.error} - ${data.ladfrlVOList.message}`
+                );
+                return null;
             }
 
-            // 1차 실패 시 토지특성정보 API 시도 (공공데이터포털)
-            return await this.getLandAreaFromDataPortal(pnu);
-        } catch (error: any) {
-            logger.error(`Vworld land area API error (PNU: ${pnu})`, {
-                status: error.response?.status,
-                message: error.message,
-            });
-            // Fallback: 공공데이터포털 토지특성정보 API
-            return await this.getLandAreaFromDataPortal(pnu);
-        }
-    }
+            // 토지대장 정보 추출
+            const list = data?.ladfrlVOList?.ladfrlVOList;
+            if (list && list.length > 0) {
+                const item = list[0];
+                const area = item.lndpclAr ? Number(item.lndpclAr) : 0;
+                const ownerCount = item.cnrsPsnCo ? Number(item.cnrsPsnCo) : 0;
 
-    /**
-     * 토지 면적 조회 (공공데이터포털 토지특성정보 API) - Fallback
-     */
-    async getLandAreaFromDataPortal(pnu: string): Promise<number | null> {
-        if (!this.dataPortalApiKey) {
-            logger.debug('DATA_PORTAL_API_KEY is not configured for land area lookup');
-            return null;
-        }
-
-        try {
-            const pnuParts = this.parsePNU(pnu);
-            if (!pnuParts) return null;
-
-            // 토지특성정보 조회 API
-            const response = await axios.get(
-                'http://apis.data.go.kr/1611000/nsdi/LandCharacteristicsService/getLandCharacteristicsWFS',
-                {
-                    params: {
-                        serviceKey: this.dataPortalApiKey,
-                        pnu: pnu,
-                        format: 'json',
-                        numOfRows: 1,
-                        pageNo: 1,
-                    },
-                    timeout: 15000,
-                }
-            );
-
-            const data = response.data;
-
-            // GeoJSON 형식 응답
-            if (data?.features && data.features.length > 0) {
-                const area = data.features[0].properties?.lndAr;
-                if (area !== undefined && area !== null) {
-                    logger.debug(`Land area found from data.go.kr for PNU ${pnu}: ${area} m²`);
-                    return Number(area);
-                }
+                logger.debug(`Land registry info found for PNU ${pnu}: area=${area}㎡, ownerCount=${ownerCount}명`);
+                return { area, ownerCount };
             }
 
-            // XML to JSON 형식 응답
-            if (data?.response?.body?.items?.item) {
-                const item = Array.isArray(data.response.body.items.item)
-                    ? data.response.body.items.item[0]
-                    : data.response.body.items.item;
-
-                const area = item?.lndAr || item?.pnuAr;
-                if (area !== undefined && area !== null) {
-                    logger.debug(`Land area found from data.go.kr for PNU ${pnu}: ${area} m²`);
-                    return Number(area);
-                }
-            }
-
-            logger.debug(`No land area found from data.go.kr for PNU: ${pnu}`);
+            logger.debug(`No land registry info found for PNU: ${pnu}`);
             return null;
         } catch (error: any) {
-            logger.error(`data.go.kr land area API error (PNU: ${pnu})`, {
+            logger.error(`Vworld land registry API error (PNU: ${pnu})`, {
                 status: error.response?.status,
                 message: error.message,
             });
@@ -923,13 +783,13 @@ class GisService {
         }
 
         try {
-            // Vworld 개별공시지가 WFS API
+            // Vworld 개별공시지가 WFS API (typeName: dt_d150)
             const response = await axios.get('https://api.vworld.kr/ned/wfs/getIndvdLandPriceWFS', {
                 params: {
                     service: 'WFS',
                     version: '1.1.0',
                     request: 'GetFeature',
-                    typeName: 'lt_c_pse_landprice',
+                    typeName: 'dt_d150',
                     maxFeatures: 1,
                     outputFormat: 'application/json',
                     filter: `<Filter><PropertyIsEqualTo><PropertyName>pnu</PropertyName><Literal>${pnu}</Literal></PropertyIsEqualTo></Filter>`,
@@ -940,14 +800,24 @@ class GisService {
 
             const data = response.data;
 
-            // GeoJSON FeatureCollection 응답 처리
+            // JSON 응답 처리 (GeoJSON FeatureCollection)
             if (data?.features && data.features.length > 0) {
                 const feature = data.features[0];
-                const price = feature.properties?.pblntfPclnd; // 개별공시지가 (원/m²)
+                const price = feature.properties?.pblntf_pclnd;
 
                 if (price !== undefined && price !== null) {
                     logger.debug(`Land price found for PNU ${pnu}: ${price} 원/m²`);
                     return Number(price);
+                }
+            }
+
+            // XML 응답 처리 (WFS 기본 응답)
+            if (typeof data === 'string' && data.includes('pblntf_pclnd')) {
+                const priceMatch = data.match(/<sop:pblntf_pclnd>(\d+)<\/sop:pblntf_pclnd>/);
+                if (priceMatch && priceMatch[1]) {
+                    const price = Number(priceMatch[1]);
+                    logger.debug(`Land price found (XML) for PNU ${pnu}: ${price} 원/m²`);
+                    return price;
                 }
             }
 
@@ -1026,28 +896,17 @@ class GisService {
         // 2. 개별공시지가 조회
         const officialPrice = await this.getOfficialLandPrice(pnu);
 
-        // 3. 소유자 수 조회
+        // 3. 토지대장 정보 조회 (면적 + 소유자수)
+        let area: number | null = null;
         let ownerCount = 0;
         try {
-            const landOwners = await this.getOwnerInfo(pnu, 'LAND');
-            if (Array.isArray(landOwners) && landOwners.length > 0) {
-                ownerCount = landOwners.length;
-            } else {
-                const buildingOwners = await this.getOwnerInfo(pnu, 'BUILDING');
-                if (Array.isArray(buildingOwners) && buildingOwners.length > 0) {
-                    ownerCount = buildingOwners.length;
-                }
+            const registryInfo = await this.getLandRegistryInfo(pnu);
+            if (registryInfo) {
+                area = registryInfo.area;
+                ownerCount = registryInfo.ownerCount;
             }
         } catch (error) {
-            logger.warn(`Owner info fetch failed for PNU ${pnu}, continuing with ownerCount=0`);
-        }
-
-        // 4. 면적 조회 (Vworld 연속지적도 API 또는 공공데이터포털 토지특성정보 API)
-        let area: number | null = null;
-        try {
-            area = await this.getLandArea(pnu);
-        } catch (error) {
-            logger.warn(`Land area fetch failed for PNU ${pnu}, continuing with area=null`);
+            logger.warn(`Land registry info fetch failed for PNU ${pnu}, continuing with defaults`);
         }
 
         logger.info(

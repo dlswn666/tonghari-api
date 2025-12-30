@@ -142,40 +142,31 @@ class GisQueueService {
                     // 경계를 못 찾아도 계속 진행 (PNU와 주소는 저장)
                 }
 
-                // Step 2.6: 소유자 정보 조회 (공공데이터 API)
+                // Step 2.6: 토지대장 정보 조회 (면적 + 소유자수) - Vworld API
                 let ownerCount = 0;
+                let area: number | undefined = undefined;
                 try {
-                    // 토지 소유자 정보 조회 시도
-                    const ownerInfo = await gisService.getOwnerInfo(pnu, 'LAND');
-                    if (Array.isArray(ownerInfo) && ownerInfo.length > 0) {
-                        ownerCount = ownerInfo.length;
+                    const registryInfo = await gisService.getLandRegistryInfo(pnu);
+                    if (registryInfo) {
+                        area = registryInfo.area;
+                        ownerCount = registryInfo.ownerCount;
                         logger.info(
-                            `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Owner info found for ${pnu}: ${ownerCount}명`
+                            `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Land registry info found for ${pnu}: area=${area}㎡, ownerCount=${ownerCount}명`
                         );
                     } else {
-                        // 토지 소유자가 없으면 건물 소유자 조회 시도
-                        const buildingOwnerInfo = await gisService.getOwnerInfo(pnu, 'BUILDING');
-                        if (Array.isArray(buildingOwnerInfo) && buildingOwnerInfo.length > 0) {
-                            ownerCount = buildingOwnerInfo.length;
-                            logger.info(
-                                `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Building owner info found for ${pnu}: ${ownerCount}명`
-                            );
-                        } else {
-                            logger.warn(
-                                `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Owner info not found for: ${pnu} (API may be restricted)`
-                            );
-                        }
+                        logger.debug(
+                            `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Land registry info not found for: ${pnu}`
+                        );
                     }
-                } catch (ownerError: any) {
-                    // 소유자 정보 조회 실패 시 로그만 남기고 계속 진행
+                } catch (registryError: any) {
                     logger.warn(
-                        `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Owner info fetch error for ${pnu}: ${
-                            ownerError?.message || 'Unknown error'
+                        `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Land registry fetch error for ${pnu}: ${
+                            registryError?.message || 'Unknown error'
                         }`
                     );
                 }
 
-                // Step 2.7 (NEW): 개별공시지가 조회 (Vworld API)
+                // Step 2.7: 개별공시지가 조회 (Vworld API)
                 let officialPrice: number | null = null;
                 try {
                     officialPrice = await gisService.getOfficialLandPrice(pnu);
@@ -196,11 +187,12 @@ class GisQueueService {
                     );
                 }
 
-                // Step 3: land_lots 테이블에 필지 정보 저장 (경계 데이터 + 소유자 수 + 공시지가 포함)
+                // Step 3: land_lots 테이블에 필지 정보 저장 (경계 데이터 + 면적 + 소유자 수 + 공시지가 포함)
                 const landLotSaved = await supabaseService.upsertLandLot({
                     pnu,
                     address,
                     boundary, // 경계 데이터
+                    area, // 면적 (㎡)
                     owner_count: ownerCount, // 소유자 수
                     official_price: officialPrice ?? undefined, // 개별공시지가
                 });
