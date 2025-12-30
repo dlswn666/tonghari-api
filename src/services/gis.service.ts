@@ -151,6 +151,94 @@ class GisService {
     }
 
     /**
+     * PNU 기반 필지 경계(Polygon) 조회 (연속지적도)
+     * @param pnu 필지 고유번호 (19자리)
+     * @returns GeoJSON Geometry (Polygon 또는 MultiPolygon) 또는 null
+     */
+    async getParcelBoundary(pnu: string): Promise<GeoJSON.Geometry | null> {
+        if (!this.vworldApiKey) throw new Error('VWORLD_API_KEY is not configured.');
+        if (!pnu || pnu.length < 19) {
+            logger.debug(`Invalid PNU for boundary lookup: ${pnu}`);
+            return null;
+        }
+
+        try {
+            // 연속지적도(LP_PA_CBND_BUBUN) 레이어에서 PNU로 필지 경계 조회
+            const response = await axios.get('https://api.vworld.kr/req/data', {
+                params: {
+                    service: 'data',
+                    request: 'GetFeature',
+                    data: 'LP_PA_CBND_BUBUN', // 연속지적도_법정동
+                    key: this.vworldApiKey,
+                    format: 'json',
+                    domain: 'localhost',
+                    attrFilter: `pnu:=:${pnu}`, // PNU로 필터
+                    geometry: true,
+                    size: 1,
+                },
+            });
+
+            const data = response.data;
+            if (data.response?.status === 'OK' && data.response.result?.featureCollection?.features?.length > 0) {
+                const feature = data.response.result.featureCollection.features[0];
+                const geometry = feature.geometry;
+                if (geometry) {
+                    logger.debug(`Boundary found for PNU ${pnu}: ${geometry.type}`);
+                    return geometry as GeoJSON.Geometry;
+                }
+            }
+
+            logger.debug(`No boundary found for PNU: ${pnu}`);
+            return null;
+        } catch (error) {
+            logger.error(`Parcel boundary lookup error (PNU: ${pnu})`, error);
+            return null;
+        }
+    }
+
+    /**
+     * 좌표 기반 필지 경계 조회 (좌표가 포함된 필지의 경계)
+     * getPNUFromCoordinates와 함께 사용하여 PNU와 경계를 동시에 가져올 수 있음
+     */
+    async getParcelBoundaryFromCoordinates(x: string, y: string): Promise<{ pnu: string; boundary: GeoJSON.Geometry } | null> {
+        if (!this.vworldApiKey) throw new Error('VWORLD_API_KEY is not configured.');
+
+        try {
+            // 연속지적도(LP_PA_CBND_BUBUN) 레이어에서 해당 좌표의 필지 정보 조회
+            const response = await axios.get('https://api.vworld.kr/req/data', {
+                params: {
+                    service: 'data',
+                    request: 'GetFeature',
+                    data: 'LP_PA_CBND_BUBUN',
+                    key: this.vworldApiKey,
+                    format: 'json',
+                    domain: 'localhost',
+                    geomFilter: `POINT(${x} ${y})`, // WKT 형식 포인트
+                    geometry: true,
+                    size: 1,
+                },
+            });
+
+            const data = response.data;
+            if (data.response?.status === 'OK' && data.response.result?.featureCollection?.features?.length > 0) {
+                const feature = data.response.result.featureCollection.features[0];
+                const pnu = feature.properties?.pnu;
+                const geometry = feature.geometry;
+
+                if (pnu && geometry) {
+                    logger.debug(`PNU and boundary found from coordinates (${x}, ${y}): ${pnu}`);
+                    return { pnu, boundary: geometry as GeoJSON.Geometry };
+                }
+            }
+
+            return null;
+        } catch (error) {
+            logger.error(`Parcel boundary from coordinates error (${x}, ${y})`, error);
+            return null;
+        }
+    }
+
+    /**
      * PNU -> GeoJSON 경계 데이터 획득 (Vworld Data API)
      */
     async getGeoJSON(pnu: string): Promise<any> {

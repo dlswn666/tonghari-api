@@ -113,10 +113,33 @@ class GisQueueService {
                     continue;
                 }
 
-                // Step 3: land_lots 테이블에 필지 정보 저장
+                // Step 2.5 (NEW): 필지 경계(Polygon) 데이터 조회
+                let boundary: GeoJSON.Geometry | null = null;
+                try {
+                    // 먼저 좌표 기반으로 경계 조회 시도 (더 정확)
+                    const boundaryData = await gisService.getParcelBoundaryFromCoordinates(x, y);
+                    if (boundaryData) {
+                        boundary = boundaryData.boundary;
+                    } else {
+                        // 좌표로 못 찾으면 PNU 기반으로 조회
+                        boundary = await gisService.getParcelBoundary(pnu);
+                    }
+                    
+                    if (boundary) {
+                        logger.debug(`[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Boundary found for: ${pnu}`);
+                    } else {
+                        logger.warn(`[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Boundary not found for: ${pnu}`);
+                    }
+                } catch (boundaryError) {
+                    logger.warn(`[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Boundary fetch error for: ${pnu}`, boundaryError);
+                    // 경계를 못 찾아도 계속 진행 (PNU와 주소는 저장)
+                }
+
+                // Step 3: land_lots 테이블에 필지 정보 저장 (경계 데이터 포함)
                 const landLotSaved = await supabaseService.upsertLandLot({
                     pnu,
                     address,
+                    boundary, // 경계 데이터 추가
                 });
 
                 if (!landLotSaved) {
