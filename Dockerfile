@@ -29,6 +29,7 @@ WORKDIR /app
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/package*.json ./
+COPY --from=builder /app/data ./data
 
 # 로그 디렉토리 생성
 RUN mkdir -p logs
