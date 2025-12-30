@@ -1,8 +1,52 @@
 import axios from 'axios';
+import * as fs from 'fs';
+import * as path from 'path';
+import iconv from 'iconv-lite';
 import { env } from '../config/env';
 import { createLogger } from '../utils/logger';
 
 const logger = createLogger('GIS-API');
+
+// 시도명 정규화 매핑 (짧은 이름 -> 전체 이름)
+const SIDO_NORMALIZE_MAP: Record<string, string> = {
+    // 짧은 형식
+    서울: '서울특별시',
+    부산: '부산광역시',
+    대구: '대구광역시',
+    인천: '인천광역시',
+    광주: '광주광역시',
+    대전: '대전광역시',
+    울산: '울산광역시',
+    세종: '세종특별자치시',
+    경기: '경기도',
+    강원: '강원특별자치도',
+    충북: '충청북도',
+    충남: '충청남도',
+    전북: '전북특별자치도',
+    전남: '전라남도',
+    경북: '경상북도',
+    경남: '경상남도',
+    제주: '제주특별자치도',
+    // 중간 형식
+    서울시: '서울특별시',
+    부산시: '부산광역시',
+    대구시: '대구광역시',
+    인천시: '인천광역시',
+    광주시: '광주광역시',
+    대전시: '대전광역시',
+    울산시: '울산광역시',
+    세종시: '세종특별자치시',
+    경기도: '경기도',
+    강원도: '강원특별자치도',
+    충청북도: '충청북도',
+    충청남도: '충청남도',
+    전라북도: '전북특별자치도',
+    전라남도: '전라남도',
+    경상북도: '경상북도',
+    경상남도: '경상남도',
+    제주도: '제주특별자치도',
+    제주시: '제주특별자치도',
+};
 
 /**
  * GIS 및 공공데이터 수집 서비스
@@ -14,10 +58,60 @@ const logger = createLogger('GIS-API');
 class GisService {
     private vworldApiKey: string;
     private dataPortalApiKey: string;
+    private bjdCodeMap: Map<string, string> = new Map();
 
     constructor() {
         this.vworldApiKey = env.VWORLD_API_KEY;
         this.dataPortalApiKey = env.DATA_PORTAL_API_KEY;
+        this.loadBjdCodeFromCSV();
+    }
+
+    /**
+     * 법정동코드 CSV 파일 로드 (서버 시작 시 1회 실행)
+     * CSV 구조: 법정동코드,법정동명,폐지여부
+     * 예시: 1130510100,서울특별시 강북구 미아동,존재
+     */
+    private loadBjdCodeFromCSV(): void {
+        try {
+            const csvPath = path.join(__dirname, '../../data/bjd_code.csv');
+
+            if (!fs.existsSync(csvPath)) {
+                logger.warn(`법정동코드 CSV 파일이 없습니다: ${csvPath}`);
+                return;
+            }
+
+            // EUC-KR (CP949) 인코딩으로 파일 읽기
+            const buffer = fs.readFileSync(csvPath);
+            const content = iconv.decode(buffer, 'euc-kr');
+            const lines = content.split('\n');
+
+            let loadedCount = 0;
+            for (let i = 1; i < lines.length; i++) {
+                // 헤더 제외
+                const line = lines[i].trim();
+                if (!line) continue;
+
+                const [code, name, status] = line.split(',');
+
+                // 폐지된 법정동 제외, 10자리 코드만 (읍면동 단위)
+                if (status === '존재' && code && code.length === 10 && name) {
+                    // 전체 주소로 매핑 (예: "서울특별시 강북구 미아동" -> "1130510100")
+                    this.bjdCodeMap.set(name.trim(), code);
+                    loadedCount++;
+                }
+            }
+
+            logger.info(`법정동코드 CSV 로드 완료: ${loadedCount}건`);
+        } catch (error) {
+            logger.error('법정동코드 CSV 로드 오류', error);
+        }
+    }
+
+    /**
+     * 시도명 정규화 (짧은 이름 -> 전체 이름)
+     */
+    private normalizeSido(sido: string): string {
+        return SIDO_NORMALIZE_MAP[sido] || sido;
     }
 
     /**
@@ -120,30 +214,38 @@ class GisService {
     /**
      * 법정동코드 조회 (행정표준코드관리시스템 API)
      */
+    /**
+     * 법정동코드 조회 (CSV 메모리 기반)
+     * @param sido - 시도 (예: 서울시, 서울특별시)
+     * @param sigungu - 시군구 (예: 강북구)
+     * @param dong - 읍면동 (예: 미아동)
+     * @returns 10자리 법정동코드 또는 null
+     */
     async getBjdCode(sido: string, sigungu: string, dong: string): Promise<string | null> {
-        if (!this.dataPortalApiKey) return null;
-
         try {
-            // 법정동코드 조회 API
-            const response = await axios.get('http://apis.data.go.kr/1741000/StanReginCd/getStanReginCdList', {
-                params: {
-                    serviceKey: this.dataPortalApiKey,
-                    pageNo: 1,
-                    numOfRows: 10,
-                    type: 'json',
-                    locatadd_nm: `${sido} ${sigungu} ${dong}`.trim(),
-                },
-            });
+            // 시도명 정규화
+            const normalizedSido = this.normalizeSido(sido);
 
-            const items = response.data?.StanReginCd?.[1]?.row;
-            if (items && items.length > 0) {
-                // 법정동코드 반환 (10자리)
-                const code = items[0].region_cd;
-                if (code && code.length >= 10) {
-                    return code.substring(0, 10);
+            // 전체 주소 조합하여 검색
+            const fullAddress = `${normalizedSido} ${sigungu} ${dong}`.trim();
+            const code = this.bjdCodeMap.get(fullAddress);
+
+            if (code) {
+                logger.debug(`법정동코드 찾음 (CSV): ${fullAddress} -> ${code}`);
+                return code;
+            }
+
+            // 원본 시도명으로 재시도
+            if (normalizedSido !== sido) {
+                const originalAddress = `${sido} ${sigungu} ${dong}`.trim();
+                const originalCode = this.bjdCodeMap.get(originalAddress);
+                if (originalCode) {
+                    logger.debug(`법정동코드 찾음 (CSV, 원본): ${originalAddress} -> ${originalCode}`);
+                    return originalCode;
                 }
             }
 
+            logger.warn(`법정동코드 조회 실패 (CSV): ${fullAddress}`);
             return null;
         } catch (error) {
             logger.error(`법정동코드 조회 오류: ${sido} ${sigungu} ${dong}`, error);
@@ -478,34 +580,6 @@ class GisService {
     }
 
     /**
-     * 시도명 정규화 (짧은 이름 -> 전체 이름)
-     */
-    private normalizeSido(sido: string): string {
-        const sidoMap: Record<string, string> = {
-            서울: '서울특별시',
-            부산: '부산광역시',
-            대구: '대구광역시',
-            인천: '인천광역시',
-            광주: '광주광역시',
-            대전: '대전광역시',
-            울산: '울산광역시',
-            세종: '세종특별자치시',
-            경기: '경기도',
-            강원: '강원특별자치도',
-            충북: '충청북도',
-            충남: '충청남도',
-            전북: '전북특별자치도',
-            전남: '전라남도',
-            경북: '경상북도',
-            경남: '경상남도',
-            제주: '제주특별자치도',
-        };
-
-        const trimmed = sido.trim();
-        return sidoMap[trimmed] || trimmed;
-    }
-
-    /**
      * 법정동코드 + 지번으로 PNU 생성
      * @param address 전체 주소
      * @returns PNU 정보 또는 null
@@ -784,17 +858,14 @@ class GisService {
 
         try {
             // Vworld 개별공시지가 WFS API (typeName: dt_d150)
-            const response = await axios.get('https://api.vworld.kr/ned/wfs/getIndvdLandPriceWFS', {
-                params: {
-                    service: 'WFS',
-                    version: '1.1.0',
-                    request: 'GetFeature',
-                    typeName: 'dt_d150',
-                    maxFeatures: 1,
-                    outputFormat: 'application/json',
-                    filter: `<Filter><PropertyIsEqualTo><PropertyName>pnu</PropertyName><Literal>${pnu}</Literal></PropertyIsEqualTo></Filter>`,
-                    key: this.vworldApiKey,
-                },
+            // filter 파라미터의 슬래시(/)를 인코딩하지 않도록 수동으로 URL 구성
+            const filter = `<Filter><PropertyIsEqualTo><PropertyName>pnu</PropertyName><Literal>${pnu}</Literal></PropertyIsEqualTo></Filter>`;
+            // 슬래시를 제외하고 인코딩 (Vworld API 요구사항)
+            const encodedFilter = encodeURIComponent(filter).replace(/%2F/g, '/');
+
+            const url = `https://api.vworld.kr/ned/wfs/getIndvdLandPriceWFS?service=WFS&version=1.1.0&request=GetFeature&typeName=dt_d150&maxFeatures=1&outputFormat=application/json&filter=${encodedFilter}&key=${this.vworldApiKey}`;
+
+            const response = await axios.get(url, {
                 timeout: 15000,
             });
 

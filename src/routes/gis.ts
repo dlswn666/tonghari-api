@@ -176,4 +176,166 @@ router.post('/add-address', async (req, res) => {
     }
 });
 
+/**
+ * 수동 입력 API
+ * API에서 조회되지 않는 필지를 수동으로 입력하여 저장
+ */
+router.post('/manual-add', async (req, res) => {
+    const { unionId, address, pnu, area, officialPrice, ownerCount, boundary } = req.body;
+
+    // 필수 필드 검증
+    if (!unionId || !address || !pnu) {
+        return res.status(400).json({
+            success: false,
+            error: 'unionId, address, pnu are required.',
+        });
+    }
+
+    // PNU 형식 검증 (19자리)
+    if (typeof pnu !== 'string' || pnu.length !== 19 || !/^\d+$/.test(pnu)) {
+        return res.status(400).json({
+            success: false,
+            error: 'PNU must be a 19-digit numeric string.',
+        });
+    }
+
+    try {
+        logger.info(`Manual input request: unionId=${unionId}, pnu=${pnu}, address="${address}"`);
+
+        // boundary가 WKT 형식이면 GeoJSON으로 변환
+        let boundaryGeojson: GeoJSON.Geometry | null = null;
+        if (boundary) {
+            if (typeof boundary === 'string') {
+                // WKT 형식 처리
+                if (boundary.startsWith('POLYGON') || boundary.startsWith('MULTIPOLYGON')) {
+                    boundaryGeojson = parseWktToGeoJson(boundary);
+                    if (!boundaryGeojson) {
+                        return res.status(400).json({
+                            success: false,
+                            error: 'Invalid WKT format for boundary.',
+                        });
+                    }
+                } else {
+                    // JSON 문자열로 시도
+                    try {
+                        boundaryGeojson = JSON.parse(boundary);
+                    } catch {
+                        return res.status(400).json({
+                            success: false,
+                            error: 'Invalid boundary format. Use GeoJSON or WKT.',
+                        });
+                    }
+                }
+            } else if (typeof boundary === 'object') {
+                // 이미 GeoJSON 객체
+                boundaryGeojson = boundary as GeoJSON.Geometry;
+            }
+        }
+
+        // 1. land_lots 테이블에 저장 (수동 입력 데이터)
+        const landLotSaved = await supabaseService.upsertLandLot({
+            pnu: pnu,
+            address: address.trim(),
+            area: area !== undefined ? Number(area) : undefined,
+            official_price: officialPrice !== undefined ? Number(officialPrice) : undefined,
+            boundary: boundaryGeojson,
+            owner_count: ownerCount !== undefined ? Number(ownerCount) : 0,
+        });
+
+        if (!landLotSaved) {
+            logger.error(`Failed to save land_lot for PNU: ${pnu}`);
+            return res.status(500).json({
+                success: false,
+                error: 'Failed to save land_lot.',
+            });
+        }
+
+        // 2. union_land_lots 테이블에 관계 저장
+        const unionLandLotSaved = await supabaseService.createUnionLandLot(unionId, pnu, address);
+
+        if (!unionLandLotSaved) {
+            logger.error(`Failed to save union_land_lot for PNU: ${pnu}`);
+            return res.status(500).json({
+                success: false,
+                error: 'Failed to save union_land_lot.',
+            });
+        }
+
+        logger.info(
+            `Manual input success: PNU=${pnu}, area=${area}, price=${officialPrice}, owners=${ownerCount}, boundary=${!!boundaryGeojson}`
+        );
+
+        return res.json({
+            success: true,
+            data: {
+                pnu: pnu,
+                address: address.trim(),
+                area: area !== undefined ? Number(area) : null,
+                officialPrice: officialPrice !== undefined ? Number(officialPrice) : null,
+                ownerCount: ownerCount !== undefined ? Number(ownerCount) : 0,
+                hasBoundary: !!boundaryGeojson,
+            },
+        });
+    } catch (error: any) {
+        logger.error(`Manual input error: ${pnu}`, error);
+        return res.status(500).json({
+            success: false,
+            error: error.message || 'Internal server error.',
+        });
+    }
+});
+
+/**
+ * WKT를 GeoJSON으로 변환하는 간단한 파서
+ * 지원 형식: POLYGON((x1 y1, x2 y2, ...))
+ */
+function parseWktToGeoJson(wkt: string): GeoJSON.Geometry | null {
+    try {
+        const polygonMatch = wkt.match(/POLYGON\s*\(\((.+)\)\)/i);
+        if (polygonMatch) {
+            const coordsStr = polygonMatch[1];
+            const rings = coordsStr.split('),(').map((ring) => {
+                return ring
+                    .replace(/[()]/g, '')
+                    .split(',')
+                    .map((coord) => {
+                        const [x, y] = coord.trim().split(/\s+/).map(Number);
+                        return [x, y] as [number, number];
+                    });
+            });
+
+            return {
+                type: 'Polygon',
+                coordinates: rings,
+            };
+        }
+
+        const multiPolygonMatch = wkt.match(/MULTIPOLYGON\s*\(\(\((.+)\)\)\)/i);
+        if (multiPolygonMatch) {
+            const polygonsStr = multiPolygonMatch[1];
+            const polygons = polygonsStr.split(')),((').map((polygonStr) => {
+                const rings = polygonStr.split('),(').map((ring) => {
+                    return ring
+                        .replace(/[()]/g, '')
+                        .split(',')
+                        .map((coord) => {
+                            const [x, y] = coord.trim().split(/\s+/).map(Number);
+                            return [x, y] as [number, number];
+                        });
+                });
+                return rings;
+            });
+
+            return {
+                type: 'MultiPolygon',
+                coordinates: polygons,
+            };
+        }
+
+        return null;
+    } catch {
+        return null;
+    }
+}
+
 export default router;
