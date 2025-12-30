@@ -400,6 +400,162 @@ class GisService {
     }
 
     /**
+     * 주소를 구성요소로 파싱
+     * 다양한 형태의 주소를 지원
+     */
+    parseAddressToComponents(address: string): {
+        sido: string;
+        sigungu: string;
+        dong: string;
+        isMountain: boolean;
+        mainNum: string;
+        subNum: string;
+    } | null {
+        if (!address || address.trim() === '') {
+            return null;
+        }
+
+        const cleanAddress = address.trim();
+
+        // 산 여부 확인
+        const isMountain = /산\s*\d/.test(cleanAddress);
+
+        // 패턴 1: 시도 시군구 읍면동 (산) 본번-부번
+        // 예: 서울특별시 강북구 미아동 123-45, 서울시 강북구 미아동 산 123-45
+        const pattern1 =
+            /^(.+?(?:특별시|광역시|특별자치시|특별자치도|도|시))\s+(.+?(?:시|군|구))\s+(.+?(?:동|리|읍|면|가))\s+(?:산\s*)?(\d+)(?:-(\d+))?$/;
+
+        // 패턴 2: 짧은 시도명 (서울, 부산 등)
+        // 예: 서울 강북구 미아동 123-45
+        const pattern2 =
+            /^(서울|부산|대구|인천|광주|대전|울산|세종|경기|강원|충북|충남|전북|전남|경북|경남|제주)\s+(.+?(?:시|군|구))\s+(.+?(?:동|리|읍|면|가))\s+(?:산\s*)?(\d+)(?:-(\d+))?$/;
+
+        // 패턴 3: 시군구가 없는 경우 (특별자치시, 특별자치도)
+        // 예: 세종특별자치시 조치원읍 123-45
+        const pattern3 = /^(.+?(?:특별자치시|특별자치도))\s+(.+?(?:동|리|읍|면|가))\s+(?:산\s*)?(\d+)(?:-(\d+))?$/;
+
+        let match = cleanAddress.match(pattern1);
+        if (match) {
+            const [, sido, sigungu, dong, mainNum, subNum] = match;
+            return {
+                sido: this.normalizeSido(sido),
+                sigungu: sigungu.trim(),
+                dong: dong.trim(),
+                isMountain,
+                mainNum: mainNum,
+                subNum: subNum || '0',
+            };
+        }
+
+        match = cleanAddress.match(pattern2);
+        if (match) {
+            const [, sido, sigungu, dong, mainNum, subNum] = match;
+            return {
+                sido: this.normalizeSido(sido),
+                sigungu: sigungu.trim(),
+                dong: dong.trim(),
+                isMountain,
+                mainNum: mainNum,
+                subNum: subNum || '0',
+            };
+        }
+
+        match = cleanAddress.match(pattern3);
+        if (match) {
+            const [, sido, dong, mainNum, subNum] = match;
+            return {
+                sido: this.normalizeSido(sido),
+                sigungu: '', // 세종시 등은 시군구가 없음
+                dong: dong.trim(),
+                isMountain,
+                mainNum: mainNum,
+                subNum: subNum || '0',
+            };
+        }
+
+        logger.debug(`주소 파싱 실패 (지원하지 않는 형식): ${address}`);
+        return null;
+    }
+
+    /**
+     * 시도명 정규화 (짧은 이름 -> 전체 이름)
+     */
+    private normalizeSido(sido: string): string {
+        const sidoMap: Record<string, string> = {
+            서울: '서울특별시',
+            부산: '부산광역시',
+            대구: '대구광역시',
+            인천: '인천광역시',
+            광주: '광주광역시',
+            대전: '대전광역시',
+            울산: '울산광역시',
+            세종: '세종특별자치시',
+            경기: '경기도',
+            강원: '강원특별자치도',
+            충북: '충청북도',
+            충남: '충청남도',
+            전북: '전북특별자치도',
+            전남: '전라남도',
+            경북: '경상북도',
+            경남: '경상남도',
+            제주: '제주특별자치도',
+        };
+
+        const trimmed = sido.trim();
+        return sidoMap[trimmed] || trimmed;
+    }
+
+    /**
+     * 법정동코드 + 지번으로 PNU 생성
+     * @param address 전체 주소
+     * @returns PNU 정보 또는 null
+     */
+    async generatePNUFromAddress(address: string): Promise<{
+        pnu: string;
+        sido: string;
+        sigungu: string;
+        dong: string;
+        bjdCode: string;
+        mainNum: string;
+        subNum: string;
+    } | null> {
+        // 1. 주소 파싱
+        const components = this.parseAddressToComponents(address);
+        if (!components) {
+            logger.debug(`PNU 생성 실패 - 주소 파싱 실패: ${address}`);
+            return null;
+        }
+
+        const { sido, sigungu, dong, isMountain, mainNum, subNum } = components;
+
+        // 2. 법정동코드 조회
+        const bjdCode = await this.getBjdCode(sido, sigungu, dong);
+        if (!bjdCode) {
+            logger.debug(`PNU 생성 실패 - 법정동코드 조회 실패: ${sido} ${sigungu} ${dong}`);
+            return null;
+        }
+
+        // 3. PNU 생성: 법정동코드(10) + 대지구분(1) + 본번(4) + 부번(4) = 19자리
+        const landType = isMountain ? '2' : '1'; // 1: 대지, 2: 산
+        const mainNumPadded = mainNum.padStart(4, '0');
+        const subNumPadded = subNum.padStart(4, '0');
+
+        const pnu = `${bjdCode}${landType}${mainNumPadded}${subNumPadded}`;
+
+        logger.info(`PNU 생성 성공: ${address} -> ${pnu}`);
+
+        return {
+            pnu,
+            sido,
+            sigungu,
+            dong,
+            bjdCode,
+            mainNum,
+            subNum,
+        };
+    }
+
+    /**
      * PNU 파싱 유틸리티
      * PNU(19자리): 법정동코드(10) + 대지구분(1) + 본번(4) + 부번(4)
      */

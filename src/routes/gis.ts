@@ -41,11 +41,11 @@ router.get('/status/:jobId', (req, res) => {
 });
 
 /**
- * 주소 검색 (PNU만 반환)
- * source: 'vworld' | 'data_portal'
+ * 주소 검색 (PNU 생성)
+ * 법정동코드 + 지번 조합으로 PNU 생성 (API 호출 최소화)
  */
 router.post('/search-address', async (req, res) => {
-    const { address, source } = req.body;
+    const { address } = req.body;
 
     if (!address || typeof address !== 'string') {
         return res.status(400).json({
@@ -54,36 +54,44 @@ router.post('/search-address', async (req, res) => {
         });
     }
 
-    const validSources = ['vworld', 'data_portal'];
-    const selectedSource = validSources.includes(source) ? source : 'vworld';
-
     try {
-        logger.info(`Address search request: "${address}" via ${selectedSource}`);
+        logger.info(`Address search request: "${address}"`);
 
-        let result = null;
+        // 법정동코드 기반 PNU 생성 (법정동코드 API 1회 호출)
+        const pnuResult = await gisService.generatePNUFromAddress(address.trim());
 
-        if (selectedSource === 'vworld') {
-            result = await gisService.searchAddressByVworld(address);
-        } else {
-            result = await gisService.searchAddressByDataPortal(address);
-        }
-
-        if (result) {
-            logger.info(`Address search success: ${address} -> PNU: ${result.pnu}`);
+        if (pnuResult) {
+            logger.info(`PNU generated: ${address} -> ${pnuResult.pnu}`);
             return res.json({
                 success: true,
                 data: {
-                    address: result.address,
-                    pnu: result.pnu,
+                    address: address.trim(),
+                    pnu: pnuResult.pnu,
+                    bjdCode: pnuResult.bjdCode,
+                    sido: pnuResult.sido,
+                    sigungu: pnuResult.sigungu,
+                    dong: pnuResult.dong,
                 },
             });
         }
 
-        logger.warn(`Address search failed: ${address} (no result)`);
+        // 파싱 실패 시 상세 메시지 반환
+        const components = gisService.parseAddressToComponents(address.trim());
+        if (!components) {
+            logger.warn(`Address parsing failed: ${address}`);
+            return res.json({
+                success: false,
+                data: null,
+                message: '주소 형식을 인식할 수 없습니다. (예: 서울시 강북구 미아동 123-45)',
+            });
+        }
+
+        // 법정동코드 조회 실패
+        logger.warn(`BJD code lookup failed for: ${components.sido} ${components.sigungu} ${components.dong}`);
         return res.json({
             success: false,
             data: null,
-            message: '검색 결과가 없습니다.',
+            message: `법정동코드를 찾을 수 없습니다: ${components.sido} ${components.sigungu} ${components.dong}`,
         });
     } catch (error: any) {
         logger.error(`Address search error: ${address}`, error);
