@@ -565,12 +565,187 @@ class GisService {
                     numOfRows: 100,
                     _type: 'json',
                 },
+                timeout: 15000,
             });
+
+            // 상세 로깅 추가
+            const resultCode = response.data?.response?.header?.resultCode;
+            const resultMsg = response.data?.response?.header?.resultMsg;
+
+            if (resultCode && resultCode !== '00') {
+                logger.warn(`${type} owner info API returned code ${resultCode}: ${resultMsg} (PNU: ${pnu})`);
+            }
+
             return response.data.response?.body?.items?.item || [];
-        } catch (error) {
-            logger.error(`${type} owner info fetch error (PNU: ${pnu})`, error);
+        } catch (error: any) {
+            // 상세 에러 로깅
+            const status = error.response?.status;
+            const statusText = error.response?.statusText;
+            const errorData = error.response?.data;
+
+            logger.error(`${type} owner info fetch error (PNU: ${pnu})`, {
+                status,
+                statusText,
+                errorData: typeof errorData === 'string' ? errorData.substring(0, 500) : errorData,
+                message: error.message,
+            });
             return [];
         }
+    }
+
+    /**
+     * Vworld 개별공시지가 조회
+     * @param pnu 필지고유번호 (19자리)
+     * @returns 공시지가 (원/m²) 또는 null
+     */
+    async getOfficialLandPrice(pnu: string): Promise<number | null> {
+        if (!this.vworldApiKey) {
+            logger.debug('VWORLD_API_KEY is not configured for land price lookup');
+            return null;
+        }
+
+        if (!pnu || pnu.length < 19) {
+            logger.debug(`Invalid PNU for land price lookup: ${pnu}`);
+            return null;
+        }
+
+        try {
+            // Vworld 개별공시지가 WFS API
+            const response = await axios.get('https://api.vworld.kr/ned/wfs/getIndvdLandPriceWFS', {
+                params: {
+                    service: 'WFS',
+                    version: '1.1.0',
+                    request: 'GetFeature',
+                    typeName: 'lt_c_pse_landprice',
+                    maxFeatures: 1,
+                    outputFormat: 'application/json',
+                    filter: `<Filter><PropertyIsEqualTo><PropertyName>pnu</PropertyName><Literal>${pnu}</Literal></PropertyIsEqualTo></Filter>`,
+                    key: this.vworldApiKey,
+                },
+                timeout: 15000,
+            });
+
+            const data = response.data;
+
+            // GeoJSON FeatureCollection 응답 처리
+            if (data?.features && data.features.length > 0) {
+                const feature = data.features[0];
+                const price = feature.properties?.pblntfPclnd; // 개별공시지가 (원/m²)
+
+                if (price !== undefined && price !== null) {
+                    logger.debug(`Land price found for PNU ${pnu}: ${price} 원/m²`);
+                    return Number(price);
+                }
+            }
+
+            logger.debug(`No land price found for PNU: ${pnu}`);
+            return null;
+        } catch (error: any) {
+            logger.error(`Vworld land price API error (PNU: ${pnu})`, {
+                status: error.response?.status,
+                message: error.message,
+            });
+            return null;
+        }
+    }
+
+    /**
+     * 주소 검색 (Vworld 기반)
+     * 지오코딩 + PNU 조회만 수행
+     */
+    async searchAddressByVworld(
+        address: string
+    ): Promise<{ address: string; pnu: string; x: string; y: string } | null> {
+        try {
+            const result = await this.getPNUFromAddress(address);
+            if (result && result.pnu) {
+                return {
+                    address,
+                    pnu: result.pnu,
+                    x: result.x,
+                    y: result.y,
+                };
+            }
+            return null;
+        } catch (error) {
+            logger.error(`Vworld address search error: ${address}`, error);
+            return null;
+        }
+    }
+
+    /**
+     * 주소 검색 (공공데이터포털 기반)
+     * 법정동코드 기반 PNU 생성
+     */
+    async searchAddressByDataPortal(address: string): Promise<{ address: string; pnu: string } | null> {
+        try {
+            const pnu = await this.getPNUFromAddressInfo(address);
+            if (pnu) {
+                return { address, pnu };
+            }
+            return null;
+        } catch (error) {
+            logger.error(`DataPortal address search error: ${address}`, error);
+            return null;
+        }
+    }
+
+    /**
+     * 수동 주소 추가 - 전체 데이터 조회
+     * PNU를 기반으로 경계, 공시지가, 소유자 수 등 모든 정보 조회
+     */
+    async getFullLandInfo(
+        pnu: string,
+        address: string
+    ): Promise<{
+        pnu: string;
+        address: string;
+        boundary: GeoJSON.Geometry | null;
+        area: number | null;
+        officialPrice: number | null;
+        ownerCount: number;
+    }> {
+        logger.info(`Fetching full land info for PNU: ${pnu}`);
+
+        // 1. 경계 데이터 조회
+        const boundary = await this.getParcelBoundary(pnu);
+
+        // 2. 개별공시지가 조회
+        const officialPrice = await this.getOfficialLandPrice(pnu);
+
+        // 3. 소유자 수 조회
+        let ownerCount = 0;
+        try {
+            const landOwners = await this.getOwnerInfo(pnu, 'LAND');
+            if (Array.isArray(landOwners) && landOwners.length > 0) {
+                ownerCount = landOwners.length;
+            } else {
+                const buildingOwners = await this.getOwnerInfo(pnu, 'BUILDING');
+                if (Array.isArray(buildingOwners) && buildingOwners.length > 0) {
+                    ownerCount = buildingOwners.length;
+                }
+            }
+        } catch (error) {
+            logger.warn(`Owner info fetch failed for PNU ${pnu}, continuing with ownerCount=0`);
+        }
+
+        // 4. 면적 계산 (boundary에서 추출하거나 별도 API로 조회)
+        let area: number | null = null;
+        // 면적은 건축물대장이나 토지대장에서 가져올 수 있음
+        // 여기서는 간단히 null로 처리
+
+        logger.info(
+            `Full land info fetched for PNU ${pnu}: boundary=${!!boundary}, price=${officialPrice}, owners=${ownerCount}`
+        );
+
+        return {
+            pnu,
+            address,
+            boundary,
+            area,
+            officialPrice,
+            ownerCount,
+        };
     }
 }
 

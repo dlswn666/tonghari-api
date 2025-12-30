@@ -25,9 +25,9 @@ class GisQueueService {
     private jobs: Map<string, GisJobInfo>;
 
     constructor() {
-        this.queue = new PQueue({ 
+        this.queue = new PQueue({
             concurrency: 2, // GIS API 부하 조절을 위해 낮게 설정
-            timeout: 600000 // 10분
+            timeout: 600000, // 10분
         });
         this.jobs = new Map();
     }
@@ -40,7 +40,7 @@ class GisQueueService {
             totalCount: request.addresses.length,
             processedCount: 0,
             status: 'pending',
-            createdAt: new Date()
+            createdAt: new Date(),
         };
 
         this.jobs.set(jobId, jobInfo);
@@ -51,21 +51,23 @@ class GisQueueService {
                 id: jobId,
                 union_id: request.unionId,
                 status: 'PROCESSING',
-                progress: 0
+                progress: 0,
             });
             logger.info(`GIS job added: ${jobId} (parcels: ${request.addresses.length})`);
         } catch (error) {
             logger.error(`sync_jobs registration failed (${jobId})`, error);
         }
 
-        this.queue.add(async () => {
-            await this.processSyncJob(jobId, request);
-        }).catch(err => {
-            logger.error(`GIS job ${jobId} fatal error`, err);
-            this.updateJobStatus(jobId, { status: 'failed', error: err.message });
-            // 실패 상태 DB 업데이트
-            supabaseService.updateSyncJobStatus(jobId, 'FAILED', 0, err.message);
-        });
+        this.queue
+            .add(async () => {
+                await this.processSyncJob(jobId, request);
+            })
+            .catch((err) => {
+                logger.error(`GIS job ${jobId} fatal error`, err);
+                this.updateJobStatus(jobId, { status: 'failed', error: err.message });
+                // 실패 상태 DB 업데이트
+                supabaseService.updateSyncJobStatus(jobId, 'FAILED', 0, err.message);
+            });
 
         return jobInfo;
     }
@@ -84,7 +86,7 @@ class GisQueueService {
         for (let i = 0; i < request.addresses.length; i++) {
             const address = request.addresses[i];
             const currentIndex = i + 1;
-            
+
             try {
                 logger.debug(`[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Processing address: ${address}`);
 
@@ -95,11 +97,11 @@ class GisQueueService {
                     failedAddresses.push({
                         address,
                         reason: 'Geocoding failed - 주소를 찾을 수 없습니다',
-                        index: currentIndex
+                        index: currentIndex,
                     });
                     continue;
                 }
-                
+
                 const { pnu, x, y } = geocodeData;
 
                 // Step 2: PNU가 없으면 실패 처리
@@ -108,7 +110,7 @@ class GisQueueService {
                     failedAddresses.push({
                         address,
                         reason: 'PNU not found - 필지 번호를 조회할 수 없습니다',
-                        index: currentIndex
+                        index: currentIndex,
                     });
                     continue;
                 }
@@ -124,46 +126,83 @@ class GisQueueService {
                         // 좌표로 못 찾으면 PNU 기반으로 조회
                         boundary = await gisService.getParcelBoundary(pnu);
                     }
-                    
+
                     if (boundary) {
                         logger.debug(`[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Boundary found for: ${pnu}`);
                     } else {
-                        logger.warn(`[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Boundary not found for: ${pnu}`);
+                        logger.warn(
+                            `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Boundary not found for: ${pnu}`
+                        );
                     }
                 } catch (boundaryError) {
-                    logger.warn(`[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Boundary fetch error for: ${pnu}`, boundaryError);
+                    logger.warn(
+                        `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Boundary fetch error for: ${pnu}`,
+                        boundaryError
+                    );
                     // 경계를 못 찾아도 계속 진행 (PNU와 주소는 저장)
                 }
 
-                // Step 2.6 (NEW): 소유자 정보 조회 (공공데이터 API)
+                // Step 2.6: 소유자 정보 조회 (공공데이터 API)
                 let ownerCount = 0;
                 try {
                     // 토지 소유자 정보 조회 시도
                     const ownerInfo = await gisService.getOwnerInfo(pnu, 'LAND');
                     if (Array.isArray(ownerInfo) && ownerInfo.length > 0) {
                         ownerCount = ownerInfo.length;
-                        logger.info(`[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Owner info found for ${pnu}: ${ownerCount}명`);
+                        logger.info(
+                            `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Owner info found for ${pnu}: ${ownerCount}명`
+                        );
                     } else {
                         // 토지 소유자가 없으면 건물 소유자 조회 시도
                         const buildingOwnerInfo = await gisService.getOwnerInfo(pnu, 'BUILDING');
                         if (Array.isArray(buildingOwnerInfo) && buildingOwnerInfo.length > 0) {
                             ownerCount = buildingOwnerInfo.length;
-                            logger.info(`[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Building owner info found for ${pnu}: ${ownerCount}명`);
+                            logger.info(
+                                `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Building owner info found for ${pnu}: ${ownerCount}명`
+                            );
                         } else {
-                            logger.warn(`[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Owner info not found for: ${pnu} (API may be restricted)`);
+                            logger.warn(
+                                `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Owner info not found for: ${pnu} (API may be restricted)`
+                            );
                         }
                     }
                 } catch (ownerError: any) {
                     // 소유자 정보 조회 실패 시 로그만 남기고 계속 진행
-                    logger.warn(`[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Owner info fetch error for ${pnu}: ${ownerError?.message || 'Unknown error'}`);
+                    logger.warn(
+                        `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Owner info fetch error for ${pnu}: ${
+                            ownerError?.message || 'Unknown error'
+                        }`
+                    );
                 }
 
-                // Step 3: land_lots 테이블에 필지 정보 저장 (경계 데이터 + 소유자 수 포함)
+                // Step 2.7 (NEW): 개별공시지가 조회 (Vworld API)
+                let officialPrice: number | null = null;
+                try {
+                    officialPrice = await gisService.getOfficialLandPrice(pnu);
+                    if (officialPrice !== null) {
+                        logger.info(
+                            `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Official land price found for ${pnu}: ${officialPrice}원/㎡`
+                        );
+                    } else {
+                        logger.debug(
+                            `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Official land price not found for: ${pnu}`
+                        );
+                    }
+                } catch (priceError: any) {
+                    logger.warn(
+                        `[GIS ${jobId}] (${currentIndex}/${
+                            job.totalCount
+                        }) Official land price fetch error for ${pnu}: ${priceError?.message || 'Unknown error'}`
+                    );
+                }
+
+                // Step 3: land_lots 테이블에 필지 정보 저장 (경계 데이터 + 소유자 수 + 공시지가 포함)
                 const landLotSaved = await supabaseService.upsertLandLot({
                     pnu,
                     address,
-                    boundary, // 경계 데이터 추가
-                    owner_count: ownerCount, // 소유자 수 추가
+                    boundary, // 경계 데이터
+                    owner_count: ownerCount, // 소유자 수
+                    official_price: officialPrice ?? undefined, // 개별공시지가
                 });
 
                 if (!landLotSaved) {
@@ -171,24 +210,22 @@ class GisQueueService {
                     failedAddresses.push({
                         address,
                         reason: 'DB save failed - 필지 정보 저장 실패',
-                        index: currentIndex
+                        index: currentIndex,
                     });
                     continue;
                 }
 
                 // Step 4: union_land_lots 테이블에 조합-필지 관계 저장
-                const unionLandLotSaved = await supabaseService.createUnionLandLot(
-                    request.unionId,
-                    pnu,
-                    address
-                );
+                const unionLandLotSaved = await supabaseService.createUnionLandLot(request.unionId, pnu, address);
 
                 if (!unionLandLotSaved) {
-                    logger.warn(`[GIS ${jobId}] (${currentIndex}/${job.totalCount}) union_land_lots save failed: ${pnu}`);
+                    logger.warn(
+                        `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) union_land_lots save failed: ${pnu}`
+                    );
                     failedAddresses.push({
                         address,
                         reason: 'DB save failed - 조합-필지 관계 저장 실패',
-                        index: currentIndex
+                        index: currentIndex,
                     });
                     continue;
                 }
@@ -196,24 +233,27 @@ class GisQueueService {
                 // 성공
                 successCount++;
                 successfulPnus.push(pnu);
-                logger.debug(`[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Successfully saved: ${address} -> ${pnu}`);
-
+                logger.debug(
+                    `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Successfully saved: ${address} -> ${pnu}`
+                );
             } catch (err: any) {
                 logger.error(`[GIS ${jobId}] Address processing error (${address})`, err);
                 failedAddresses.push({
                     address,
                     reason: `Error: ${err.message || 'Unknown error'}`,
-                    index: currentIndex
+                    index: currentIndex,
                 });
             }
 
             // 진행률 업데이트 (처리된 항목 기준, 성공/실패 모두 포함)
             job.processedCount = i + 1;
             const progress = Math.round((job.processedCount / job.totalCount) * 100);
-            
+
             // 10% 단위로 또는 마지막일 때 로깅
             if (progress % 10 === 0 || job.processedCount === job.totalCount) {
-                logger.info(`[GIS ${jobId}] Progress: ${progress}% (${job.processedCount}/${job.totalCount}, success: ${successCount})`);
+                logger.info(
+                    `[GIS ${jobId}] Progress: ${progress}% (${job.processedCount}/${job.totalCount}, success: ${successCount})`
+                );
             }
 
             // Supabase 상태 업데이트
@@ -222,14 +262,15 @@ class GisQueueService {
 
         // 완료 처리
         const finalStatus = failedAddresses.length === job.totalCount ? 'FAILED' : 'COMPLETED';
-        const errorLog = failedAddresses.length > 0 
-            ? JSON.stringify({
-                failedCount: failedAddresses.length,
-                successCount,
-                totalCount: job.totalCount,
-                failedAddresses: failedAddresses.slice(0, 100), // 최대 100개만 저장
-            })
-            : null;
+        const errorLog =
+            failedAddresses.length > 0
+                ? JSON.stringify({
+                      failedCount: failedAddresses.length,
+                      successCount,
+                      totalCount: job.totalCount,
+                      failedAddresses: failedAddresses.slice(0, 100), // 최대 100개만 저장
+                  })
+                : null;
 
         const previewData = {
             successCount,
@@ -238,17 +279,19 @@ class GisQueueService {
             successfulPnus: successfulPnus.slice(0, 50), // 프리뷰용 최대 50개
         };
 
-        logger.info(`[GIS ${jobId}] Collection completed - Success: ${successCount}, Failed: ${failedAddresses.length}, Total: ${job.totalCount}`);
-        
-        this.updateJobStatus(jobId, { 
-            status: finalStatus === 'COMPLETED' ? 'completed' : 'failed', 
-            completedAt: new Date() 
+        logger.info(
+            `[GIS ${jobId}] Collection completed - Success: ${successCount}, Failed: ${failedAddresses.length}, Total: ${job.totalCount}`
+        );
+
+        this.updateJobStatus(jobId, {
+            status: finalStatus === 'COMPLETED' ? 'completed' : 'failed',
+            completedAt: new Date(),
         });
 
         await supabaseService.updateSyncJobStatus(
-            jobId, 
-            finalStatus as 'PROCESSING' | 'COMPLETED' | 'FAILED', 
-            100, 
+            jobId,
+            finalStatus as 'PROCESSING' | 'COMPLETED' | 'FAILED',
+            100,
             errorLog || undefined,
             previewData
         );
