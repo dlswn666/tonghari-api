@@ -135,11 +135,35 @@ class GisQueueService {
                     // 경계를 못 찾아도 계속 진행 (PNU와 주소는 저장)
                 }
 
-                // Step 3: land_lots 테이블에 필지 정보 저장 (경계 데이터 포함)
+                // Step 2.6 (NEW): 소유자 정보 조회 (공공데이터 API)
+                let ownerCount = 0;
+                try {
+                    // 토지 소유자 정보 조회 시도
+                    const ownerInfo = await gisService.getOwnerInfo(pnu, 'LAND');
+                    if (Array.isArray(ownerInfo) && ownerInfo.length > 0) {
+                        ownerCount = ownerInfo.length;
+                        logger.info(`[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Owner info found for ${pnu}: ${ownerCount}명`);
+                    } else {
+                        // 토지 소유자가 없으면 건물 소유자 조회 시도
+                        const buildingOwnerInfo = await gisService.getOwnerInfo(pnu, 'BUILDING');
+                        if (Array.isArray(buildingOwnerInfo) && buildingOwnerInfo.length > 0) {
+                            ownerCount = buildingOwnerInfo.length;
+                            logger.info(`[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Building owner info found for ${pnu}: ${ownerCount}명`);
+                        } else {
+                            logger.warn(`[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Owner info not found for: ${pnu} (API may be restricted)`);
+                        }
+                    }
+                } catch (ownerError: any) {
+                    // 소유자 정보 조회 실패 시 로그만 남기고 계속 진행
+                    logger.warn(`[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Owner info fetch error for ${pnu}: ${ownerError?.message || 'Unknown error'}`);
+                }
+
+                // Step 3: land_lots 테이블에 필지 정보 저장 (경계 데이터 + 소유자 수 포함)
                 const landLotSaved = await supabaseService.upsertLandLot({
                     pnu,
                     address,
                     boundary, // 경계 데이터 추가
+                    owner_count: ownerCount, // 소유자 수 추가
                 });
 
                 if (!landLotSaved) {
