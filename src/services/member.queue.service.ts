@@ -1,15 +1,14 @@
 import PQueue from 'p-queue';
 import { v4 as uuidv4 } from 'uuid';
 import { supabaseService } from './supabase.service';
+import { gisService } from './gis.service';
 import {
     MemberJobInfo,
-    MemberJobType,
     MemberInviteSyncRequest,
     MemberInviteSyncResult,
     PreRegisterRequest,
     PreRegisterResult,
-    PreRegisterMatchingResult,
-    MemberBulkRequest,
+    PreRegisterData,
 } from '../types/member.types';
 import { createLogger } from '../utils/logger';
 
@@ -197,13 +196,15 @@ class MemberQueueService {
     }
 
     /**
-     * 사전 등록 처리
+     * 사전 등록 처리 (GIS 매칭 + 저장 통합)
+     * 1단계: GIS 매칭 (0-50%)
+     * 2단계: DB 저장 (50-100%)
      */
     private async processPreRegisterJob(jobId: string, request: PreRegisterRequest): Promise<void> {
         const job = this.jobs.get(jobId);
         if (!job) return;
 
-        logger.info(`[Pre-Register ${jobId}] Processing started`);
+        logger.info(`[Pre-Register ${jobId}] Processing started (${request.members.length} members)`);
         this.updateJobStatus(jobId, { status: 'processing', startedAt: new Date() });
 
         const client = supabaseService.getClient();
@@ -211,25 +212,81 @@ class MemberQueueService {
         let savedCount = 0;
         let matchedCount = 0;
         let unmatchedCount = 0;
+        let duplicateCount = 0;
 
         const totalCount = request.members.length;
 
+        // ========================================
+        // 1단계: GIS 매칭 (0-50%)
+        // ========================================
+        logger.info(`[Pre-Register ${jobId}] Phase 1: GIS Matching`);
+        
+        interface MatchedMember {
+            row: PreRegisterData;
+            pnu: string | null;
+            matched: boolean;
+        }
+        
+        const matchedMembers: MatchedMember[] = [];
+        
         for (let i = 0; i < request.members.length; i++) {
             const member = request.members[i];
             const currentIndex = i + 1;
-
+            
+            let pnu: string | null = null;
+            let matched = false;
+            
             try {
-                if (member.matched && member.pnu) {
+                // GIS 매칭 시도
+                const pnuResult = await gisService.generatePNUFromAddress(member.propertyAddress);
+                if (pnuResult) {
+                    pnu = pnuResult.pnu;
+                    matched = true;
                     matchedCount++;
                 } else {
                     unmatchedCount++;
                 }
+            } catch (err: any) {
+                logger.warn(`[Pre-Register ${jobId}] GIS matching failed for "${member.propertyAddress}": ${err.message}`);
+                unmatchedCount++;
+            }
+            
+            matchedMembers.push({ row: member, pnu, matched });
+            
+            // 진행률 업데이트 (0-50%)
+            job.processedCount = currentIndex;
+            const progress = Math.round((currentIndex / totalCount) * 50);
+            
+            // 5% 단위로 DB 업데이트
+            if (progress % 5 === 0 || currentIndex === totalCount) {
+                const previewData = {
+                    job_type: 'PRE_REGISTER',
+                    phase: 'MATCHING',
+                    matchedCount,
+                    unmatchedCount,
+                    totalCount,
+                };
+                await supabaseService.updateSyncJobStatus(jobId, 'PROCESSING', progress, undefined, previewData);
+            }
+        }
+        
+        logger.info(`[Pre-Register ${jobId}] Phase 1 completed - Matched: ${matchedCount}, Unmatched: ${unmatchedCount}`);
 
+        // ========================================
+        // 2단계: DB 저장 (50-100%)
+        // ========================================
+        logger.info(`[Pre-Register ${jobId}] Phase 2: DB Insert`);
+        
+        for (let i = 0; i < matchedMembers.length; i++) {
+            const member = matchedMembers[i];
+            const currentIndex = i + 1;
+
+            try {
                 // 동호수 정규화
                 const normalizedDong = this.normalizeDong(member.row.dong);
                 const normalizedHo = this.normalizeHo(member.row.ho);
 
-                // 중복 체크
+                // 중복 체크 (PNU가 있는 경우에만)
                 if (member.pnu) {
                     const isDuplicate = await this.checkDuplicatePnu(
                         client,
@@ -239,6 +296,7 @@ class MemberQueueService {
                         normalizedHo
                     );
                     if (isDuplicate.isDuplicate) {
+                        duplicateCount++;
                         errors.push(`${member.row.name}: 이미 등록된 소유지입니다. (기존 등록자: ${isDuplicate.existingUserName})`);
                         continue;
                     }
@@ -273,25 +331,33 @@ class MemberQueueService {
                 errors.push(`${member.row.name}: ${err.message || 'Unknown error'}`);
             }
 
-            // 진행률 업데이트
-            job.processedCount = currentIndex;
-            const progress = Math.round((currentIndex / totalCount) * 100);
-
-            // 10% 단위로 DB 업데이트
-            if (progress % 10 === 0 || currentIndex === totalCount) {
-                logger.info(`[Pre-Register ${jobId}] Progress: ${progress}% (${currentIndex}/${totalCount}, saved: ${savedCount})`);
-                await supabaseService.updateSyncJobStatus(jobId, 'PROCESSING', progress);
+            // 진행률 업데이트 (50-100%)
+            const progress = 50 + Math.round((currentIndex / totalCount) * 50);
+            
+            // 5% 단위로 DB 업데이트
+            if (progress % 5 === 0 || currentIndex === totalCount) {
+                const previewData = {
+                    job_type: 'PRE_REGISTER',
+                    phase: 'SAVING',
+                    matchedCount,
+                    unmatchedCount,
+                    savedCount,
+                    duplicateCount,
+                    totalCount,
+                };
+                await supabaseService.updateSyncJobStatus(jobId, 'PROCESSING', progress, undefined, previewData);
             }
         }
 
         // 완료 처리
-        const finalStatus = errors.length === totalCount ? 'failed' : 'completed';
+        const finalStatus = savedCount === 0 && errors.length > 0 ? 'failed' : 'completed';
         const result: PreRegisterResult = {
             success: errors.length === 0,
             totalCount,
             matchedCount,
             unmatchedCount,
             savedCount,
+            duplicateCount,
             errors: errors.slice(0, 100), // 최대 100개만 저장
         };
 
@@ -303,6 +369,7 @@ class MemberQueueService {
 
         const previewData = {
             job_type: 'PRE_REGISTER',
+            phase: 'COMPLETED',
             ...result,
         };
 
@@ -316,7 +383,7 @@ class MemberQueueService {
             previewData
         );
 
-        logger.info(`[Pre-Register ${jobId}] Completed - Saved: ${savedCount}, Errors: ${errors.length}, Total: ${totalCount}`);
+        logger.info(`[Pre-Register ${jobId}] Completed - Matched: ${matchedCount}, Saved: ${savedCount}, Duplicates: ${duplicateCount}, Errors: ${errors.length}, Total: ${totalCount}`);
     }
 
     /**

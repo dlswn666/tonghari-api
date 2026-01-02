@@ -69,8 +69,14 @@ router.post('/invite-sync', async (req, res) => {
 });
 
 /**
- * 사전 등록 요청 (GIS 매칭 완료된 데이터)
+ * 사전 등록 요청 (Raw 엑셀 데이터 - GIS 매칭 + 저장 통합 처리)
  * POST /member/pre-register
+ *
+ * Request Body:
+ * {
+ *   unionId: string,
+ *   members: [{ name, phoneNumber?, propertyAddress, dong?, ho?, residentAddress? }]
+ * }
  */
 router.post('/pre-register', async (req, res) => {
     const { unionId, members } = req.body;
@@ -89,13 +95,13 @@ router.post('/pre-register', async (req, res) => {
         });
     }
 
-    // 각 멤버 데이터 검증 (매칭 결과 포함)
+    // 각 멤버 데이터 검증 (Raw 데이터: name, propertyAddress 필수)
     for (let i = 0; i < members.length; i++) {
         const member = members[i];
-        if (!member.row || !member.row.name || !member.row.propertyAddress) {
+        if (!member.name || !member.propertyAddress) {
             return res.status(400).json({
                 success: false,
-                error: `Member at index ${i} is missing required row data (name, propertyAddress).`,
+                error: `Member at index ${i} is missing required data (name, propertyAddress).`,
             });
         }
     }

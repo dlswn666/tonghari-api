@@ -50,7 +50,7 @@ export interface MemberInviteSyncResult {
 // ============================================
 
 /**
- * 사전 등록 데이터 (엑셀에서 파싱된 데이터)
+ * 사전 등록 데이터 (엑셀에서 파싱된 Raw 데이터)
  */
 export interface PreRegisterData {
     name: string;
@@ -62,7 +62,7 @@ export interface PreRegisterData {
 }
 
 /**
- * 사전 등록 매칭 결과
+ * 사전 등록 매칭 결과 (내부 처리용)
  */
 export interface PreRegisterMatchingResult {
     row: PreRegisterData;
@@ -73,12 +73,13 @@ export interface PreRegisterMatchingResult {
 }
 
 /**
- * 사전 등록 요청
+ * 사전 등록 요청 (GIS 매칭 + 저장 통합 처리)
+ * - Raw 엑셀 데이터를 받아서 GIS 매칭 후 저장까지 한 번에 처리
  */
 export interface PreRegisterRequest {
     jobType: 'PRE_REGISTER';
     unionId: string;
-    members: PreRegisterMatchingResult[];
+    members: PreRegisterData[]; // Raw 데이터 (매칭 전)
 }
 
 /**
@@ -90,6 +91,7 @@ export interface PreRegisterResult {
     matchedCount: number;
     unmatchedCount: number;
     savedCount: number;
+    duplicateCount: number;
     errors: string[];
 }
 
