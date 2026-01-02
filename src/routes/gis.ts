@@ -139,7 +139,21 @@ router.post('/add-address', async (req, res) => {
             });
         }
 
-        // 3. union_land_lots 테이블에 관계 저장
+        // 3. 건물 정보 조회 및 저장
+        let buildingInfo = null;
+        try {
+            buildingInfo = await gisService.getBuildingInfo(pnu);
+            if (buildingInfo && buildingInfo.buildingType !== 'NONE') {
+                const buildingSaved = await supabaseService.saveBuildingWithUnits(pnu, buildingInfo);
+                if (!buildingSaved) {
+                    logger.warn(`Failed to save building info for PNU: ${pnu}, continuing...`);
+                }
+            }
+        } catch (buildingError) {
+            logger.warn(`Building info fetch/save failed for PNU: ${pnu}, continuing...`, buildingError);
+        }
+
+        // 4. union_land_lots 테이블에 관계 저장
         const unionLandLotSaved = await supabaseService.createUnionLandLot(unionId, pnu, address);
 
         if (!unionLandLotSaved) {
@@ -153,7 +167,7 @@ router.post('/add-address', async (req, res) => {
         logger.info(
             `Manual address add success: PNU=${pnu}, boundary=${!!landInfo.boundary}, price=${
                 landInfo.officialPrice
-            }, owners=${landInfo.ownerCount}`
+            }, owners=${landInfo.ownerCount}, buildingType=${buildingInfo?.buildingType || 'NONE'}`
         );
 
         return res.json({
@@ -165,6 +179,14 @@ router.post('/add-address', async (req, res) => {
                 officialPrice: landInfo.officialPrice,
                 ownerCount: landInfo.ownerCount,
                 hasBoundary: !!landInfo.boundary,
+                building: buildingInfo
+                    ? {
+                          type: buildingInfo.buildingType,
+                          name: buildingInfo.buildingName,
+                          floorCount: buildingInfo.floorCount,
+                          unitCount: buildingInfo.units.length,
+                      }
+                    : null,
             },
         });
     } catch (error: any) {

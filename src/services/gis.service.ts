@@ -944,6 +944,172 @@ class GisService {
         }
     }
 
+    // ============================================================
+    // 건물 정보 조회 (건축물대장 API)
+    // ============================================================
+
+    /**
+     * 건물 유형 분류
+     * 건축물대장 주용도 코드를 기반으로 건물 유형을 분류합니다.
+     */
+    private classifyBuildingType(
+        mainPurpose: string | null
+    ): 'DETACHED_HOUSE' | 'VILLA' | 'APARTMENT' | 'COMMERCIAL' | 'MIXED' | 'NONE' {
+        if (!mainPurpose) return 'NONE';
+
+        const purpose = mainPurpose.toLowerCase();
+
+        // 아파트
+        if (purpose.includes('아파트')) {
+            return 'APARTMENT';
+        }
+
+        // 단독주택 계열
+        if (
+            purpose.includes('단독주택') ||
+            purpose.includes('다중주택') ||
+            purpose.includes('다가구주택') ||
+            purpose.includes('다가구')
+        ) {
+            return 'DETACHED_HOUSE';
+        }
+
+        // 빌라 계열 (연립/다세대)
+        if (purpose.includes('연립주택') || purpose.includes('다세대주택') || purpose.includes('다세대')) {
+            return 'VILLA';
+        }
+
+        // 상업 건물
+        if (
+            purpose.includes('근린생활시설') ||
+            purpose.includes('업무시설') ||
+            purpose.includes('판매시설') ||
+            purpose.includes('상가') ||
+            purpose.includes('오피스')
+        ) {
+            return 'COMMERCIAL';
+        }
+
+        // 복합 건물 (주거+상업)
+        if (purpose.includes('주상복합') || purpose.includes('복합')) {
+            return 'MIXED';
+        }
+
+        // 기타 주거
+        if (purpose.includes('주택') || purpose.includes('공동주택')) {
+            return 'VILLA'; // 기본적으로 공동주택은 빌라로 분류
+        }
+
+        return 'NONE';
+    }
+
+    /**
+     * 건물 정보 조회 (표제부 + 전유부)
+     * PNU를 기반으로 건물 유형, 건물명, 동/호수 정보를 조회합니다.
+     *
+     * @param pnu 필지고유번호 (19자리)
+     * @returns 건물 정보 (유형, 건물명, 세대 목록)
+     */
+    async getBuildingInfo(pnu: string): Promise<{
+        buildingType: 'DETACHED_HOUSE' | 'VILLA' | 'APARTMENT' | 'COMMERCIAL' | 'MIXED' | 'NONE';
+        buildingName: string | null;
+        mainPurpose: string | null;
+        floorCount: number;
+        units: Array<{
+            dong: string | null;
+            ho: string | null;
+            floor: number | null;
+            area: number | null;
+        }>;
+    }> {
+        logger.info(`Fetching building info for PNU: ${pnu}`);
+
+        // 기본 반환값
+        const defaultResult = {
+            buildingType: 'NONE' as const,
+            buildingName: null,
+            mainPurpose: null,
+            floorCount: 0,
+            units: [] as Array<{ dong: string | null; ho: string | null; floor: number | null; area: number | null }>,
+        };
+
+        try {
+            // 1. 표제부 조회 (건물 기본 정보)
+            const titleInfoList = await this.getBuildingTitle(pnu);
+
+            if (!titleInfoList || titleInfoList.length === 0) {
+                logger.debug(`No building title info found for PNU: ${pnu}`);
+                return defaultResult;
+            }
+
+            // 첫 번째 표제부 정보 사용 (대표 건물)
+            const titleInfo = titleInfoList[0] as Record<string, unknown>;
+            const mainPurpose = (titleInfo.mainPurpsCdNm as string) || (titleInfo.etcPurps as string) || null;
+            const buildingName = (titleInfo.bldNm as string) || null;
+            const floorCount = Number(titleInfo.grndFlrCnt) || 0;
+
+            // 건물 유형 분류
+            const buildingType = this.classifyBuildingType(mainPurpose);
+
+            logger.debug(
+                `Building title info: name=${buildingName}, purpose=${mainPurpose}, type=${buildingType}, floors=${floorCount}`
+            );
+
+            // 2. 전유부 조회 (동/호수 정보)
+            const unitInfoList = await this.getBuildingUnits(pnu);
+
+            // 세대 정보 파싱
+            const units: Array<{ dong: string | null; ho: string | null; floor: number | null; area: number | null }> =
+                [];
+
+            if (unitInfoList && unitInfoList.length > 0) {
+                for (const unit of unitInfoList) {
+                    const unitData = unit as Record<string, unknown>;
+                    const dongNm = (unitData.dongNm as string) || null;
+                    const hoNm = (unitData.hoNm as string) || null;
+                    const flrNo = unitData.flrNo ? Number(unitData.flrNo) : null;
+                    const area = unitData.area ? Number(unitData.area) : null;
+
+                    units.push({
+                        dong: dongNm,
+                        ho: hoNm,
+                        floor: flrNo,
+                        area: area,
+                    });
+                }
+            }
+
+            // 단독주택인 경우 세대 정보가 없으면 단일 세대로 처리
+            if (units.length === 0 && buildingType !== 'NONE') {
+                units.push({
+                    dong: null,
+                    ho: null,
+                    floor: null,
+                    area: null,
+                });
+            }
+
+            logger.info(
+                `Building info fetched for PNU ${pnu}: type=${buildingType}, name=${buildingName}, units=${units.length}`
+            );
+
+            return {
+                buildingType,
+                buildingName,
+                mainPurpose,
+                floorCount,
+                units,
+            };
+        } catch (error) {
+            logger.error(`Building info fetch error for PNU ${pnu}:`, error);
+            return defaultResult;
+        }
+    }
+
+    // ============================================================
+    // 전체 토지+건물 정보 조회
+    // ============================================================
+
     /**
      * 수동 주소 추가 - 전체 데이터 조회
      * PNU를 기반으로 경계, 공시지가, 소유자 수 등 모든 정보 조회

@@ -347,6 +347,184 @@ class SupabaseService {
         }
     }
 
+    // ============================================
+    // 건물/세대 정보 저장
+    // ============================================
+
+    /**
+     * 건물 정보 UPSERT (buildings 테이블)
+     * @returns building_id 또는 null
+     */
+    async upsertBuilding(data: {
+        pnu: string;
+        buildingType: string;
+        buildingName?: string | null;
+        mainPurpose?: string | null;
+        floorCount?: number;
+        totalUnitCount?: number;
+    }): Promise<string | null> {
+        try {
+            const { data: result, error } = await this.client
+                .from('buildings')
+                .upsert(
+                    {
+                        pnu: data.pnu,
+                        building_type: data.buildingType,
+                        building_name: data.buildingName,
+                        main_purpose: data.mainPurpose,
+                        floor_count: data.floorCount ?? 0,
+                        total_unit_count: data.totalUnitCount ?? 0,
+                        updated_at: new Date().toISOString(),
+                    },
+                    {
+                        onConflict: 'pnu',
+                    }
+                )
+                .select('id')
+                .single();
+
+            if (error) {
+                logger.error(`buildings upsert failed (PNU: ${data.pnu})`, error);
+                return null;
+            }
+
+            logger.debug(
+                `buildings upserted: ${data.pnu} (type: ${data.buildingType}, name: ${data.buildingName})`
+            );
+            return result.id;
+        } catch (error) {
+            logger.error(`buildings upsert error (PNU: ${data.pnu})`, error);
+            return null;
+        }
+    }
+
+    /**
+     * 건물 ID로 조회
+     */
+    async getBuildingByPnu(pnu: string): Promise<{ id: string } | null> {
+        try {
+            const { data, error } = await this.client
+                .from('buildings')
+                .select('id')
+                .eq('pnu', pnu)
+                .single();
+
+            if (error || !data) {
+                return null;
+            }
+
+            return data;
+        } catch (error) {
+            logger.error(`buildings lookup error (PNU: ${pnu})`, error);
+            return null;
+        }
+    }
+
+    /**
+     * 세대(동/호수) 정보 UPSERT (building_units 테이블)
+     * 기존 세대는 유지하고 새 세대만 추가
+     */
+    async upsertBuildingUnits(
+        buildingId: string,
+        units: Array<{
+            dong?: string | null;
+            ho?: string | null;
+            floor?: number | null;
+            area?: number | null;
+        }>
+    ): Promise<boolean> {
+        if (!units || units.length === 0) {
+            logger.debug(`No units to upsert for building: ${buildingId}`);
+            return true;
+        }
+
+        try {
+            // 각 세대별로 upsert
+            for (const unit of units) {
+                const { error } = await this.client.from('building_units').upsert(
+                    {
+                        building_id: buildingId,
+                        dong: unit.dong,
+                        ho: unit.ho,
+                        floor: unit.floor,
+                        area: unit.area,
+                    },
+                    {
+                        onConflict: 'building_id,dong,ho',
+                        ignoreDuplicates: false,
+                    }
+                );
+
+                if (error) {
+                    // UNIQUE 제약조건 위반은 무시 (이미 존재하는 세대)
+                    if (error.code !== '23505') {
+                        logger.error(
+                            `building_units upsert failed (building: ${buildingId}, dong: ${unit.dong}, ho: ${unit.ho})`,
+                            error
+                        );
+                    }
+                }
+            }
+
+            logger.debug(`building_units upserted: ${buildingId} (count: ${units.length})`);
+            return true;
+        } catch (error) {
+            logger.error(`building_units upsert error (building: ${buildingId})`, error);
+            return false;
+        }
+    }
+
+    /**
+     * 건물과 세대 정보를 한 번에 저장
+     */
+    async saveBuildingWithUnits(
+        pnu: string,
+        buildingInfo: {
+            buildingType: string;
+            buildingName?: string | null;
+            mainPurpose?: string | null;
+            floorCount?: number;
+            units: Array<{
+                dong?: string | null;
+                ho?: string | null;
+                floor?: number | null;
+                area?: number | null;
+            }>;
+        }
+    ): Promise<boolean> {
+        try {
+            // 1. 건물 정보 저장
+            const buildingId = await this.upsertBuilding({
+                pnu,
+                buildingType: buildingInfo.buildingType,
+                buildingName: buildingInfo.buildingName,
+                mainPurpose: buildingInfo.mainPurpose,
+                floorCount: buildingInfo.floorCount,
+                totalUnitCount: buildingInfo.units.length,
+            });
+
+            if (!buildingId) {
+                logger.error(`Failed to save building for PNU: ${pnu}`);
+                return false;
+            }
+
+            // 2. 세대 정보 저장
+            const unitsResult = await this.upsertBuildingUnits(buildingId, buildingInfo.units);
+            if (!unitsResult) {
+                logger.error(`Failed to save building units for PNU: ${pnu}`);
+                return false;
+            }
+
+            logger.info(
+                `Building and units saved for PNU ${pnu}: type=${buildingInfo.buildingType}, units=${buildingInfo.units.length}`
+            );
+            return true;
+        } catch (error) {
+            logger.error(`saveBuildingWithUnits error (PNU: ${pnu})`, error);
+            return false;
+        }
+    }
+
     /**
      * sync_jobs 상태 업데이트
      */
