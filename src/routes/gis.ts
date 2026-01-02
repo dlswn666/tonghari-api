@@ -144,9 +144,7 @@ router.post('/add-address', async (req, res) => {
             } else {
                 // 다세대(VILLA, APARTMENT, COMMERCIAL, MIXED)는 세대 수로 추정
                 estimatedOwnerCount = buildingInfo.units.length || 1;
-                logger.info(
-                    `Owner count estimated from units (${buildingInfo.buildingType}): ${estimatedOwnerCount}`
-                );
+                logger.info(`Owner count estimated from units (${buildingInfo.buildingType}): ${estimatedOwnerCount}`);
             }
         }
 
