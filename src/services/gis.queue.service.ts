@@ -187,13 +187,59 @@ class GisQueueService {
                     );
                 }
 
+                // Step 2.8: 건물 정보 조회 (소유주 수 추정을 위해 land_lots 저장 전에 조회)
+                let buildingInfo: {
+                    buildingType: 'DETACHED_HOUSE' | 'VILLA' | 'APARTMENT' | 'COMMERCIAL' | 'MIXED' | 'NONE';
+                    buildingName: string | null;
+                    mainPurpose: string | null;
+                    floorCount: number;
+                    units: Array<{ dong: string | null; ho: string | null; floor: number | null; area: number | null }>;
+                } | null = null;
+                try {
+                    buildingInfo = await gisService.getBuildingInfo(pnu);
+                    if (buildingInfo && buildingInfo.buildingType !== 'NONE') {
+                        logger.debug(
+                            `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Building info found: ${pnu} (type: ${buildingInfo.buildingType}, units: ${buildingInfo.units.length})`
+                        );
+                    } else {
+                        logger.debug(
+                            `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) No building info or NONE type for: ${pnu}`
+                        );
+                    }
+                } catch (buildingError: any) {
+                    logger.warn(
+                        `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Building info fetch error for ${pnu}: ${
+                            buildingError?.message || 'Unknown error'
+                        }`
+                    );
+                    // 건물 정보 조회 실패해도 계속 진행
+                }
+
+                // Step 2.9: 소유주 수 추정 (토지대장에서 조회된 값이 0인 경우, 건물 정보 기반으로 추정)
+                let estimatedOwnerCount = ownerCount;
+                if (estimatedOwnerCount === 0 && buildingInfo && buildingInfo.buildingType !== 'NONE') {
+                    if (buildingInfo.buildingType === 'DETACHED_HOUSE') {
+                        // 단독주택은 소유주 1명으로 추정
+                        estimatedOwnerCount = 1;
+                        logger.info(
+                            `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Owner count estimated for DETACHED_HOUSE: 1`
+                        );
+                    } else {
+                        // 다세대(VILLA, APARTMENT, COMMERCIAL, MIXED)는 세대 수로 추정
+                        estimatedOwnerCount = buildingInfo.units.length || 1;
+                        logger.info(
+                            `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Owner count estimated from units (${buildingInfo.buildingType}): ${estimatedOwnerCount}`
+                        );
+                    }
+                }
+
                 // Step 3: land_lots 테이블에 필지 정보 저장 (경계 데이터 + 면적 + 소유자 수 + 공시지가 포함)
                 const landLotSaved = await supabaseService.upsertLandLot({
                     pnu,
                     address,
                     boundary, // 경계 데이터
                     area, // 면적 (㎡)
-                    owner_count: ownerCount, // 소유자 수
+                    owner_count: estimatedOwnerCount, // 소유자 수 (추정된 값 사용)
                     official_price: officialPrice ?? undefined, // 개별공시지가
                 });
 
@@ -205,6 +251,28 @@ class GisQueueService {
                         index: currentIndex,
                     });
                     continue;
+                }
+
+                // Step 3.5: 건물 정보 저장 (buildings, building_units)
+                if (buildingInfo && buildingInfo.buildingType !== 'NONE') {
+                    try {
+                        const buildingSaved = await supabaseService.saveBuildingWithUnits(pnu, buildingInfo);
+                        if (buildingSaved) {
+                            logger.debug(
+                                `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Building info saved: ${pnu} (type: ${buildingInfo.buildingType}, units: ${buildingInfo.units.length})`
+                            );
+                        } else {
+                            logger.warn(
+                                `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Building info save failed: ${pnu}, continuing...`
+                            );
+                        }
+                    } catch (buildingSaveError: any) {
+                        logger.warn(
+                            `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Building info save error for ${pnu}: ${
+                                buildingSaveError?.message || 'Unknown error'
+                            }`
+                        );
+                    }
                 }
 
                 // Step 4: union_land_lots 테이블에 조합-필지 관계 저장

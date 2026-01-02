@@ -121,14 +121,43 @@ router.post('/add-address', async (req, res) => {
         // 1. 전체 토지 정보 조회
         const landInfo = await gisService.getFullLandInfo(pnu, address);
 
-        // 2. land_lots 테이블에 저장
+        // 2. 건물 정보 조회 (소유주 수 추정을 위해 land_lots 저장 전에 조회)
+        let buildingInfo = null;
+        try {
+            buildingInfo = await gisService.getBuildingInfo(pnu);
+            if (buildingInfo && buildingInfo.buildingType !== 'NONE') {
+                logger.debug(
+                    `Building info found for PNU: ${pnu} (type: ${buildingInfo.buildingType}, units: ${buildingInfo.units.length})`
+                );
+            }
+        } catch (buildingError) {
+            logger.warn(`Building info fetch failed for PNU: ${pnu}, continuing...`, buildingError);
+        }
+
+        // 3. 소유주 수 추정 (토지대장에서 조회된 값이 0인 경우, 건물 정보 기반으로 추정)
+        let estimatedOwnerCount = landInfo.ownerCount;
+        if (estimatedOwnerCount === 0 && buildingInfo && buildingInfo.buildingType !== 'NONE') {
+            if (buildingInfo.buildingType === 'DETACHED_HOUSE') {
+                // 단독주택은 소유주 1명으로 추정
+                estimatedOwnerCount = 1;
+                logger.info(`Owner count estimated for DETACHED_HOUSE: 1`);
+            } else {
+                // 다세대(VILLA, APARTMENT, COMMERCIAL, MIXED)는 세대 수로 추정
+                estimatedOwnerCount = buildingInfo.units.length || 1;
+                logger.info(
+                    `Owner count estimated from units (${buildingInfo.buildingType}): ${estimatedOwnerCount}`
+                );
+            }
+        }
+
+        // 4. land_lots 테이블에 저장 (추정된 소유주 수 사용)
         const landLotSaved = await supabaseService.upsertLandLot({
             pnu: landInfo.pnu,
             address: landInfo.address,
             area: landInfo.area ?? undefined,
             official_price: landInfo.officialPrice ?? undefined,
             boundary: landInfo.boundary,
-            owner_count: landInfo.ownerCount,
+            owner_count: estimatedOwnerCount,
         });
 
         if (!landLotSaved) {
@@ -139,21 +168,19 @@ router.post('/add-address', async (req, res) => {
             });
         }
 
-        // 3. 건물 정보 조회 및 저장
-        let buildingInfo = null;
-        try {
-            buildingInfo = await gisService.getBuildingInfo(pnu);
-            if (buildingInfo && buildingInfo.buildingType !== 'NONE') {
+        // 5. 건물 정보 저장
+        if (buildingInfo && buildingInfo.buildingType !== 'NONE') {
+            try {
                 const buildingSaved = await supabaseService.saveBuildingWithUnits(pnu, buildingInfo);
                 if (!buildingSaved) {
                     logger.warn(`Failed to save building info for PNU: ${pnu}, continuing...`);
                 }
+            } catch (buildingSaveError) {
+                logger.warn(`Building info save failed for PNU: ${pnu}, continuing...`, buildingSaveError);
             }
-        } catch (buildingError) {
-            logger.warn(`Building info fetch/save failed for PNU: ${pnu}, continuing...`, buildingError);
         }
 
-        // 4. union_land_lots 테이블에 관계 저장
+        // 6. union_land_lots 테이블에 관계 저장
         const unionLandLotSaved = await supabaseService.createUnionLandLot(unionId, pnu, address);
 
         if (!unionLandLotSaved) {
@@ -167,7 +194,7 @@ router.post('/add-address', async (req, res) => {
         logger.info(
             `Manual address add success: PNU=${pnu}, boundary=${!!landInfo.boundary}, price=${
                 landInfo.officialPrice
-            }, owners=${landInfo.ownerCount}, buildingType=${buildingInfo?.buildingType || 'NONE'}`
+            }, owners=${estimatedOwnerCount}, buildingType=${buildingInfo?.buildingType || 'NONE'}`
         );
 
         return res.json({
@@ -177,7 +204,7 @@ router.post('/add-address', async (req, res) => {
                 address: landInfo.address,
                 area: landInfo.area,
                 officialPrice: landInfo.officialPrice,
-                ownerCount: landInfo.ownerCount,
+                ownerCount: estimatedOwnerCount,
                 hasBoundary: !!landInfo.boundary,
                 building: buildingInfo
                     ? {
