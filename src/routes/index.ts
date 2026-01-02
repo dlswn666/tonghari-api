@@ -2,6 +2,7 @@ import { Router } from 'express';
 import healthRouter from './health';
 import alimtalkRouter from './alimtalk';
 import gisRouter from './gis';
+import memberRouter from './member';
 
 const router = Router();
 
@@ -13,6 +14,9 @@ router.use('/api/alimtalk', alimtalkRouter);
 
 // GIS API 라우트
 router.use('/api/gis', gisRouter);
+
+// 조합원 대량 처리 API 라우트
+router.use('/api/member', memberRouter);
 
 export default router;
 
