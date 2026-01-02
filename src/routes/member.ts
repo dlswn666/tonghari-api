@@ -1,11 +1,7 @@
 import { Router } from 'express';
 import { memberQueueService } from '../services/member.queue.service';
 import { supabaseService } from '../services/supabase.service';
-import {
-    MemberInviteSyncRequest,
-    PreRegisterRequest,
-    MemberJobStatusResponse,
-} from '../types/member.types';
+import { MemberInviteSyncRequest, PreRegisterRequest, MemberJobStatusResponse } from '../types/member.types';
 import { createLogger } from '../utils/logger';
 
 const router = Router();
@@ -151,9 +147,7 @@ router.get('/job/:jobId', (req, res) => {
         jobId: jobStatus.jobId,
         jobType: jobStatus.jobType,
         status: jobStatus.status,
-        progress: jobStatus.totalCount > 0 
-            ? Math.round((jobStatus.processedCount / jobStatus.totalCount) * 100) 
-            : 0,
+        progress: jobStatus.totalCount > 0 ? Math.round((jobStatus.processedCount / jobStatus.totalCount) * 100) : 0,
         totalCount: jobStatus.totalCount,
         processedCount: jobStatus.processedCount,
         result: jobStatus.result,
@@ -177,7 +171,8 @@ router.get('/job/:jobId/db', async (req, res) => {
     const { jobId } = req.params;
 
     try {
-        const { data, error } = await supabaseService.getClient()
+        const { data, error } = await supabaseService
+            .getClient()
             .from('sync_jobs')
             .select('*')
             .eq('id', jobId)
@@ -222,7 +217,8 @@ router.get('/jobs/:unionId', async (req, res) => {
     const { status } = req.query; // 선택적 상태 필터
 
     try {
-        let query = supabaseService.getClient()
+        let query = supabaseService
+            .getClient()
             .from('sync_jobs')
             .select('*')
             .eq('union_id', unionId)
