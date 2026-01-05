@@ -197,8 +197,8 @@ class MemberQueueService {
 
     /**
      * 사전 등록 처리 (GIS 매칭 + 저장 통합)
-     * 1단계: GIS 매칭 (0-50%)
-     * 2단계: DB 저장 (50-100%)
+     * 1단계: GIS 매칭 (0-50%) - 면적/공시지가가 있으면 생략
+     * 2단계: DB 저장 (50-100%) - users + user_property_units
      */
     private async processPreRegisterJob(jobId: string, request: PreRegisterRequest): Promise<void> {
         const job = this.jobs.get(jobId);
@@ -213,11 +213,13 @@ class MemberQueueService {
         let matchedCount = 0;
         let unmatchedCount = 0;
         let duplicateCount = 0;
+        let apiSkippedCount = 0;
 
         const totalCount = request.members.length;
 
         // ========================================
         // 1단계: GIS 매칭 (0-50%)
+        // 면적 AND 공시지가가 있으면 API 호출 생략
         // ========================================
         logger.info(`[Pre-Register ${jobId}] Phase 1: GIS Matching`);
         
@@ -225,6 +227,7 @@ class MemberQueueService {
             row: PreRegisterData;
             pnu: string | null;
             matched: boolean;
+            apiSkipped: boolean; // API 호출 생략 여부
         }
         
         const matchedMembers: MatchedMember[] = [];
@@ -235,23 +238,48 @@ class MemberQueueService {
             
             let pnu: string | null = null;
             let matched = false;
+            let apiSkipped = false;
             
-            try {
-                // GIS 매칭 시도
-                const pnuResult = await gisService.generatePNUFromAddress(member.propertyAddress);
-                if (pnuResult) {
-                    pnu = pnuResult.pnu;
-                    matched = true;
-                    matchedCount++;
-                } else {
+            // 면적 AND 공시지가가 있으면 API 호출 생략
+            const hasPropertyDetails = member.area !== undefined && member.area > 0 && 
+                                        member.officialPrice !== undefined && member.officialPrice > 0;
+            
+            if (hasPropertyDetails) {
+                // API 호출 생략 - 로컬 PNU 생성만 시도
+                try {
+                    const pnuResult = await gisService.generatePNUFromAddress(member.propertyAddress);
+                    if (pnuResult) {
+                        pnu = pnuResult.pnu;
+                        matched = true;
+                        matchedCount++;
+                    } else {
+                        unmatchedCount++;
+                    }
+                } catch (err: any) {
+                    logger.warn(`[Pre-Register ${jobId}] Local PNU generation failed for "${member.propertyAddress}": ${err.message}`);
                     unmatchedCount++;
                 }
-            } catch (err: any) {
-                logger.warn(`[Pre-Register ${jobId}] GIS matching failed for "${member.propertyAddress}": ${err.message}`);
-                unmatchedCount++;
+                apiSkipped = true;
+                apiSkippedCount++;
+                logger.debug(`[Pre-Register ${jobId}] API skipped for "${member.propertyAddress}" (has area & price)`);
+            } else {
+                // 기존 GIS 매칭 로직 (API 호출)
+                try {
+                    const pnuResult = await gisService.generatePNUFromAddress(member.propertyAddress);
+                    if (pnuResult) {
+                        pnu = pnuResult.pnu;
+                        matched = true;
+                        matchedCount++;
+                    } else {
+                        unmatchedCount++;
+                    }
+                } catch (err: any) {
+                    logger.warn(`[Pre-Register ${jobId}] GIS matching failed for "${member.propertyAddress}": ${err.message}`);
+                    unmatchedCount++;
+                }
             }
             
-            matchedMembers.push({ row: member, pnu, matched });
+            matchedMembers.push({ row: member, pnu, matched, apiSkipped });
             
             // 진행률 업데이트 (0-50%)
             job.processedCount = currentIndex;
@@ -264,16 +292,18 @@ class MemberQueueService {
                     phase: 'MATCHING',
                     matchedCount,
                     unmatchedCount,
+                    apiSkippedCount,
                     totalCount,
                 };
                 await supabaseService.updateSyncJobStatus(jobId, 'PROCESSING', progress, undefined, previewData);
             }
         }
         
-        logger.info(`[Pre-Register ${jobId}] Phase 1 completed - Matched: ${matchedCount}, Unmatched: ${unmatchedCount}`);
+        logger.info(`[Pre-Register ${jobId}] Phase 1 completed - Matched: ${matchedCount}, Unmatched: ${unmatchedCount}, API Skipped: ${apiSkippedCount}`);
 
         // ========================================
         // 2단계: DB 저장 (50-100%)
+        // users + building_units + user_property_units 저장
         // ========================================
         logger.info(`[Pre-Register ${jobId}] Phase 2: DB Insert`);
         
@@ -305,8 +335,8 @@ class MemberQueueService {
                 // UUID 생성
                 const userId = uuidv4();
 
-                // users 테이블에 저장
-                const { error } = await client.from('users').insert({
+                // users 테이블에 저장 (기본 정보)
+                const { error: userError } = await client.from('users').insert({
                     id: userId,
                     name: member.row.name,
                     phone_number: member.row.phoneNumber || null,
@@ -317,15 +347,54 @@ class MemberQueueService {
                     resident_address: member.row.residentAddress || null,
                     property_pnu: member.pnu,
                     property_address_jibun: member.row.propertyAddress,
+                    property_address_road: member.row.propertyAddressRoad || null,
                     property_dong: normalizedDong,
                     property_ho: normalizedHo,
+                    notes: member.row.notes || null,
                 });
 
-                if (error) {
-                    errors.push(`${member.row.name}: ${error.message}`);
-                } else {
-                    savedCount++;
+                if (userError) {
+                    errors.push(`${member.row.name}: ${userError.message}`);
+                    continue;
                 }
+
+                // building_unit 조회 또는 생성 (PNU가 있는 경우)
+                let buildingUnitId: string | null = null;
+                
+                if (member.pnu) {
+                    buildingUnitId = await this.findOrCreateBuildingUnit(
+                        client,
+                        member.pnu,
+                        member.row.buildingName || null,
+                        normalizedDong,
+                        normalizedHo,
+                        member.row.area || null,
+                        member.row.officialPrice || null
+                    );
+                }
+
+                // user_property_units에 연결 저장 (building_unit이 있는 경우)
+                if (buildingUnitId) {
+                    const ownershipType = member.row.ownershipType || 'OWNER';
+                    const ownershipRatio = member.row.ownershipRatio || (ownershipType === 'OWNER' ? 100 : null);
+                    
+                    const { error: linkError } = await client.from('user_property_units').insert({
+                        id: uuidv4(),
+                        user_id: userId,
+                        building_unit_id: buildingUnitId,
+                        ownership_type: ownershipType,
+                        ownership_ratio: ownershipRatio,
+                        is_primary: true, // 첫 번째 물건지는 대표로 설정
+                        notes: member.row.notes || null,
+                    });
+
+                    if (linkError) {
+                        logger.warn(`[Pre-Register ${jobId}] user_property_units insert failed for ${member.row.name}: ${linkError.message}`);
+                        // 연결 실패해도 사용자는 저장됨
+                    }
+                }
+
+                savedCount++;
 
             } catch (err: any) {
                 errors.push(`${member.row.name}: ${err.message || 'Unknown error'}`);
@@ -452,6 +521,140 @@ class MemberQueueService {
         } catch (error) {
             logger.error('Duplicate check error:', error);
             return { isDuplicate: false };
+        }
+    }
+
+    /**
+     * Building Unit 조회 또는 생성
+     * 1. PNU로 building 조회, 없으면 생성
+     * 2. building에서 동/호수로 building_unit 조회, 없으면 생성
+     * 3. 면적/공시지가 업데이트 (엑셀에서 제공된 경우)
+     */
+    private async findOrCreateBuildingUnit(
+        client: any,
+        pnu: string,
+        buildingName: string | null,
+        dong: string | null,
+        ho: string | null,
+        area: number | null,
+        officialPrice: number | null
+    ): Promise<string | null> {
+        try {
+            // 1. PNU로 land_lot 조회
+            const { data: landLot, error: landLotError } = await client
+                .from('land_lots')
+                .select('id')
+                .eq('pnu', pnu)
+                .single();
+
+            if (landLotError && landLotError.code !== 'PGRST116') {
+                logger.warn(`land_lot lookup error for PNU ${pnu}: ${landLotError.message}`);
+                return null;
+            }
+
+            let landLotId: string | null = landLot?.id || null;
+
+            // land_lot이 없으면 생성하지 않음 (GIS 초기화에서 생성되어야 함)
+            if (!landLotId) {
+                logger.debug(`No land_lot found for PNU ${pnu}, skipping building_unit creation`);
+                return null;
+            }
+
+            // 2. land_lot_id로 building 조회
+            let { data: building, error: buildingError } = await client
+                .from('buildings')
+                .select('id')
+                .eq('land_lot_id', landLotId)
+                .limit(1)
+                .single();
+
+            if (buildingError && buildingError.code !== 'PGRST116') {
+                logger.warn(`building lookup error for land_lot ${landLotId}: ${buildingError.message}`);
+            }
+
+            let buildingId: string | null = building?.id || null;
+
+            // building이 없으면 생성
+            if (!buildingId) {
+                const newBuildingId = uuidv4();
+                const { error: createBuildingError } = await client.from('buildings').insert({
+                    id: newBuildingId,
+                    land_lot_id: landLotId,
+                    building_name: buildingName,
+                });
+
+                if (createBuildingError) {
+                    logger.warn(`building creation failed for land_lot ${landLotId}: ${createBuildingError.message}`);
+                    return null;
+                }
+
+                buildingId = newBuildingId;
+                logger.debug(`Created new building ${buildingId} for land_lot ${landLotId}`);
+            }
+
+            // 3. building_id + dong + ho로 building_unit 조회
+            let query = client
+                .from('building_units')
+                .select('id')
+                .eq('building_id', buildingId);
+
+            if (dong) {
+                query = query.eq('dong', dong);
+            } else {
+                query = query.is('dong', null);
+            }
+
+            if (ho) {
+                query = query.eq('ho', ho);
+            } else {
+                query = query.is('ho', null);
+            }
+
+            const { data: existingUnit, error: unitLookupError } = await query.limit(1).single();
+
+            if (unitLookupError && unitLookupError.code !== 'PGRST116') {
+                logger.warn(`building_unit lookup error: ${unitLookupError.message}`);
+            }
+
+            if (existingUnit) {
+                // 기존 unit이 있고, 면적/공시지가가 제공되면 업데이트
+                if (area !== null || officialPrice !== null) {
+                    const updateData: Record<string, any> = {};
+                    if (area !== null) updateData.area = area;
+                    if (officialPrice !== null) updateData.official_price = officialPrice;
+
+                    await client
+                        .from('building_units')
+                        .update(updateData)
+                        .eq('id', existingUnit.id);
+
+                    logger.debug(`Updated building_unit ${existingUnit.id} with area=${area}, price=${officialPrice}`);
+                }
+                return existingUnit.id;
+            }
+
+            // 4. building_unit이 없으면 생성
+            const newUnitId = uuidv4();
+            const { error: createUnitError } = await client.from('building_units').insert({
+                id: newUnitId,
+                building_id: buildingId,
+                dong: dong,
+                ho: ho,
+                area: area,
+                official_price: officialPrice,
+            });
+
+            if (createUnitError) {
+                logger.warn(`building_unit creation failed: ${createUnitError.message}`);
+                return null;
+            }
+
+            logger.debug(`Created new building_unit ${newUnitId} for building ${buildingId} (dong=${dong}, ho=${ho})`);
+            return newUnitId;
+
+        } catch (error: any) {
+            logger.error(`findOrCreateBuildingUnit error: ${error.message}`);
+            return null;
         }
     }
 

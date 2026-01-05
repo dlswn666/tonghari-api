@@ -50,15 +50,33 @@ export interface MemberInviteSyncResult {
 // ============================================
 
 /**
+ * 소유유형
+ */
+export type OwnershipType = 'OWNER' | 'CO_OWNER' | 'FAMILY';
+
+export const OWNERSHIP_TYPE_LABELS: Record<OwnershipType, string> = {
+    OWNER: '소유주',
+    CO_OWNER: '공동소유',
+    FAMILY: '소유주 가족',
+};
+
+/**
  * 사전 등록 데이터 (엑셀에서 파싱된 Raw 데이터)
  */
 export interface PreRegisterData {
     name: string;
     phoneNumber?: string;
     propertyAddress: string; // 소유지 지번 (필수)
+    propertyAddressRoad?: string; // 소유지 도로명 (선택)
+    buildingName?: string; // 건물이름 (선택)
     dong?: string;
     ho?: string;
+    area?: number; // 면적 (m2)
+    officialPrice?: number; // 공시지가 (원)
     residentAddress?: string;
+    ownershipType?: OwnershipType; // 소유유형 (기본값: OWNER)
+    ownershipRatio?: number; // 지분율 (%)
+    notes?: string; // 특이사항
 }
 
 /**
