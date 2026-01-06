@@ -376,14 +376,26 @@ class MemberQueueService {
                 // user_property_units에 연결 저장 (building_unit이 있는 경우)
                 if (buildingUnitId) {
                     const ownershipType = member.row.ownershipType || 'OWNER';
-                    const ownershipRatio = member.row.ownershipRatio || (ownershipType === 'OWNER' ? 100 : null);
+                    
+                    // 하위 호환성: 기존 단일 지분율이 있으면 토지/건축물 양쪽에 적용
+                    const defaultRatio = ownershipType === 'OWNER' ? 100 : null;
+                    const landOwnershipRatio = member.row.landOwnershipRatio ?? member.row.ownershipRatio ?? defaultRatio;
+                    const buildingOwnershipRatio = member.row.buildingOwnershipRatio ?? member.row.ownershipRatio ?? defaultRatio;
+                    
+                    // 토지/건축물 면적 (하위 호환: 기존 area 필드 참조)
+                    const landArea = member.row.landArea ?? null;
+                    const buildingArea = member.row.buildingArea ?? member.row.area ?? null;
                     
                     const { error: linkError } = await client.from('user_property_units').insert({
                         id: uuidv4(),
                         user_id: userId,
                         building_unit_id: buildingUnitId,
                         ownership_type: ownershipType,
-                        ownership_ratio: ownershipRatio,
+                        ownership_ratio: member.row.ownershipRatio ?? defaultRatio, // 하위 호환성
+                        land_area: landArea,
+                        land_ownership_ratio: landOwnershipRatio,
+                        building_area: buildingArea,
+                        building_ownership_ratio: buildingOwnershipRatio,
                         is_primary: true, // 첫 번째 물건지는 대표로 설정
                         notes: member.row.notes || null,
                     });
@@ -456,25 +468,47 @@ class MemberQueueService {
     }
 
     /**
-     * 동 정규화
+     * 동 정규화 (프론트엔드 dong-ho-utils.ts와 동일한 로직)
+     * - "제" 접두사 제거 (제1호 → 1호)
+     * - "동", "호", "층" 접미사 제거
+     * - 지하 표시 통일 (비, 지하, 지 → B)
      */
     private normalizeDong(dong?: string): string | null {
         if (!dong) return null;
         let normalized = dong.trim();
-        // "동" 접미사 제거
-        normalized = normalized.replace(/동$/g, '');
-        return normalized || null;
+
+        // "제" 접두사 제거 (예: "제1호" -> "1호")
+        normalized = normalized.replace(/^제/g, '');
+
+        // "동", "호", "층" 접미사 제거
+        normalized = normalized.replace(/(동|호|층)$/g, '');
+
+        // 지하 표시 통일 (비, 지하, 지 → B)
+        normalized = normalized.replace(/^비/g, 'B');
+        normalized = normalized.replace(/^지하/g, 'B');
+        normalized = normalized.replace(/^지(?=\d)/g, 'B');
+
+        return normalized.trim() || null;
     }
 
     /**
-     * 호수 정규화
+     * 호수 정규화 (프론트엔드 dong-ho-utils.ts와 동일한 로직)
+     * - "호" 접미사 제거
+     * - 지하층 표시 통일 (비, 지하, 지 → B)
      */
     private normalizeHo(ho?: string): string | null {
         if (!ho) return null;
         let normalized = ho.trim();
+
         // "호" 접미사 제거
         normalized = normalized.replace(/호$/g, '');
-        return normalized || null;
+
+        // 지하층 표시 통일 (비, 지하, 지 → B)
+        normalized = normalized.replace(/^비/g, 'B');
+        normalized = normalized.replace(/^지하/g, 'B');
+        normalized = normalized.replace(/^지(?=\d)/g, 'B');
+
+        return normalized.trim() || null;
     }
 
     /**

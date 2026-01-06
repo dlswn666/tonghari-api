@@ -71,11 +71,17 @@ export interface PreRegisterData {
     buildingName?: string; // 건물이름 (선택)
     dong?: string;
     ho?: string;
-    area?: number; // 면적 (m2)
+    // 기존 필드 (하위 호환성 유지)
+    area?: number; // 면적 (m2) - deprecated, landArea/buildingArea 사용 권장
     officialPrice?: number; // 공시지가 (원)
+    ownershipRatio?: number; // 지분율 (%) - deprecated, landOwnershipRatio/buildingOwnershipRatio 사용 권장
+    // 신규 필드: 토지/건축물 분리
+    landArea?: number; // 토지 소유 면적 (m2)
+    landOwnershipRatio?: number; // 토지 지분율 (%)
+    buildingArea?: number; // 건축물 소유 면적 (m2)
+    buildingOwnershipRatio?: number; // 건축물 지분율 (%)
     residentAddress?: string;
     ownershipType?: OwnershipType; // 소유유형 (기본값: OWNER)
-    ownershipRatio?: number; // 지분율 (%)
     notes?: string; // 특이사항
 }
 
