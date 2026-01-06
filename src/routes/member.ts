@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { memberQueueService } from '../services/member.queue.service';
 import { supabaseService } from '../services/supabase.service';
-import { MemberInviteSyncRequest, PreRegisterRequest, MemberJobStatusResponse } from '../types/member.types';
+import { MemberInviteSyncRequest, PreRegisterRequest, MemberJobStatusResponse, SyncPropertiesRequest } from '../types/member.types';
 import { createLogger } from '../utils/logger';
 
 const router = Router();
@@ -262,6 +262,54 @@ router.get('/jobs/:unionId', async (req, res) => {
         });
     } catch (error: any) {
         logger.error('Jobs list lookup failed:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message || 'Internal server error.',
+        });
+    }
+});
+
+/**
+ * 소유지 동기화 요청 (users -> user_property_units 연결)
+ * POST /member/sync-properties
+ *
+ * GIS 데이터(land_lots, buildings, building_units)와 조합원 데이터(users)를 매칭하여
+ * user_property_units 테이블에 연결 레코드를 생성합니다.
+ *
+ * Request Body:
+ * {
+ *   unionId: string
+ * }
+ */
+router.post('/sync-properties', async (req, res) => {
+    const { unionId } = req.body;
+
+    if (!unionId) {
+        return res.status(400).json({
+            success: false,
+            error: 'unionId is required.',
+        });
+    }
+
+    try {
+        logger.info(`Sync properties request: unionId=${unionId}`);
+
+        const request: SyncPropertiesRequest = {
+            jobType: 'SYNC_PROPERTIES',
+            unionId,
+        };
+
+        const jobInfo = await memberQueueService.addSyncPropertiesJob(request);
+
+        res.json({
+            success: true,
+            jobId: jobInfo.jobId,
+            jobType: jobInfo.jobType,
+            status: jobInfo.status,
+            totalCount: jobInfo.totalCount,
+        });
+    } catch (error: any) {
+        logger.error('Sync properties request failed:', error);
         res.status(500).json({
             success: false,
             error: error.message || 'Internal server error.',
