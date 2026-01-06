@@ -389,35 +389,45 @@ class MemberQueueService {
                 const normalizedHo = this.normalizeHo(member.row.ho);
 
                 // 중복 체크 (PNU가 있는 경우에만)
+                // 공동 소유자 지원: 동일 PNU+동+호라도 이름이 다르면 별도 저장
                 if (member.pnu) {
                     const duplicateResult = await this.checkDuplicatePnu(
                         client,
                         request.unionId,
                         member.pnu,
                         normalizedDong,
-                        normalizedHo
+                        normalizedHo,
+                        member.row.name // 현재 처리 중인 멤버 이름 전달
                     );
 
                     if (duplicateResult.isDuplicate && duplicateResult.existingUserId) {
-                        // 중복인 경우 기존 사용자 정보 업데이트
-                        const { error: updateError } = await client
-                            .from('users')
-                            .update({
-                                name: member.row.name,
-                                phone_number: member.row.phoneNumber || null,
-                                resident_address: member.row.residentAddress || null,
-                                property_address_road: member.row.propertyAddressRoad || null,
-                                notes: member.row.notes || null,
-                            })
-                            .eq('id', duplicateResult.existingUserId);
+                        // 이름이 같으면 실제 중복 → 기존 정보 업데이트
+                        // 이름이 다르면 공동 소유자 → 별도 레코드로 저장 (continue 하지 않음)
+                        const isSamePerson = duplicateResult.existingUserName?.trim() === member.row.name.trim();
 
-                        if (updateError) {
-                            errors.push(`${member.row.name}: 업데이트 실패 - ${updateError.message}`);
+                        if (isSamePerson) {
+                            // 동일인 중복인 경우 기존 사용자 정보 업데이트
+                            const { error: updateError } = await client
+                                .from('users')
+                                .update({
+                                    name: member.row.name,
+                                    phone_number: member.row.phoneNumber || null,
+                                    resident_address: member.row.residentAddress || null,
+                                    property_address_road: member.row.propertyAddressRoad || null,
+                                    notes: member.row.notes || null,
+                                })
+                                .eq('id', duplicateResult.existingUserId);
+
+                            if (updateError) {
+                                errors.push(`${member.row.name}: 업데이트 실패 - ${updateError.message}`);
+                            } else {
+                                updatedCount++;
+                                duplicateCount++;
+                            }
+                            continue;
                         } else {
-                            updatedCount++;
-                            duplicateCount++;
+                            // 공동 소유자는 별도 레코드로 저장 (continue 하지 않고 아래 insert 로직 진행)
                         }
-                        continue;
                     }
                 }
 
@@ -578,7 +588,8 @@ class MemberQueueService {
         unionId: string,
         pnu: string,
         dong: string | null,
-        ho: string | null
+        ho: string | null,
+        currentMemberName?: string // 현재 처리 중인 멤버 이름 (공동 소유자 판별용)
     ): Promise<{ isDuplicate: boolean; existingUserId?: string; existingUserName?: string }> {
         try {
             let query = client.from('users').select('id, name').eq('union_id', unionId).eq('property_pnu', pnu);
