@@ -115,6 +115,7 @@ export interface PreRegisterResult {
     matchedCount: number;
     unmatchedCount: number;
     savedCount: number;
+    updatedCount: number;  // 중복 시 업데이트된 건수
     duplicateCount: number;
     errors: string[];
 }

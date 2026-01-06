@@ -18,7 +18,7 @@ const logger = createLogger('MEMBER-QUEUE');
 
 /**
  * 조합원 대량 처리 큐 서비스
- * 
+ *
  * - MEMBER_INVITE_SYNC: 조합원 초대 동기화 (member_invites 테이블)
  * - PRE_REGISTER: 사전 등록 (users 테이블, PRE_REGISTERED 상태)
  */
@@ -58,13 +58,16 @@ class MemberQueueService {
 
         // Supabase sync_jobs 테이블에 초기 등록
         try {
-            await supabaseService.getClient().from('sync_jobs').insert({
-                id: jobId,
-                union_id: request.unionId,
-                status: 'PROCESSING',
-                progress: 0,
-                preview_data: { job_type: 'MEMBER_INVITE_SYNC' },
-            });
+            await supabaseService
+                .getClient()
+                .from('sync_jobs')
+                .insert({
+                    id: jobId,
+                    union_id: request.unionId,
+                    status: 'PROCESSING',
+                    progress: 0,
+                    preview_data: { job_type: 'MEMBER_INVITE_SYNC' },
+                });
             logger.info(`Member invite sync job added: ${jobId} (members: ${request.members.length})`);
         } catch (error) {
             logger.error(`sync_jobs registration failed (${jobId})`, error);
@@ -102,13 +105,16 @@ class MemberQueueService {
 
         // Supabase sync_jobs 테이블에 초기 등록
         try {
-            await supabaseService.getClient().from('sync_jobs').insert({
-                id: jobId,
-                union_id: request.unionId,
-                status: 'PROCESSING',
-                progress: 0,
-                preview_data: { job_type: 'PRE_REGISTER' },
-            });
+            await supabaseService
+                .getClient()
+                .from('sync_jobs')
+                .insert({
+                    id: jobId,
+                    union_id: request.unionId,
+                    status: 'PROCESSING',
+                    progress: 0,
+                    preview_data: { job_type: 'PRE_REGISTER' },
+                });
             logger.info(`Pre-register job added: ${jobId} (members: ${request.members.length})`);
         } catch (error) {
             logger.error(`sync_jobs registration failed (${jobId})`, error);
@@ -134,7 +140,7 @@ class MemberQueueService {
      */
     async addSyncPropertiesJob(request: SyncPropertiesRequest): Promise<MemberJobInfo> {
         const jobId = uuidv4();
-        
+
         // 먼저 해당 조합의 사용자 수를 조회
         const client = supabaseService.getClient();
         const { count, error: countError } = await client
@@ -142,13 +148,13 @@ class MemberQueueService {
             .select('*', { count: 'exact', head: true })
             .eq('union_id', request.unionId)
             .not('property_pnu', 'is', null);
-        
+
         if (countError) {
             logger.error(`Failed to count users for sync: ${countError.message}`);
         }
-        
+
         const totalCount = count || 0;
-        
+
         const jobInfo: MemberJobInfo = {
             jobId,
             jobType: 'SYNC_PROPERTIES',
@@ -200,7 +206,7 @@ class MemberQueueService {
 
         try {
             const client = supabaseService.getClient();
-            
+
             // RPC 함수 호출 - 동기화 수행
             const { data: syncResult, error: syncError } = await client.rpc('sync_member_invites', {
                 p_union_id: request.unionId,
@@ -222,7 +228,10 @@ class MemberQueueService {
                     try {
                         const { error: deleteAuthError } = await client.auth.admin.deleteUser(authUserId);
                         if (deleteAuthError) {
-                            logger.error(`[Member Sync ${jobId}] Failed to delete auth user ${authUserId}:`, deleteAuthError);
+                            logger.error(
+                                `[Member Sync ${jobId}] Failed to delete auth user ${authUserId}:`,
+                                deleteAuthError
+                            );
                         }
                     } catch (error) {
                         logger.error(`[Member Sync ${jobId}] Error deleting auth user ${authUserId}:`, error);
@@ -248,8 +257,9 @@ class MemberQueueService {
 
             await supabaseService.updateSyncJobStatus(jobId, 'COMPLETED', 100, undefined, previewData);
 
-            logger.info(`[Member Sync ${jobId}] Completed - Inserted: ${result.inserted}, Deleted pending: ${result.deleted_pending}, Deleted used: ${result.deleted_used}`);
-
+            logger.info(
+                `[Member Sync ${jobId}] Completed - Inserted: ${result.inserted}, Deleted pending: ${result.deleted_pending}, Deleted used: ${result.deleted_used}`
+            );
         } catch (error: any) {
             const errorMessage = error.message || 'Unknown error';
             logger.error(`[Member Sync ${jobId}] Failed`, error);
@@ -273,6 +283,7 @@ class MemberQueueService {
         const client = supabaseService.getClient();
         const errors: string[] = [];
         let savedCount = 0;
+        let updatedCount = 0; // 중복 시 업데이트된 건수
         let matchedCount = 0;
         let unmatchedCount = 0;
         let duplicateCount = 0;
@@ -281,32 +292,36 @@ class MemberQueueService {
         const totalCount = request.members.length;
 
         // ========================================
-        // 1단계: GIS 매칭 (0-50%)
+        // 1단계: GIS 매칭 (진행률 업데이트 없음)
         // 면적 AND 공시지가가 있으면 API 호출 생략
+        // DB Insert 완료 시점에만 진행률을 반영하므로 이 단계에서는 진행률 0% 유지
         // ========================================
         logger.info(`[Pre-Register ${jobId}] Phase 1: GIS Matching`);
-        
+
         interface MatchedMember {
             row: PreRegisterData;
             pnu: string | null;
             matched: boolean;
             apiSkipped: boolean; // API 호출 생략 여부
         }
-        
+
         const matchedMembers: MatchedMember[] = [];
-        
+
         for (let i = 0; i < request.members.length; i++) {
             const member = request.members[i];
             const currentIndex = i + 1;
-            
+
             let pnu: string | null = null;
             let matched = false;
             let apiSkipped = false;
-            
+
             // 면적 AND 공시지가가 있으면 API 호출 생략
-            const hasPropertyDetails = member.area !== undefined && member.area > 0 && 
-                                        member.officialPrice !== undefined && member.officialPrice > 0;
-            
+            const hasPropertyDetails =
+                member.area !== undefined &&
+                member.area > 0 &&
+                member.officialPrice !== undefined &&
+                member.officialPrice > 0;
+
             if (hasPropertyDetails) {
                 // API 호출 생략 - 로컬 PNU 생성만 시도
                 try {
@@ -319,7 +334,9 @@ class MemberQueueService {
                         unmatchedCount++;
                     }
                 } catch (err: any) {
-                    logger.warn(`[Pre-Register ${jobId}] Local PNU generation failed for "${member.propertyAddress}": ${err.message}`);
+                    logger.warn(
+                        `[Pre-Register ${jobId}] Local PNU generation failed for "${member.propertyAddress}": ${err.message}`
+                    );
                     unmatchedCount++;
                 }
                 apiSkipped = true;
@@ -337,39 +354,31 @@ class MemberQueueService {
                         unmatchedCount++;
                     }
                 } catch (err: any) {
-                    logger.warn(`[Pre-Register ${jobId}] GIS matching failed for "${member.propertyAddress}": ${err.message}`);
+                    logger.warn(
+                        `[Pre-Register ${jobId}] GIS matching failed for "${member.propertyAddress}": ${err.message}`
+                    );
                     unmatchedCount++;
                 }
             }
-            
+
             matchedMembers.push({ row: member, pnu, matched, apiSkipped });
-            
-            // 진행률 업데이트 (0-50%)
+
+            // Phase 1에서는 진행률을 업데이트하지 않음 (DB Insert 완료 시점에만 진행률 반영)
+            // 로컬 상태만 업데이트
             job.processedCount = currentIndex;
-            const progress = Math.round((currentIndex / totalCount) * 50);
-            
-            // 5% 단위로 DB 업데이트
-            if (progress % 5 === 0 || currentIndex === totalCount) {
-                const previewData = {
-                    job_type: 'PRE_REGISTER',
-                    phase: 'MATCHING',
-                    matchedCount,
-                    unmatchedCount,
-                    apiSkippedCount,
-                    totalCount,
-                };
-                await supabaseService.updateSyncJobStatus(jobId, 'PROCESSING', progress, undefined, previewData);
-            }
         }
-        
-        logger.info(`[Pre-Register ${jobId}] Phase 1 completed - Matched: ${matchedCount}, Unmatched: ${unmatchedCount}, API Skipped: ${apiSkippedCount}`);
+
+        logger.info(
+            `[Pre-Register ${jobId}] Phase 1 completed - Matched: ${matchedCount}, Unmatched: ${unmatchedCount}, API Skipped: ${apiSkippedCount}`
+        );
 
         // ========================================
-        // 2단계: DB 저장 (50-100%)
+        // 2단계: DB 저장 (0-100%)
         // users + building_units + user_property_units 저장
+        // Phase 1에서 진행률 업데이트 없이, DB Insert 완료 시점에만 반영
         // ========================================
         logger.info(`[Pre-Register ${jobId}] Phase 2: DB Insert`);
-        
+
         for (let i = 0; i < matchedMembers.length; i++) {
             const member = matchedMembers[i];
             const currentIndex = i + 1;
@@ -381,16 +390,33 @@ class MemberQueueService {
 
                 // 중복 체크 (PNU가 있는 경우에만)
                 if (member.pnu) {
-                    const isDuplicate = await this.checkDuplicatePnu(
+                    const duplicateResult = await this.checkDuplicatePnu(
                         client,
                         request.unionId,
                         member.pnu,
                         normalizedDong,
                         normalizedHo
                     );
-                    if (isDuplicate.isDuplicate) {
-                        duplicateCount++;
-                        errors.push(`${member.row.name}: 이미 등록된 소유지입니다. (기존 등록자: ${isDuplicate.existingUserName})`);
+
+                    if (duplicateResult.isDuplicate && duplicateResult.existingUserId) {
+                        // 중복인 경우 기존 사용자 정보 업데이트
+                        const { error: updateError } = await client
+                            .from('users')
+                            .update({
+                                name: member.row.name,
+                                phone_number: member.row.phoneNumber || null,
+                                resident_address: member.row.residentAddress || null,
+                                property_address_road: member.row.propertyAddressRoad || null,
+                                notes: member.row.notes || null,
+                            })
+                            .eq('id', duplicateResult.existingUserId);
+
+                        if (updateError) {
+                            errors.push(`${member.row.name}: 업데이트 실패 - ${updateError.message}`);
+                        } else {
+                            updatedCount++;
+                            duplicateCount++;
+                        }
                         continue;
                     }
                 }
@@ -426,14 +452,13 @@ class MemberQueueService {
                 // 이후 "동기화" 버튼을 통해 user_property_units 연결
 
                 savedCount++;
-
             } catch (err: any) {
                 errors.push(`${member.row.name}: ${err.message || 'Unknown error'}`);
             }
 
-            // 진행률 업데이트 (50-100%)
-            const progress = 50 + Math.round((currentIndex / totalCount) * 50);
-            
+            // 진행률 업데이트 (0-100%) - DB Insert 완료 시점에만 진행률 반영
+            const progress = Math.round((currentIndex / totalCount) * 100);
+
             // 5% 단위로 DB 업데이트
             if (progress % 5 === 0 || currentIndex === totalCount) {
                 const previewData = {
@@ -442,6 +467,7 @@ class MemberQueueService {
                     matchedCount,
                     unmatchedCount,
                     savedCount,
+                    updatedCount,
                     duplicateCount,
                     totalCount,
                 };
@@ -449,14 +475,16 @@ class MemberQueueService {
             }
         }
 
-        // 완료 처리
-        const finalStatus = savedCount === 0 && errors.length > 0 ? 'failed' : 'completed';
+        // 완료 처리 - 신규 저장 또는 업데이트가 있으면 성공으로 처리
+        const hasSuccessfulOperations = savedCount > 0 || updatedCount > 0;
+        const finalStatus = !hasSuccessfulOperations && errors.length > 0 ? 'failed' : 'completed';
         const result: PreRegisterResult = {
             success: errors.length === 0,
             totalCount,
             matchedCount,
             unmatchedCount,
             savedCount,
+            updatedCount,
             duplicateCount,
             errors: errors.slice(0, 100), // 최대 100개만 저장
         };
@@ -483,7 +511,9 @@ class MemberQueueService {
             previewData
         );
 
-        logger.info(`[Pre-Register ${jobId}] Completed - Matched: ${matchedCount}, Saved: ${savedCount}, Duplicates: ${duplicateCount}, Errors: ${errors.length}, Total: ${totalCount}`);
+        logger.info(
+            `[Pre-Register ${jobId}] Completed - Matched: ${matchedCount}, Saved: ${savedCount}, Updated: ${updatedCount}, Duplicates: ${duplicateCount}, Errors: ${errors.length}, Total: ${totalCount}`
+        );
     }
 
     /**
@@ -541,6 +571,7 @@ class MemberQueueService {
 
     /**
      * PNU 중복 체크
+     * 중복인 경우 기존 사용자 ID도 반환하여 업데이트에 사용
      */
     private async checkDuplicatePnu(
         client: any,
@@ -548,13 +579,9 @@ class MemberQueueService {
         pnu: string,
         dong: string | null,
         ho: string | null
-    ): Promise<{ isDuplicate: boolean; existingUserName?: string }> {
+    ): Promise<{ isDuplicate: boolean; existingUserId?: string; existingUserName?: string }> {
         try {
-            let query = client
-                .from('users')
-                .select('id, name')
-                .eq('union_id', unionId)
-                .eq('property_pnu', pnu);
+            let query = client.from('users').select('id, name').eq('union_id', unionId).eq('property_pnu', pnu);
 
             if (dong) {
                 query = query.eq('property_dong', dong);
@@ -576,7 +603,11 @@ class MemberQueueService {
             }
 
             if (data && data.length > 0) {
-                return { isDuplicate: true, existingUserName: data[0].name };
+                return {
+                    isDuplicate: true,
+                    existingUserId: data[0].id,
+                    existingUserName: data[0].name,
+                };
             }
 
             return { isDuplicate: false };
@@ -654,10 +685,7 @@ class MemberQueueService {
             }
 
             // 3. building_id + dong + ho로 building_unit 조회
-            let query = client
-                .from('building_units')
-                .select('id')
-                .eq('building_id', buildingId);
+            let query = client.from('building_units').select('id').eq('building_id', buildingId);
 
             if (dong) {
                 query = query.eq('dong', dong);
@@ -684,10 +712,7 @@ class MemberQueueService {
                     if (area !== null) updateData.area = area;
                     if (officialPrice !== null) updateData.official_price = officialPrice;
 
-                    await client
-                        .from('building_units')
-                        .update(updateData)
-                        .eq('id', existingUnit.id);
+                    await client.from('building_units').update(updateData).eq('id', existingUnit.id);
 
                     logger.debug(`Updated building_unit ${existingUnit.id} with area=${area}, price=${officialPrice}`);
                 }
@@ -712,7 +737,6 @@ class MemberQueueService {
 
             logger.debug(`Created new building_unit ${newUnitId} for building ${buildingId} (dong=${dong}, ho=${ho})`);
             return newUnitId;
-
         } catch (error: any) {
             logger.error(`findOrCreateBuildingUnit error: ${error.message}`);
             return null;
@@ -800,7 +824,7 @@ class MemberQueueService {
                         user.property_dong,
                         user.property_ho,
                         null, // area
-                        null  // officialPrice
+                        null // officialPrice
                     );
 
                     if (!buildingUnitId) {
@@ -826,8 +850,9 @@ class MemberQueueService {
                     }
 
                     syncedCount++;
-                    logger.debug(`[Sync Properties ${jobId}] Synced user ${user.name} to building_unit ${buildingUnitId}`);
-
+                    logger.debug(
+                        `[Sync Properties ${jobId}] Synced user ${user.name} to building_unit ${buildingUnitId}`
+                    );
                 } catch (err: any) {
                     failedCount++;
                     errors.push(`${user.name}: ${err.message || 'Unknown error'}`);
@@ -835,7 +860,7 @@ class MemberQueueService {
 
                 // 진행률 업데이트
                 const progress = Math.round((currentIndex / totalCount) * 100);
-                
+
                 // 5% 단위로 DB 업데이트
                 if (progress % 5 === 0 || currentIndex === totalCount) {
                     const previewData = {
@@ -878,8 +903,9 @@ class MemberQueueService {
                 previewData
             );
 
-            logger.info(`[Sync Properties ${jobId}] Completed - Synced: ${syncedCount}, Skipped: ${skippedCount}, Failed: ${failedCount}`);
-
+            logger.info(
+                `[Sync Properties ${jobId}] Completed - Synced: ${syncedCount}, Skipped: ${skippedCount}, Failed: ${failedCount}`
+            );
         } catch (error: any) {
             const errorMessage = error.message || 'Unknown error';
             logger.error(`[Sync Properties ${jobId}] Failed`, error);
