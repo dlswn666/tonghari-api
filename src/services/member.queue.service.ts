@@ -375,23 +375,36 @@ class MemberQueueService {
 
                 // user_property_units에 연결 저장 (building_unit이 있는 경우)
                 if (buildingUnitId) {
-                    const ownershipType = member.row.ownershipType || 'OWNER';
+                    // 지분율 기반 소유유형 자동 설정
+                    // 지분율이 있고 100% 미만이면 CO_OWNER, 그 외에는 명시적 타입 또는 OWNER
+                    const hasPartialOwnership = 
+                        (member.row.ownershipRatio !== undefined && member.row.ownershipRatio !== 0 && member.row.ownershipRatio < 100) ||
+                        (member.row.landOwnershipRatio !== undefined && member.row.landOwnershipRatio !== 0 && member.row.landOwnershipRatio < 100) ||
+                        (member.row.buildingOwnershipRatio !== undefined && member.row.buildingOwnershipRatio !== 0 && member.row.buildingOwnershipRatio < 100);
+                    
+                    const ownershipType = member.row.ownershipType || (hasPartialOwnership ? 'CO_OWNER' : 'OWNER');
                     
                     // 하위 호환성: 기존 단일 지분율이 있으면 토지/건축물 양쪽에 적용
+                    // 0 값은 null로 처리 (sanitizeNumeric 사용)
                     const defaultRatio = ownershipType === 'OWNER' ? 100 : null;
-                    const landOwnershipRatio = member.row.landOwnershipRatio ?? member.row.ownershipRatio ?? defaultRatio;
-                    const buildingOwnershipRatio = member.row.buildingOwnershipRatio ?? member.row.ownershipRatio ?? defaultRatio;
+                    const landOwnershipRatio = this.sanitizeNumeric(member.row.landOwnershipRatio) ?? 
+                                               this.sanitizeNumeric(member.row.ownershipRatio) ?? 
+                                               defaultRatio;
+                    const buildingOwnershipRatio = this.sanitizeNumeric(member.row.buildingOwnershipRatio) ?? 
+                                                   this.sanitizeNumeric(member.row.ownershipRatio) ?? 
+                                                   defaultRatio;
                     
-                    // 토지/건축물 면적 (하위 호환: 기존 area 필드 참조)
-                    const landArea = member.row.landArea ?? null;
-                    const buildingArea = member.row.buildingArea ?? member.row.area ?? null;
+                    // 토지/건축물 면적 (0 값은 null로 처리)
+                    const landArea = this.sanitizeNumeric(member.row.landArea);
+                    const buildingArea = this.sanitizeNumeric(member.row.buildingArea) ?? 
+                                         this.sanitizeNumeric(member.row.area);
                     
                     const { error: linkError } = await client.from('user_property_units').insert({
                         id: uuidv4(),
                         user_id: userId,
                         building_unit_id: buildingUnitId,
                         ownership_type: ownershipType,
-                        ownership_ratio: member.row.ownershipRatio ?? defaultRatio, // 하위 호환성
+                        ownership_ratio: this.sanitizeNumeric(member.row.ownershipRatio) ?? defaultRatio, // 하위 호환성
                         land_area: landArea,
                         land_ownership_ratio: landOwnershipRatio,
                         building_area: buildingArea,
@@ -512,6 +525,15 @@ class MemberQueueService {
     }
 
     /**
+     * 숫자 값 정리 - 0이나 undefined는 null로 변환
+     * 면적, 지분율 등에 적용하여 DB에 일관된 값 저장
+     */
+    private sanitizeNumeric(value: number | null | undefined): number | null {
+        if (value === undefined || value === null || value === 0) return null;
+        return value;
+    }
+
+    /**
      * PNU 중복 체크
      */
     private async checkDuplicatePnu(
@@ -560,9 +582,10 @@ class MemberQueueService {
 
     /**
      * Building Unit 조회 또는 생성
-     * 1. PNU로 building 조회, 없으면 생성
-     * 2. building에서 동/호수로 building_unit 조회, 없으면 생성
-     * 3. 면적/공시지가 업데이트 (엑셀에서 제공된 경우)
+     * 1. PNU로 land_lot 존재 확인 (GIS 초기화 필요)
+     * 2. PNU로 building 조회, 없으면 생성
+     * 3. building에서 동/호수로 building_unit 조회, 없으면 생성
+     * 4. 면적/공시지가 업데이트 (엑셀에서 제공된 경우)
      */
     private async findOrCreateBuildingUnit(
         client: any,
@@ -574,10 +597,10 @@ class MemberQueueService {
         officialPrice: number | null
     ): Promise<string | null> {
         try {
-            // 1. PNU로 land_lot 조회
+            // 1. PNU로 land_lot 존재 확인 (FK 제약으로 인해 land_lots에 먼저 존재해야 함)
             const { data: landLot, error: landLotError } = await client
                 .from('land_lots')
-                .select('id')
+                .select('pnu')
                 .eq('pnu', pnu)
                 .single();
 
@@ -586,24 +609,21 @@ class MemberQueueService {
                 return null;
             }
 
-            let landLotId: string | null = landLot?.id || null;
-
             // land_lot이 없으면 생성하지 않음 (GIS 초기화에서 생성되어야 함)
-            if (!landLotId) {
+            if (!landLot) {
                 logger.debug(`No land_lot found for PNU ${pnu}, skipping building_unit creation`);
                 return null;
             }
 
-            // 2. land_lot_id로 building 조회
+            // 2. PNU로 building 조회 (buildings.pnu는 UNIQUE)
             let { data: building, error: buildingError } = await client
                 .from('buildings')
                 .select('id')
-                .eq('land_lot_id', landLotId)
-                .limit(1)
+                .eq('pnu', pnu)
                 .single();
 
             if (buildingError && buildingError.code !== 'PGRST116') {
-                logger.warn(`building lookup error for land_lot ${landLotId}: ${buildingError.message}`);
+                logger.warn(`building lookup error for PNU ${pnu}: ${buildingError.message}`);
             }
 
             let buildingId: string | null = building?.id || null;
@@ -613,17 +633,18 @@ class MemberQueueService {
                 const newBuildingId = uuidv4();
                 const { error: createBuildingError } = await client.from('buildings').insert({
                     id: newBuildingId,
-                    land_lot_id: landLotId,
+                    pnu: pnu,
                     building_name: buildingName,
+                    building_type: 'NONE', // 기본값
                 });
 
                 if (createBuildingError) {
-                    logger.warn(`building creation failed for land_lot ${landLotId}: ${createBuildingError.message}`);
+                    logger.warn(`building creation failed for PNU ${pnu}: ${createBuildingError.message}`);
                     return null;
                 }
 
                 buildingId = newBuildingId;
-                logger.debug(`Created new building ${buildingId} for land_lot ${landLotId}`);
+                logger.debug(`Created new building ${buildingId} for PNU ${pnu}`);
             }
 
             // 3. building_id + dong + ho로 building_unit 조회
