@@ -732,7 +732,7 @@ class GisService {
             const pnuParts = this.parsePNU(pnu);
             if (!pnuParts) return [];
 
-            const response = await axios.get('http://apis.data.go.kr/1613000/BldRgstService_v2/getBrTitleInfo', {
+            const response = await axios.get('http://apis.data.go.kr/1613000/BldRgstHubService/getBrTitleInfo', {
                 params: {
                     serviceKey: this.dataPortalApiKey,
                     sigunguCd: pnuParts.sigunguCd,
@@ -760,7 +760,7 @@ class GisService {
             const pnuParts = this.parsePNU(pnu);
             if (!pnuParts) return [];
 
-            const response = await axios.get('http://apis.data.go.kr/1613000/BldRgstService_v2/getBrExposInfo', {
+            const response = await axios.get('http://apis.data.go.kr/1613000/BldRgstHubService/getBrExposInfo', {
                 params: {
                     serviceKey: this.dataPortalApiKey,
                     sigunguCd: pnuParts.sigunguCd,
