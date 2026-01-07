@@ -339,11 +339,12 @@ class ConsentQueueService {
         row: ConsentUploadRow
     ): Promise<{ id: string } | null> {
         try {
+            // 승인 + 사전등록 조합원 모두 포함
             let query = client
                 .from('users')
                 .select('id')
                 .eq('union_id', unionId)
-                .eq('user_status', 'APPROVED')
+                .in('user_status', ['APPROVED', 'PRE_REGISTERED'])
                 .ilike('name', row.name.trim());
 
             // 주소로 필터
