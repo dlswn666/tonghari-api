@@ -415,6 +415,11 @@ class MemberQueueService {
                                     resident_address: member.row.residentAddress || null,
                                     property_address_road: member.row.propertyAddressRoad || null,
                                     notes: member.row.notes || null,
+                                    // 토지/건축물 면적 및 지분율 업데이트
+                                    land_area: this.sanitizeNumeric(member.row.landArea),
+                                    land_ownership_ratio: this.sanitizeNumeric(member.row.landOwnershipRatio),
+                                    building_area: this.sanitizeNumeric(member.row.buildingArea),
+                                    building_ownership_ratio: this.sanitizeNumeric(member.row.buildingOwnershipRatio),
                                 })
                                 .eq('id', duplicateResult.existingUserId);
 
@@ -434,7 +439,7 @@ class MemberQueueService {
                 // UUID 생성
                 const userId = uuidv4();
 
-                // users 테이블에 저장 (기본 정보)
+                // users 테이블에 저장 (기본 정보 + 면적/지분율)
                 const { error: userError } = await client.from('users').insert({
                     id: userId,
                     name: member.row.name,
@@ -450,6 +455,11 @@ class MemberQueueService {
                     property_dong: normalizedDong,
                     property_ho: normalizedHo,
                     notes: member.row.notes || null,
+                    // 토지/건축물 면적 및 지분율 추가
+                    land_area: this.sanitizeNumeric(member.row.landArea),
+                    land_ownership_ratio: this.sanitizeNumeric(member.row.landOwnershipRatio),
+                    building_area: this.sanitizeNumeric(member.row.buildingArea),
+                    building_ownership_ratio: this.sanitizeNumeric(member.row.buildingOwnershipRatio),
                 });
 
                 if (userError) {
@@ -457,9 +467,65 @@ class MemberQueueService {
                     continue;
                 }
 
-                // user_property_units 저장은 별도의 동기화 단계에서 수행
-                // GIS 데이터와 독립적으로 조합원 데이터를 먼저 저장하고
-                // 이후 "동기화" 버튼을 통해 user_property_units 연결
+                // PNU가 있는 경우 user_property_units에도 저장 (지분율 포함)
+                if (member.pnu) {
+                    try {
+                        // building_unit 조회 또는 생성
+                        const buildingUnitId = await this.findOrCreateBuildingUnit(
+                            client,
+                            member.pnu,
+                            member.row.buildingName || null,
+                            normalizedDong,
+                            normalizedHo,
+                            this.sanitizeNumeric(member.row.landArea || member.row.area), // 토지 면적 (하위 호환)
+                            this.sanitizeNumeric(member.row.officialPrice)
+                        );
+
+                        if (buildingUnitId) {
+                            // 토지/건물 면적 및 지분율 개별 처리
+                            const landArea = this.sanitizeNumeric(member.row.landArea);
+                            const landOwnershipRatio = this.sanitizeNumeric(member.row.landOwnershipRatio);
+                            const buildingArea = this.sanitizeNumeric(member.row.buildingArea);
+                            const buildingOwnershipRatio = this.sanitizeNumeric(member.row.buildingOwnershipRatio);
+
+                            // 소유유형 결정: 토지 또는 건물 지분율이 100% 미만이면 CO_OWNER
+                            const effectiveRatio = landOwnershipRatio || buildingOwnershipRatio || 100;
+                            let ownershipType: 'OWNER' | 'CO_OWNER' | 'FAMILY' = 'OWNER';
+                            if (member.row.ownershipType) {
+                                ownershipType = member.row.ownershipType;
+                            } else if (effectiveRatio < 100) {
+                                ownershipType = 'CO_OWNER';
+                            }
+
+                            const { error: propUnitError } = await client.from('user_property_units').insert({
+                                id: uuidv4(),
+                                user_id: userId,
+                                building_unit_id: buildingUnitId,
+                                ownership_type: ownershipType,
+                                is_primary: true,
+                                // 토지/건물 면적 및 지분율 개별 저장
+                                land_area: landArea,
+                                land_ownership_ratio: landOwnershipRatio,
+                                building_area: buildingArea,
+                                building_ownership_ratio: buildingOwnershipRatio,
+                            });
+
+                            if (propUnitError) {
+                                logger.warn(
+                                    `[Pre-Register ${jobId}] user_property_units insert failed for ${member.row.name}: ${propUnitError.message}`
+                                );
+                            } else {
+                                logger.debug(
+                                    `[Pre-Register ${jobId}] user_property_units created for ${member.row.name} (type=${ownershipType}, landRatio=${landOwnershipRatio}%, buildingRatio=${buildingOwnershipRatio}%)`
+                                );
+                            }
+                        }
+                    } catch (propErr: any) {
+                        logger.warn(
+                            `[Pre-Register ${jobId}] user_property_units creation failed for ${member.row.name}: ${propErr.message}`
+                        );
+                    }
+                }
 
                 savedCount++;
             } catch (err: any) {
@@ -791,10 +857,12 @@ class MemberQueueService {
         let failedCount = 0;
 
         try {
-            // 해당 조합의 property_pnu가 있는 사용자 조회
+            // 해당 조합의 property_pnu가 있는 사용자 조회 (면적/지분율 포함)
             const { data: users, error: usersError } = await client
                 .from('users')
-                .select('id, name, property_pnu, property_dong, property_ho')
+                .select(
+                    'id, name, property_pnu, property_dong, property_ho, land_area, land_ownership_ratio, building_area, building_ownership_ratio'
+                )
                 .eq('union_id', unionId)
                 .not('property_pnu', 'is', null);
 
@@ -844,14 +912,22 @@ class MemberQueueService {
                         continue;
                     }
 
-                    // user_property_units에 연결 저장
+                    // 소유유형 결정: 토지 또는 건물 지분율이 100% 미만이면 CO_OWNER
+                    const effectiveRatio = user.land_ownership_ratio || user.building_ownership_ratio || 100;
+                    const ownershipType = effectiveRatio < 100 ? 'CO_OWNER' : 'OWNER';
+
+                    // user_property_units에 연결 저장 (토지/건물 면적/지분율 포함)
                     const { error: insertError } = await client.from('user_property_units').insert({
                         id: uuidv4(),
                         user_id: user.id,
                         building_unit_id: buildingUnitId,
-                        ownership_type: 'OWNER',
-                        ownership_ratio: 100,
+                        ownership_type: ownershipType,
                         is_primary: true,
+                        // 토지/건물 면적 및 지분율 개별 저장
+                        land_area: user.land_area || null,
+                        land_ownership_ratio: user.land_ownership_ratio || null,
+                        building_area: user.building_area || null,
+                        building_ownership_ratio: user.building_ownership_ratio || null,
                     });
 
                     if (insertError) {
