@@ -13,6 +13,21 @@ import { createLogger } from '../utils/logger';
 const logger = createLogger('CONSENT-QUEUE');
 
 /**
+ * 동의 상태 파싱 헬퍼 함수: 한글/영문 모두 지원
+ * @param statusStr 동의 상태 문자열
+ * @returns 'AGREED' 또는 'DISAGREED'
+ */
+function parseConsentStatus(statusStr: string): 'AGREED' | 'DISAGREED' {
+    const normalizedStatus = statusStr?.toString().trim().toUpperCase();
+    // 동의: "동의", "AGREED" 허용
+    if (normalizedStatus === 'AGREED' || normalizedStatus === '동의') {
+        return 'AGREED';
+    }
+    // 비동의: "비동의", "DISAGREED" 허용 (기본값)
+    return 'DISAGREED';
+}
+
+/**
  * 동의 처리 큐 서비스
  * 
  * - CONSENT_BULK_UPDATE: 일괄 동의 처리 (조합원 ID 목록으로 직접 처리)
@@ -232,7 +247,8 @@ class ConsentQueueService {
                     continue;
                 }
 
-                const status = row.status.toUpperCase() === 'AGREED' ? 'AGREED' : 'DISAGREED';
+                // 한글/영문 동의 상태 파싱
+                const status = parseConsentStatus(row.status);
 
                 // 동의 상태 upsert
                 const { error: upsertError } = await client
