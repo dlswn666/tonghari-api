@@ -142,16 +142,18 @@ class GisQueueService {
                     // 경계를 못 찾아도 계속 진행 (PNU와 주소는 저장)
                 }
 
-                // Step 2.6: 토지대장 정보 조회 (면적 + 소유자수) - Vworld API
+                // Step 2.6: 토지대장 정보 조회 (면적 + 소유자수 + 지목) - Vworld API
                 let ownerCount = 0;
                 let area: number | undefined = undefined;
+                let landCategory: string | null = null;
                 try {
                     const registryInfo = await gisService.getLandRegistryInfo(pnu);
                     if (registryInfo) {
                         area = registryInfo.area;
                         ownerCount = registryInfo.ownerCount;
+                        landCategory = registryInfo.landCategory;
                         logger.info(
-                            `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Land registry info found for ${pnu}: area=${area}㎡, ownerCount=${ownerCount}명`
+                            `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Land registry info found for ${pnu}: area=${area}㎡, ownerCount=${ownerCount}명, landCategory=${landCategory}`
                         );
                     } else {
                         logger.debug(
@@ -215,32 +217,55 @@ class GisQueueService {
                     // 건물 정보 조회 실패해도 계속 진행
                 }
 
-                // Step 2.9: 소유주 수 추정 (토지대장에서 조회된 값이 0인 경우, 건물 정보 기반으로 추정)
+                // Step 2.9: 소유주 수 계산 (building_units 기준으로 통일)
+                // 건물이 있으면 units.length를 기준으로, 없으면 토지대장 값 사용
                 let estimatedOwnerCount = ownerCount;
-                if (estimatedOwnerCount === 0 && buildingInfo && buildingInfo.buildingType !== 'NONE') {
+                if (buildingInfo && buildingInfo.buildingType !== 'NONE') {
                     if (buildingInfo.buildingType === 'DETACHED_HOUSE') {
-                        // 단독주택은 소유주 1명으로 추정
+                        // 단독주택은 소유주 1명으로 계산
                         estimatedOwnerCount = 1;
                         logger.info(
-                            `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Owner count estimated for DETACHED_HOUSE: 1`
+                            `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Owner count (building_units basis) for DETACHED_HOUSE: 1`
                         );
                     } else {
-                        // 다세대(VILLA, APARTMENT, COMMERCIAL, MIXED)는 세대 수로 추정
+                        // 다세대(VILLA, APARTMENT, COMMERCIAL, MIXED)는 세대 수 = building_units 수
                         estimatedOwnerCount = buildingInfo.units.length || 1;
                         logger.info(
-                            `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Owner count estimated from units (${buildingInfo.buildingType}): ${estimatedOwnerCount}`
+                            `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Owner count (building_units basis, ${buildingInfo.buildingType}): ${estimatedOwnerCount}`
                         );
                     }
                 }
 
-                // Step 3: land_lots 테이블에 필지 정보 저장 (경계 데이터 + 면적 + 소유자 수 + 공시지가 포함)
+                // Step 2.10: 도로명 주소 조회 (좌표 기반)
+                let roadAddress: string | null = null;
+                try {
+                    // 지오코딩에서 얻은 좌표가 있으면 도로명 주소 조회
+                    if (x && y) {
+                        roadAddress = await gisService.getRoadAddress(x, y);
+                        if (roadAddress) {
+                            logger.debug(
+                                `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Road address found for ${pnu}: ${roadAddress}`
+                            );
+                        }
+                    }
+                } catch (roadAddressError: any) {
+                    logger.warn(
+                        `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Road address fetch error for ${pnu}: ${
+                            roadAddressError?.message || 'Unknown error'
+                        }`
+                    );
+                }
+
+                // Step 3: land_lots 테이블에 필지 정보 저장 (경계 데이터 + 면적 + 소유자 수 + 공시지가 + 지목 + 도로명주소 포함)
                 const landLotSaved = await supabaseService.upsertLandLot({
                     pnu,
                     address,
                     boundary, // 경계 데이터
                     area, // 면적 (㎡)
-                    owner_count: estimatedOwnerCount, // 소유자 수 (추정된 값 사용)
+                    owner_count: estimatedOwnerCount, // 소유자 수 (building_units 기준)
                     official_price: officialPrice ?? undefined, // 개별공시지가
+                    land_category: landCategory ?? undefined, // 지목
+                    road_address: roadAddress ?? undefined, // 도로명 주소
                 });
 
                 if (!landLotSaved) {

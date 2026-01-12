@@ -279,6 +279,8 @@ class SupabaseService {
         official_price?: number;
         boundary?: any;
         owner_count?: number;
+        land_category?: string;
+        road_address?: string;
     }): Promise<boolean> {
         try {
             const { error } = await this.client
@@ -290,6 +292,8 @@ class SupabaseService {
                     official_price: landLot.official_price,
                     boundary: landLot.boundary,
                     owner_count: landLot.owner_count ?? 0,
+                    land_category: landLot.land_category,
+                    road_address: landLot.road_address,
                     updated_at: new Date().toISOString(),
                 }, {
                     onConflict: 'pnu',
@@ -300,7 +304,7 @@ class SupabaseService {
                 return false;
             }
 
-            logger.debug(`land_lots upserted: ${landLot.pnu} (owner_count: ${landLot.owner_count ?? 0})`);
+            logger.debug(`land_lots upserted: ${landLot.pnu} (owner_count: ${landLot.owner_count ?? 0}, land_category: ${landLot.land_category || 'N/A'})`);
             return true;
         } catch (error) {
             logger.error(`land_lots upsert error (PNU: ${landLot.pnu})`, error);

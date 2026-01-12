@@ -783,7 +783,7 @@ class GisService {
      * @param pnu 필지고유번호 (19자리)
      * @returns 면적(㎡), 소유자수(명) 또는 null
      */
-    async getLandRegistryInfo(pnu: string): Promise<{ area: number; ownerCount: number } | null> {
+    async getLandRegistryInfo(pnu: string): Promise<{ area: number; ownerCount: number; landCategory: string | null } | null> {
         if (!this.vworldApiKey) {
             logger.debug('VWORLD_API_KEY is not configured for land registry lookup');
             return null;
@@ -793,6 +793,16 @@ class GisService {
             logger.debug(`Invalid PNU for land registry lookup: ${pnu}`);
             return null;
         }
+
+        // 지목 코드 -> 한글 매핑
+        const landCategoryMap: Record<string, string> = {
+            '01': '전', '02': '답', '03': '과수원', '04': '목장용지', '05': '임야',
+            '06': '광천지', '07': '염전', '08': '대', '09': '공장용지', '10': '학교용지',
+            '11': '주차장', '12': '주유소용지', '13': '창고용지', '14': '도로', '15': '철도용지',
+            '16': '제방', '17': '하천', '18': '구거', '19': '유지', '20': '양어장',
+            '21': '수도용지', '22': '공원', '23': '체육용지', '24': '유원지', '25': '종교용지',
+            '26': '사적지', '27': '묘지', '28': '잡종지',
+        };
 
         try {
             // Vworld 토지대장 API (ladfrlList)
@@ -824,15 +834,65 @@ class GisService {
                 const item = list[0];
                 const area = item.lndpclAr ? Number(item.lndpclAr) : 0;
                 const ownerCount = item.cnrsPsnCo ? Number(item.cnrsPsnCo) : 0;
+                // 지목 코드 (lndcgrCode) -> 한글로 변환
+                const lndcgrCode = item.lndcgrCode || null;
+                const landCategory = lndcgrCode ? (landCategoryMap[lndcgrCode] || lndcgrCode) : null;
 
-                logger.debug(`Land registry info found for PNU ${pnu}: area=${area}㎡, ownerCount=${ownerCount}명`);
-                return { area, ownerCount };
+                logger.debug(`Land registry info found for PNU ${pnu}: area=${area}㎡, ownerCount=${ownerCount}명, landCategory=${landCategory}`);
+                return { area, ownerCount, landCategory };
             }
 
             logger.debug(`No land registry info found for PNU: ${pnu}`);
             return null;
         } catch (error: any) {
             logger.error(`Vworld land registry API error (PNU: ${pnu})`, {
+                status: error.response?.status,
+                message: error.message,
+            });
+            return null;
+        }
+    }
+
+    /**
+     * 좌표 기반 도로명 주소 조회
+     * @param x 경도 (WGS84)
+     * @param y 위도 (WGS84)
+     * @returns 도로명 주소 또는 null
+     */
+    async getRoadAddress(x: string, y: string): Promise<string | null> {
+        if (!this.vworldApiKey) {
+            logger.debug('VWORLD_API_KEY is not configured for road address lookup');
+            return null;
+        }
+
+        try {
+            const response = await axios.get('https://api.vworld.kr/req/address', {
+                params: {
+                    service: 'address',
+                    request: 'getAddress',
+                    version: '2.0',
+                    point: `${x},${y}`,
+                    type: 'ROAD',
+                    key: this.vworldApiKey,
+                    format: 'json',
+                },
+                timeout: 15000,
+            });
+
+            const data = response.data;
+            if (data.response?.status === 'OK' && data.response.result?.length > 0) {
+                const result = data.response.result[0];
+                const roadAddress = result.text || null;
+                if (roadAddress) {
+                    logger.debug(`Road address found for (${x}, ${y}): ${roadAddress}`);
+                    return roadAddress;
+                }
+            }
+
+            logger.debug(`No road address found for (${x}, ${y})`);
+            return null;
+        } catch (error: any) {
+            logger.error(`Road address lookup error (${x}, ${y})`, {
                 status: error.response?.status,
                 message: error.message,
             });
