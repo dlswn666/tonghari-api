@@ -725,7 +725,7 @@ class MemberQueueService {
     /**
      * Building Unit 조회 또는 생성
      * 1. PNU로 land_lot 존재 확인 (GIS 초기화 필요)
-     * 2. PNU로 building 조회, 없으면 생성
+     * 2. building_land_lots로 building 조회, 없으면 생성 + 매핑 추가
      * 3. building에서 동/호수로 building_unit 조회, 없으면 생성
      * 4. 면적/공시지가 업데이트 (엑셀에서 제공된 경우)
      */
@@ -757,25 +757,24 @@ class MemberQueueService {
                 return null;
             }
 
-            // 2. PNU로 building 조회 (buildings.pnu는 UNIQUE)
-            let { data: building, error: buildingError } = await client
-                .from('buildings')
-                .select('id')
+            // 2. building_land_lots에서 PNU로 building 조회
+            let { data: mapping, error: mappingError } = await client
+                .from('building_land_lots')
+                .select('building_id')
                 .eq('pnu', pnu)
                 .single();
 
-            if (buildingError && buildingError.code !== 'PGRST116') {
-                logger.warn(`building lookup error for PNU ${pnu}: ${buildingError.message}`);
+            if (mappingError && mappingError.code !== 'PGRST116') {
+                logger.warn(`building_land_lots lookup error for PNU ${pnu}: ${mappingError.message}`);
             }
 
-            let buildingId: string | null = building?.id || null;
+            let buildingId: string | null = mapping?.building_id || null;
 
-            // building이 없으면 생성
+            // building이 없으면 생성 + building_land_lots에 매핑 추가
             if (!buildingId) {
                 const newBuildingId = uuidv4();
                 const { error: createBuildingError } = await client.from('buildings').insert({
                     id: newBuildingId,
-                    pnu: pnu,
                     building_name: buildingName,
                     building_type: 'NONE', // 기본값
                 });
@@ -786,7 +785,19 @@ class MemberQueueService {
                 }
 
                 buildingId = newBuildingId;
-                logger.debug(`Created new building ${buildingId} for PNU ${pnu}`);
+
+                // building_land_lots에 매핑 추가
+                const { error: mappingInsertError } = await client.from('building_land_lots').insert({
+                    pnu: pnu,
+                    building_id: buildingId,
+                });
+
+                if (mappingInsertError) {
+                    logger.warn(`building_land_lots mapping failed for PNU ${pnu}: ${mappingInsertError.message}`);
+                    // building은 생성되었으므로 계속 진행
+                }
+
+                logger.debug(`Created new building ${buildingId} with mapping for PNU ${pnu}`);
             }
 
             // 3. building_id + dong + ho로 building_unit 조회

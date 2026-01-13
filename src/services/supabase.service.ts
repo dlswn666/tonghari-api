@@ -356,7 +356,8 @@ class SupabaseService {
     // ============================================
 
     /**
-     * 건물 정보 UPSERT (buildings 테이블)
+     * 건물 정보 UPSERT (buildings + building_land_lots 테이블)
+     * building_land_lots를 단일 소스로 사용하여 PNU↔Building 매핑 관리
      * @returns building_id 또는 null
      */
     async upsertBuilding(data: {
@@ -368,48 +369,96 @@ class SupabaseService {
         totalUnitCount?: number;
     }): Promise<string | null> {
         try {
-            const { data: result, error } = await this.client
-                .from('buildings')
-                .upsert(
-                    {
-                        pnu: data.pnu,
+            // 1. building_land_lots에서 기존 매핑 조회
+            const { data: existingMapping, error: mappingError } = await this.client
+                .from('building_land_lots')
+                .select('building_id')
+                .eq('pnu', data.pnu)
+                .single();
+
+            let buildingId: string | null = null;
+
+            if (existingMapping && !mappingError) {
+                // 2a. 기존 매핑이 있으면 buildings 업데이트
+                buildingId = existingMapping.building_id;
+                const { error: updateError } = await this.client
+                    .from('buildings')
+                    .update({
                         building_type: data.buildingType,
                         building_name: data.buildingName,
                         main_purpose: data.mainPurpose,
                         floor_count: data.floorCount ?? 0,
                         total_unit_count: data.totalUnitCount ?? 0,
                         updated_at: new Date().toISOString(),
-                    },
-                    {
-                        onConflict: 'pnu',
-                    }
-                )
-                .select('id')
-                .single();
+                    })
+                    .eq('id', buildingId);
 
-            if (error) {
-                logger.error(`buildings upsert failed (PNU: ${data.pnu})`, error);
-                return null;
+                if (updateError) {
+                    logger.error(`buildings update failed (id: ${buildingId}, PNU: ${data.pnu})`, updateError);
+                    return null;
+                }
+
+                logger.debug(
+                    `buildings updated via building_land_lots: ${data.pnu} (type: ${data.buildingType}, name: ${data.buildingName})`
+                );
+            } else {
+                // 2b. 기존 매핑이 없으면 새 building 생성 + building_land_lots에 매핑 추가
+                const { data: newBuilding, error: insertError } = await this.client
+                    .from('buildings')
+                    .insert({
+                        building_type: data.buildingType,
+                        building_name: data.buildingName,
+                        main_purpose: data.mainPurpose,
+                        floor_count: data.floorCount ?? 0,
+                        total_unit_count: data.totalUnitCount ?? 0,
+                    })
+                    .select('id')
+                    .single();
+
+                if (insertError || !newBuilding) {
+                    logger.error(`buildings insert failed (PNU: ${data.pnu})`, insertError);
+                    return null;
+                }
+
+                buildingId = newBuilding.id;
+
+                // building_land_lots에 매핑 생성
+                const { error: mappingInsertError } = await this.client
+                    .from('building_land_lots')
+                    .upsert(
+                        {
+                            pnu: data.pnu,
+                            building_id: buildingId,
+                            updated_at: new Date().toISOString(),
+                        },
+                        { onConflict: 'pnu' }
+                    );
+
+                if (mappingInsertError) {
+                    logger.error(`building_land_lots insert failed (PNU: ${data.pnu})`, mappingInsertError);
+                    // building은 생성되었으므로 계속 진행
+                }
+
+                logger.debug(
+                    `buildings + building_land_lots created: ${data.pnu} (type: ${data.buildingType}, name: ${data.buildingName})`
+                );
             }
 
-            logger.debug(
-                `buildings upserted: ${data.pnu} (type: ${data.buildingType}, name: ${data.buildingName})`
-            );
-            return result.id;
+            return buildingId;
         } catch (error) {
-            logger.error(`buildings upsert error (PNU: ${data.pnu})`, error);
+            logger.error(`upsertBuilding error (PNU: ${data.pnu})`, error);
             return null;
         }
     }
 
     /**
-     * 건물 ID로 조회
+     * PNU로 건물 조회 (building_land_lots 기반)
      */
     async getBuildingByPnu(pnu: string): Promise<{ id: string } | null> {
         try {
             const { data, error } = await this.client
-                .from('buildings')
-                .select('id')
+                .from('building_land_lots')
+                .select('building_id')
                 .eq('pnu', pnu)
                 .single();
 
@@ -417,9 +466,9 @@ class SupabaseService {
                 return null;
             }
 
-            return data;
+            return { id: data.building_id };
         } catch (error) {
-            logger.error(`buildings lookup error (PNU: ${pnu})`, error);
+            logger.error(`buildings lookup error via building_land_lots (PNU: ${pnu})`, error);
             return null;
         }
     }
