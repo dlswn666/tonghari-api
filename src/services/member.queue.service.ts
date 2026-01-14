@@ -368,8 +368,7 @@ class MemberQueueService {
             matchedMembers.push({ row: member, pnu, matched, apiSkipped });
 
             // Phase 1에서는 진행률을 업데이트하지 않음 (DB Insert 완료 시점에만 진행률 반영)
-            // 로컬 상태만 업데이트
-            job.processedCount = currentIndex;
+            // processedCount는 Phase 2에서만 업데이트하여 클라이언트에 정확한 진행률 표시
         }
 
         logger.info(
@@ -547,6 +546,9 @@ class MemberQueueService {
 
             // 진행률 업데이트 (0-100%) - DB Insert 완료 시점에만 진행률 반영
             const progress = Math.round((currentIndex / totalCount) * 100);
+
+            // 인메모리 상태 업데이트 (클라이언트 폴링용)
+            this.updateJobStatus(jobId, { processedCount: currentIndex });
 
             // 5% 단위로 DB 업데이트
             if (progress % 5 === 0 || currentIndex === totalCount) {
