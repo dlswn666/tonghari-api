@@ -152,6 +152,7 @@ router.post('/add-address', async (req, res) => {
         const landLotSaved = await supabaseService.upsertLandLot({
             pnu: landInfo.pnu,
             address: landInfo.address,
+            union_id: unionId,
             area: landInfo.area ?? undefined,
             official_price: landInfo.officialPrice ?? undefined,
             boundary: landInfo.boundary,
@@ -283,6 +284,7 @@ router.post('/manual-add', async (req, res) => {
         const landLotSaved = await supabaseService.upsertLandLot({
             pnu: pnu,
             address: address.trim(),
+            union_id: unionId,
             area: area !== undefined ? Number(area) : undefined,
             official_price: officialPrice !== undefined ? Number(officialPrice) : undefined,
             boundary: boundaryGeojson,
