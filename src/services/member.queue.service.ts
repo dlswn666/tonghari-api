@@ -64,6 +64,7 @@ class MemberQueueService {
                 .insert({
                     id: jobId,
                     union_id: request.unionId,
+                    job_type: 'MEMBER_INVITE', // GIS 페이지와 구분하기 위해 명시적으로 설정
                     status: 'PROCESSING',
                     progress: 0,
                     preview_data: { job_type: 'MEMBER_INVITE_SYNC' },
@@ -111,6 +112,7 @@ class MemberQueueService {
                 .insert({
                     id: jobId,
                     union_id: request.unionId,
+                    job_type: 'PRE_REGISTER', // GIS 페이지와 구분하기 위해 명시적으로 설정
                     status: 'PROCESSING',
                     progress: 0,
                     preview_data: { job_type: 'PRE_REGISTER' },
@@ -173,6 +175,7 @@ class MemberQueueService {
             await client.from('sync_jobs').insert({
                 id: jobId,
                 union_id: request.unionId,
+                job_type: 'SYNC_PROPERTIES', // GIS 페이지와 구분하기 위해 명시적으로 설정
                 status: 'PROCESSING',
                 progress: 0,
                 preview_data: { job_type: 'SYNC_PROPERTIES', totalCount },
