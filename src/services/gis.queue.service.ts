@@ -47,13 +47,18 @@ class GisQueueService {
 
         // Supabase sync_jobs 테이블에 초기 등록
         try {
-            await supabaseService.getClient().from('sync_jobs').insert({
+            const { error } = await supabaseService.getClient().from('sync_jobs').insert({
                 id: jobId,
                 union_id: request.unionId,
+                job_type: 'GIS_MAP',
                 status: 'PROCESSING',
                 progress: 0,
             });
-            logger.info(`GIS job added: ${jobId} (parcels: ${request.addresses.length})`);
+            if (error) {
+                logger.error(`sync_jobs insert error (${jobId}): ${JSON.stringify(error)}`);
+            } else {
+                logger.info(`GIS job added: ${jobId} (parcels: ${request.addresses.length})`);
+            }
         } catch (error) {
             logger.error(`sync_jobs registration failed (${jobId})`, error);
         }

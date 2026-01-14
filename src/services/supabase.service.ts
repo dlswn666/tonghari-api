@@ -315,42 +315,13 @@ class SupabaseService {
     }
 
     /**
-     * 조합-필지 관계 생성 (union_land_lots 테이블)
+     * 조합-필지 관계 생성 (deprecated - land_lots.union_id로 대체됨)
+     * land_lots 테이블에 union_id가 직접 저장되므로 별도 매핑 테이블 불필요
      */
     async createUnionLandLot(unionId: string, pnu: string, addressText?: string): Promise<boolean> {
-        try {
-            // 이미 존재하는지 확인
-            const { data: existing } = await this.client
-                .from('union_land_lots')
-                .select('id')
-                .eq('union_id', unionId)
-                .eq('pnu', pnu)
-                .single();
-
-            if (existing) {
-                logger.debug(`union_land_lots already exists: ${unionId} - ${pnu}`);
-                return true;
-            }
-
-            const { error } = await this.client
-                .from('union_land_lots')
-                .insert({
-                    union_id: unionId,
-                    pnu: pnu,
-                    address_text: addressText,
-                });
-
-            if (error) {
-                logger.error(`union_land_lots insert failed (${unionId}, ${pnu})`, error);
-                return false;
-            }
-
-            logger.debug(`union_land_lots created: ${unionId} - ${pnu}`);
-            return true;
-        } catch (error) {
-            logger.error(`union_land_lots insert error (${unionId}, ${pnu})`, error);
-            return false;
-        }
+        // land_lots.union_id로 관계가 관리되므로 별도 처리 불필요
+        logger.debug(`createUnionLandLot skipped (using land_lots.union_id): ${unionId} - ${pnu}`);
+        return true;
     }
 
     // ============================================
@@ -605,19 +576,20 @@ class SupabaseService {
                 updateData.preview_data = previewData;
             }
 
-            const { error } = await this.client
+            const { error, count } = await this.client
                 .from('sync_jobs')
                 .update(updateData)
                 .eq('id', jobId);
 
             if (error) {
-                logger.error(`sync_jobs update failed (${jobId})`, error);
+                logger.error(`sync_jobs update failed (${jobId}): ${JSON.stringify(error)}`);
                 return false;
             }
 
+            logger.debug(`sync_jobs updated (${jobId}): progress=${progress}, status=${status}`);
             return true;
-        } catch (error) {
-            logger.error(`sync_jobs update error (${jobId})`, error);
+        } catch (error: any) {
+            logger.error(`sync_jobs update error (${jobId}): ${error?.message || JSON.stringify(error)}`);
             return false;
         }
     }
