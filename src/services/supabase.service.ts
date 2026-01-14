@@ -275,6 +275,7 @@ class SupabaseService {
     async upsertLandLot(landLot: {
         pnu: string;
         address: string;
+        union_id: string;
         area?: number;
         official_price?: number;
         boundary?: any;
@@ -288,6 +289,7 @@ class SupabaseService {
                 .upsert({
                     pnu: landLot.pnu,
                     address: landLot.address,
+                    union_id: landLot.union_id,
                     area: landLot.area,
                     official_price: landLot.official_price,
                     boundary: landLot.boundary,

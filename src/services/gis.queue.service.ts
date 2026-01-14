@@ -260,6 +260,7 @@ class GisQueueService {
                 const landLotSaved = await supabaseService.upsertLandLot({
                     pnu,
                     address,
+                    union_id: request.unionId, // 조합 ID 추가
                     boundary, // 경계 데이터
                     area, // 면적 (㎡)
                     owner_count: estimatedOwnerCount, // 소유자 수 (building_units 기준)
