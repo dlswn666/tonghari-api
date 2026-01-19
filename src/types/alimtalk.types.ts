@@ -125,6 +125,7 @@ export interface PricingMap {
     KAKAO: number;
     SMS: number;
     LMS: number;
+    MMS: number;
 }
 
 /**

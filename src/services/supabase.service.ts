@@ -1,6 +1,7 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { env } from '../config/env';
 import { AlimtalkLogInput, AlimtalkTemplate, PricingMap } from '../types/alimtalk.types';
+import { SmsSendLogInput } from '../types/sms.types';
 import { createLogger } from '../utils/logger';
 
 const logger = createLogger('SUPABASE');
@@ -126,6 +127,42 @@ class SupabaseService {
     }
 
     /**
+     * SMS 발송 로그 저장
+     */
+    async saveSmsLog(log: SmsSendLogInput): Promise<string | null> {
+        try {
+            const { data, error } = await this.client
+                .from('sms_send_logs')
+                .insert({
+                    union_id: log.union_id,
+                    sender_id: log.sender_id,
+                    title: log.title,
+                    message: log.message,
+                    msg_type: log.msg_type,
+                    total_count: log.total_count,
+                    success_count: log.success_count,
+                    fail_count: log.fail_count,
+                    status: log.status,
+                    aligo_msg_ids: log.aligo_msg_ids,
+                    estimated_cost: log.estimated_cost,
+                    completed_at: new Date().toISOString(),
+                })
+                .select('id')
+                .single();
+
+            if (error) {
+                logger.error('Failed to save SMS log', error);
+                return null;
+            }
+
+            return data.id;
+        } catch (error) {
+            logger.error('SMS log save error', error);
+            return null;
+        }
+    }
+
+    /**
      * 템플릿 UPSERT (알리고 API 응답 구조 그대로 저장)
      */
     async upsertTemplates(templates: AlimtalkTemplate[]): Promise<{ inserted: number; updated: number }> {
@@ -247,6 +284,7 @@ class SupabaseService {
                 KAKAO: 15,
                 SMS: 20,
                 LMS: 50,
+                MMS: 200,
             };
         }
 
@@ -254,12 +292,14 @@ class SupabaseService {
             KAKAO: 15,
             SMS: 20,
             LMS: 50,
+            MMS: 200,
         };
 
         for (const item of data) {
             if (item.message_type === 'KAKAO') pricing.KAKAO = item.unit_price;
             if (item.message_type === 'SMS') pricing.SMS = item.unit_price;
             if (item.message_type === 'LMS') pricing.LMS = item.unit_price;
+            if (item.message_type === 'MMS') pricing.MMS = item.unit_price;
         }
 
         return pricing;
