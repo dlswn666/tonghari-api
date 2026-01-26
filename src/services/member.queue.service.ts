@@ -404,9 +404,15 @@ class MemberQueueService {
                     );
 
                     if (duplicateResult.isDuplicate && duplicateResult.existingUserId) {
+                        // BUG-012: 이름 또는 전화번호가 같으면 동일인으로 판단 (개명 케이스 대응)
                         // 이름이 같으면 실제 중복 → 기존 정보 업데이트
-                        // 이름이 다르면 공동 소유자 → 별도 레코드로 저장 (continue 하지 않음)
-                        const isSamePerson = duplicateResult.existingUserName?.trim() === member.row.name.trim();
+                        // 전화번호가 같아도 동일인 → 기존 정보 업데이트
+                        // 둘 다 다르면 공동 소유자 → 별도 레코드로 저장 (continue 하지 않음)
+                        const nameMatch = duplicateResult.existingUserName?.trim() === member.row.name.trim();
+                        const phoneMatch = duplicateResult.existingPhoneNumber &&
+                            member.row.phoneNumber &&
+                            duplicateResult.existingPhoneNumber.replace(/-/g, '') === member.row.phoneNumber.replace(/-/g, '');
+                        const isSamePerson = nameMatch || phoneMatch;
 
                         if (isSamePerson) {
                             // 동일인 중복인 경우 기존 사용자 정보 업데이트
@@ -676,6 +682,7 @@ class MemberQueueService {
         isDuplicate: boolean;
         existingUserId?: string;
         existingUserName?: string;
+        existingPhoneNumber?: string;  // BUG-012: 전화번호 추가
         existingPropertyUnitId?: string;
     }> {
         try {
@@ -704,7 +711,7 @@ class MemberQueueService {
             const userIds = propertyUnits.map((pu: any) => pu.user_id);
             const { data: users } = await client
                 .from('users')
-                .select('id, name')
+                .select('id, name, phone_number')  // BUG-012: 전화번호 추가
                 .eq('union_id', unionId)
                 .in('id', userIds)
                 .limit(1);
@@ -716,6 +723,7 @@ class MemberQueueService {
                     isDuplicate: true,
                     existingUserId: users[0].id,
                     existingUserName: users[0].name,
+                    existingPhoneNumber: users[0].phone_number,  // BUG-012: 전화번호 추가
                     existingPropertyUnitId: matchingPropertyUnit?.id,
                 };
             }
