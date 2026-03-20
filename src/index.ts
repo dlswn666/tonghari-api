@@ -4,6 +4,7 @@ import { env } from './config/env';
 import routes from './routes';
 import { loggerMiddleware, errorHandler, notFoundHandler } from './middleware';
 import { logger } from './utils/logger';
+import { niceService } from './services/nice.service';
 
 // Express 앱 생성
 const app = express();
@@ -31,11 +32,16 @@ const server = app.listen(env.PORT, () => {
     // GIS 환경 변수 상태 로깅
     logger.info(`GIS Config - VWORLD_API_KEY: ${env.VWORLD_API_KEY ? 'SET' : 'NOT SET'}`);
     logger.info(`GIS Config - DATA_PORTAL_API_KEY: ${env.DATA_PORTAL_API_KEY ? 'SET' : 'NOT SET'}`);
+
+    // NICE 본인인증 환경 변수 상태 로깅
+    const niceConfigured = env.NICE_CLIENT_ID && env.NICE_ACCESS_TOKEN;
+    logger.info(`NICE Config - ${niceConfigured ? 'CONFIGURED' : 'NOT CONFIGURED (본인인증 API 비활성)'}`);
 });
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
     logger.warn('SIGTERM signal received. Shutting down server...');
+    niceService.destroy();
     server.close(() => {
         logger.info('Server closed successfully');
         process.exit(0);
@@ -44,6 +50,7 @@ process.on('SIGTERM', () => {
 
 process.on('SIGINT', () => {
     logger.warn('SIGINT signal received. Shutting down server...');
+    niceService.destroy();
     server.close(() => {
         logger.info('Server closed successfully');
         process.exit(0);

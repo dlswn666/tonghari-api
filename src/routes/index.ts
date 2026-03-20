@@ -5,6 +5,7 @@ import smsRouter from './sms';
 import gisRouter from './gis';
 import memberRouter from './member';
 import consentRouter from './consent';
+import niceRouter from './nice';
 
 const router = Router();
 
@@ -25,6 +26,9 @@ router.use('/api/member', memberRouter);
 
 // 동의 처리 API 라우트
 router.use('/api/consent', consentRouter);
+
+// NICE 본인인증 API 라우트
+router.use('/api/nice', niceRouter);
 
 export default router;
 
