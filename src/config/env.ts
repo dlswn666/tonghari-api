@@ -52,6 +52,10 @@ export const env = {
     NICE_ACCESS_TOKEN: getEnvVar('NICE_ACCESS_TOKEN', false),
     NICE_ALLOWED_RETURN_HOSTS: process.env.NICE_ALLOWED_RETURN_HOSTS || '',
 
+    // PASS 본인인증 (통신사 본인확인)
+    PASS_CLIENT_ID: getEnvVar('PASS_CLIENT_ID', false),
+    PASS_CLIENT_SECRET: getEnvVar('PASS_CLIENT_SECRET', false),
+
     // GIS & Public Data API
     VWORLD_API_KEY: process.env.VWORLD_API_KEY || '',
     DATA_PORTAL_API_KEY: process.env.DATA_PORTAL_API_KEY || '',
