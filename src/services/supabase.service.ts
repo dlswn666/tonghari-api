@@ -338,7 +338,7 @@ class SupabaseService {
                     road_address: landLot.road_address,
                     updated_at: new Date().toISOString(),
                 }, {
-                    onConflict: 'pnu',
+                    onConflict: 'pnu,union_id',
                 });
 
             if (error) {

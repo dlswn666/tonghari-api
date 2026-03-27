@@ -62,7 +62,7 @@ class Logger {
 
     error(message: string, error?: any, ...args: any[]): void {
         if (this.level <= LogLevel.ERROR) {
-            const errorMsg = error instanceof Error ? error.stack || error.message : error;
+            const errorMsg = error instanceof Error ? error.stack || error.message : (typeof error === 'object' && error !== null ? JSON.stringify(error) : error);
             console.error(this.formatMessage('ERROR', message), errorMsg ? `\n${errorMsg}` : '', ...args);
         }
     }
