@@ -45,16 +45,10 @@ export const env = {
     QUEUE_CONCURRENCY: getEnvNumber('QUEUE_CONCURRENCY', 5),
     QUEUE_MAX_SIZE: getEnvNumber('QUEUE_MAX_SIZE', 100),
 
-    // NICE 본인인증 API
-    NICE_CLIENT_ID: getEnvVar('NICE_CLIENT_ID', false),
-    NICE_CLIENT_SECRET: getEnvVar('NICE_CLIENT_SECRET', false),
-    NICE_PRODUCT_ID: getEnvVar('NICE_PRODUCT_ID', false),
-    NICE_ACCESS_TOKEN: getEnvVar('NICE_ACCESS_TOKEN', false),
-    NICE_ALLOWED_RETURN_HOSTS: process.env.NICE_ALLOWED_RETURN_HOSTS || '',
-
-    // PASS 본인인증 (통신사 본인확인)
-    PASS_CLIENT_ID: getEnvVar('PASS_CLIENT_ID', false),
-    PASS_CLIENT_SECRET: getEnvVar('PASS_CLIENT_SECRET', false),
+    // KG이니시스 통합인증
+    KG_INICIS_MID: getEnvVar('KG_INICIS_MID', false),
+    KG_INICIS_API_KEY: getEnvVar('KG_INICIS_API_KEY', false),
+    KG_INICIS_ALLOWED_HOSTS: process.env.KG_INICIS_ALLOWED_HOSTS || '',
 
     // GIS & Public Data API
     VWORLD_API_KEY: process.env.VWORLD_API_KEY || '',
