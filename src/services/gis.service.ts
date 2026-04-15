@@ -964,6 +964,119 @@ class GisService {
     }
 
     /**
+     * Vworld 공동주택가격 조회 (세대별 토지+건물 합산 공시가격)
+     *
+     * ⚠️ TODO (2026-04 production 전 필수 검증)
+     *
+     * VWorld NED 공동주택가격 WFS API의 엔드포인트/typeName/응답 필드명은
+     * 공식 공개 레퍼런스에 명시되지 않아 경험적 검증 없이 best-guess로 구현되었다.
+     * 아래 값들은 VWorld 네이밍 컨벤션(개별공시지가 getIndvdLandPriceWFS + dt_d150)
+     * 의 형제 패턴에서 유추된 것이며, 실제 API 키로 호출하여 검증해야 한다.
+     *
+     * 검증 방법:
+     * 1. VWORLD_API_KEY 확보 후 실제 공동주택 PNU로 curl 호출
+     * 2. 성공하는 URL/typeName 조합 찾기 (getApartHousPriceWFS / getAptHousePriceWFS /
+     *    getAptHousPcWFS / dt_d151 / dt_d152 / dt_d160 등)
+     * 3. 응답 properties의 실제 필드명 확인 후 아래 APT_PRICE_FIELDS 상수 교정
+     * 4. 실패 시 fallback 경로 유지 (검증되지 않은 엔드포인트가 전체 GIS sync를
+     *    지연시키지 않도록 5초 timeout + null/[] 반환으로 graceful degrade)
+     *
+     * @param pnu 필지고유번호 (19자리)
+     * @returns 세대별 공동주택가격 목록.
+     *          - 네트워크/설정 오류 → null
+     *          - 정상 응답 + 공동주택 없음 → []
+     *          - 정상 응답 + 공동주택 있음 → 세대별 배열
+     *          officialPrice 단위는 원(정수)
+     */
+    async getApartmentHousePrices(pnu: string): Promise<Array<{
+        dong: string | null;
+        ho: string | null;
+        area: number | null;
+        officialPrice: number;
+    }> | null> {
+        // best-guess 상수 — production 배포 전 반드시 실제 API 키로 검증 필요 (위 TODO 참조)
+        const APT_PRICE_ENDPOINT = 'https://api.vworld.kr/ned/wfs/getApartHousPriceWFS';
+        const APT_PRICE_TYPENAME = 'dt_d151';
+        const APT_PRICE_FIELDS = {
+            dong: 'dong_nm',
+            ho: 'ho_nm',
+            area: 'ex_lyspc_ar',
+            price: 'pblntf_pc',
+        } as const;
+
+        if (!this.vworldApiKey) {
+            logger.debug('VWORLD_API_KEY is not configured for apartment price lookup');
+            return null;
+        }
+
+        if (!pnu || pnu.length < 19) {
+            logger.debug(`Invalid PNU for apartment price lookup: ${pnu}`);
+            return null;
+        }
+
+        try {
+            // 슬래시(/)를 인코딩하지 않도록 수동 URL 구성 (기존 getOfficialLandPrice 패턴 동일)
+            const filter = `<Filter><PropertyIsEqualTo><PropertyName>pnu</PropertyName><Literal>${pnu}</Literal></PropertyIsEqualTo></Filter>`;
+            const encodedFilter = encodeURIComponent(filter).replace(/%2F/g, '/');
+
+            // 한 필지의 전체 세대를 한 번에 수집 (maxFeatures=1000)
+            const url = `${APT_PRICE_ENDPOINT}?service=WFS&version=1.1.0&request=GetFeature&typeName=${APT_PRICE_TYPENAME}&maxFeatures=1000&outputFormat=application/json&filter=${encodedFilter}&key=${this.vworldApiKey}`;
+
+            // 미검증 엔드포인트가 전체 GIS sync를 지연시키지 않도록 5초 타임아웃
+            const response = await axios.get(url, {
+                timeout: 5000,
+            });
+
+            const data = response.data;
+
+            // JSON 응답 처리 (GeoJSON FeatureCollection)
+            if (data?.features && Array.isArray(data.features)) {
+                const prices = data.features
+                    .map((f: any) => {
+                        const props = f.properties ?? {};
+                        const rawPrice = props[APT_PRICE_FIELDS.price];
+                        const price = Number(rawPrice);
+                        if (!Number.isFinite(price) || price <= 0) return null;
+
+                        const rawArea = props[APT_PRICE_FIELDS.area];
+                        const area = rawArea !== undefined && rawArea !== null ? Number(rawArea) : null;
+
+                        return {
+                            dong: props[APT_PRICE_FIELDS.dong] ?? null,
+                            ho: props[APT_PRICE_FIELDS.ho] ?? null,
+                            area: Number.isFinite(area as number) ? area : null,
+                            officialPrice: Math.round(price),
+                        };
+                    })
+                    .filter((x: any): x is {
+                        dong: string | null;
+                        ho: string | null;
+                        area: number | null;
+                        officialPrice: number;
+                    } => x !== null);
+
+                logger.debug(`Apartment prices found for PNU ${pnu}: ${prices.length} units`);
+                return prices;
+            }
+
+            // XML fallback — 실제 필드명이 확정되기 전까지는 best-effort로 빈 배열 처리
+            if (typeof data === 'string' && data.includes(APT_PRICE_FIELDS.price)) {
+                logger.warn(`Apartment price XML fallback not fully implemented for PNU: ${pnu}`);
+                return [];
+            }
+
+            logger.debug(`No apartment price found for PNU: ${pnu}`);
+            return [];
+        } catch (error: any) {
+            logger.error(`Vworld apartment price API error (PNU: ${pnu})`, {
+                status: error.response?.status,
+                message: error.message,
+            });
+            return null;
+        }
+    }
+
+    /**
      * 주소 검색 (Vworld 기반)
      * 지오코딩 + PNU 조회만 수행
      */
@@ -1080,6 +1193,7 @@ class GisService {
             ho: string | null;
             floor: number | null;
             area: number | null;
+            officialPrice?: number | null; // 2026-04 추가: 공동주택공시가격 (S2 integration)
         }>;
     }> {
         logger.info(`Fetching building info for PNU: ${pnu}`);

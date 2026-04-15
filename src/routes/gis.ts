@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { gisQueueService } from '../services/gis.queue.service';
 import { gisService } from '../services/gis.service';
 import { supabaseService } from '../services/supabase.service';
+import { authMiddleware } from '../middleware/auth';
 import { createLogger } from '../utils/logger';
 
 const router = Router();
@@ -23,6 +24,36 @@ router.post('/sync', async (req, res) => {
     } catch (error) {
         console.error('GIS sync request failed:', error);
         res.status(500).json({ error: 'Internal server error.' });
+    }
+});
+
+/**
+ * 공동주택공시가격 일괄 재동기화 (2026-04)
+ * 해당 조합의 공동주택 세대의 building_units.official_price를 VWorld API로 재갱신
+ * body: { unionId: string }
+ */
+router.post('/sync-apartment-prices', authMiddleware, async (req, res) => {
+    const { unionId } = req.body;
+
+    if (!unionId || typeof unionId !== 'string') {
+        return res.status(400).json({ error: 'unionId is required.' });
+    }
+
+    // JWT 토큰의 unionId와 body의 unionId가 일치해야 함 (시스템관리자 토큰 제외)
+    if (req.user?.unionId && req.user.unionId !== 'system' && req.user.unionId !== unionId) {
+        return res.status(403).json({ error: 'unionId mismatch with authenticated token.' });
+    }
+
+    try {
+        const result = await gisQueueService.addApartmentPriceSyncJob({ unionId });
+        return res.json({
+            jobId: result.jobId,
+            totalPnu: result.totalPnu,
+            status: 'pending',
+        });
+    } catch (error: any) {
+        logger.error(`Apartment price sync request failed (unionId: ${unionId})`, error);
+        return res.status(500).json({ error: error?.message || 'Internal server error.' });
     }
 });
 
