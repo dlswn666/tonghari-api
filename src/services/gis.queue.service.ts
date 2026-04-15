@@ -3,7 +3,14 @@ import { v4 as uuidv4 } from 'uuid';
 import { env } from '../config/env';
 import { gisService } from './gis.service';
 import { supabaseService } from './supabase.service';
-import { GisSyncRequest, GisJobInfo, ApartmentPriceSyncRequest, ApartmentPriceSyncTarget } from '../types/gis.types';
+import {
+    GisSyncRequest,
+    GisJobInfo,
+    ApartmentPriceSyncRequest,
+    ApartmentPriceSyncTarget,
+    LandPriceSyncRequest,
+    LandPriceSyncTarget,
+} from '../types/gis.types';
 import { createLogger } from '../utils/logger';
 
 const logger = createLogger('GIS-QUEUE');
@@ -610,6 +617,169 @@ class GisQueueService {
 
         logger.info(
             `[APT-PRICE ${jobId}] Completed — success PNU: ${successPnuCount}, failed: ${failedEntries.length}, updated units: ${updatedUnitCount}`
+        );
+
+        this.updateJobStatus(jobId, {
+            status: finalStatus === 'COMPLETED' ? 'completed' : 'failed',
+            completedAt: new Date(),
+        });
+
+        await supabaseService.updateSyncJobStatus(
+            jobId,
+            finalStatus as 'PROCESSING' | 'COMPLETED' | 'FAILED',
+            100,
+            errorLog || undefined,
+            previewData
+        );
+    }
+
+    /**
+     * 토지 공시지가 일괄 재동기화 작업 추가 (2026-04)
+     * 해당 조합의 land_lots 전체 PNU에 대해 VWorld 개별공시지가 API를
+     * 재조회해 land_lots.official_price 를 갱신한다.
+     */
+    async addLandPriceSyncJob(
+        request: LandPriceSyncRequest
+    ): Promise<{ jobId: string; totalPnu: number }> {
+        const jobId = uuidv4();
+
+        // 1. 토지 대상 조회 (전체 무조건 재조회)
+        const targets = await supabaseService.listLandPriceTargetsByUnion(request.unionId);
+        const totalPnu = targets.length;
+
+        const jobInfo: GisJobInfo = {
+            jobId,
+            unionId: request.unionId,
+            totalCount: totalPnu,
+            processedCount: 0,
+            status: 'pending',
+            createdAt: new Date(),
+        };
+        this.jobs.set(jobId, jobInfo);
+
+        // 2. sync_jobs 테이블 등록
+        try {
+            const { error } = await supabaseService.getClient().from('sync_jobs').insert({
+                id: jobId,
+                union_id: request.unionId,
+                job_type: 'LAND_PRICE_SYNC',
+                status: 'PROCESSING',
+                progress: 0,
+            });
+            if (error) {
+                logger.error(`sync_jobs insert error (${jobId}): ${JSON.stringify(error)}`);
+            } else {
+                logger.info(`Land price sync job added: ${jobId} (targets: ${totalPnu})`);
+            }
+        } catch (error) {
+            logger.error(`sync_jobs registration failed (${jobId})`, error);
+        }
+
+        // 3. 대상 없으면 바로 완료 처리
+        if (totalPnu === 0) {
+            this.updateJobStatus(jobId, { status: 'completed', completedAt: new Date() });
+            await supabaseService.updateSyncJobStatus(jobId, 'COMPLETED', 100, undefined, {
+                successCount: 0,
+                failedCount: 0,
+                totalCount: 0,
+                message: '대상 토지가 없습니다.',
+            });
+            return { jobId, totalPnu: 0 };
+        }
+
+        // 4. 큐 등록
+        this.queue
+            .add(async () => {
+                await this.processLandPriceSync(jobId, targets);
+            })
+            .catch((err) => {
+                logger.error(`Land price sync job ${jobId} fatal error`, err);
+                this.updateJobStatus(jobId, { status: 'failed', error: err.message });
+                supabaseService.updateSyncJobStatus(jobId, 'FAILED', 0, err.message);
+            });
+
+        return { jobId, totalPnu };
+    }
+
+    /**
+     * 토지 공시지가 재동기화 워커 핸들러 (2026-04)
+     * 각 PNU에 대해 gisService.getOfficialLandPrice()를 호출하고
+     * land_lots.official_price 를 갱신한다.
+     * 개별 필지 갱신 실패는 fire-and-forget (배치 전체를 막지 않음).
+     */
+    private async processLandPriceSync(jobId: string, targets: LandPriceSyncTarget[]): Promise<void> {
+        const job = this.jobs.get(jobId);
+        if (!job) return;
+
+        logger.info(`[LAND-PRICE ${jobId}] Land price sync started (targets: ${targets.length})`);
+        this.updateJobStatus(jobId, { status: 'processing', startedAt: new Date() });
+
+        let successCount = 0;
+        const failedEntries: Array<{ pnu: string; reason: string }> = [];
+
+        for (let i = 0; i < targets.length; i++) {
+            const target = targets[i];
+            const currentIndex = i + 1;
+
+            try {
+                const price = await gisService.getOfficialLandPrice(target.pnu);
+
+                if (price === null || price === undefined) {
+                    logger.warn(
+                        `[LAND-PRICE ${jobId}] (${currentIndex}/${targets.length}) No land price for PNU: ${target.pnu}`
+                    );
+                    failedEntries.push({ pnu: target.pnu, reason: '공시지가 조회 결과 없음' });
+                } else {
+                    const updated = await supabaseService.updateLandLotPrice(job.unionId, target.pnu, price);
+                    if (updated) {
+                        successCount++;
+                        logger.debug(
+                            `[LAND-PRICE ${jobId}] (${currentIndex}/${targets.length}) Updated PNU ${target.pnu}: ${price}`
+                        );
+                    } else {
+                        failedEntries.push({ pnu: target.pnu, reason: 'DB 갱신 실패' });
+                    }
+                }
+            } catch (err: any) {
+                logger.warn(
+                    `[LAND-PRICE ${jobId}] (${currentIndex}/${targets.length}) Error for PNU ${target.pnu}: ${
+                        err?.message || 'Unknown error'
+                    }`
+                );
+                failedEntries.push({ pnu: target.pnu, reason: `Error: ${err?.message || 'Unknown error'}` });
+            }
+
+            // 진행률 갱신
+            job.processedCount = currentIndex;
+            const progress = Math.round((job.processedCount / job.totalCount) * 100);
+            if (progress % 10 === 0 || job.processedCount === job.totalCount) {
+                logger.info(
+                    `[LAND-PRICE ${jobId}] Progress: ${progress}% (${job.processedCount}/${job.totalCount}, success: ${successCount})`
+                );
+            }
+            await supabaseService.updateSyncJobStatus(jobId, 'PROCESSING', progress);
+        }
+
+        // 완료 처리
+        const finalStatus = failedEntries.length === job.totalCount ? 'FAILED' : 'COMPLETED';
+        const errorLog =
+            failedEntries.length > 0
+                ? JSON.stringify({
+                      failedCount: failedEntries.length,
+                      successCount,
+                      totalCount: job.totalCount,
+                      failedEntries: failedEntries.slice(0, 100),
+                  })
+                : null;
+
+        const previewData = {
+            successCount,
+            failedCount: failedEntries.length,
+            totalCount: job.totalCount,
+        };
+
+        logger.info(
+            `[LAND-PRICE ${jobId}] Completed — success: ${successCount}, failed: ${failedEntries.length}`
         );
 
         this.updateJobStatus(jobId, {

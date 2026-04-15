@@ -58,6 +58,67 @@ router.post('/sync-apartment-prices', authMiddleware, async (req, res) => {
 });
 
 /**
+ * 토지 공시지가 일괄 재동기화 (2026-04)
+ * 해당 조합의 land_lots 전체 PNU 의 official_price 를 VWorld API 로 재갱신
+ * body: { unionId: string }
+ */
+router.post('/sync-land-prices', authMiddleware, async (req, res) => {
+    const { unionId } = req.body;
+
+    if (!unionId || typeof unionId !== 'string') {
+        return res.status(400).json({ error: 'unionId is required.' });
+    }
+
+    if (req.user?.unionId && req.user.unionId !== 'system' && req.user.unionId !== unionId) {
+        return res.status(403).json({ error: 'unionId mismatch with authenticated token.' });
+    }
+
+    try {
+        const result = await gisQueueService.addLandPriceSyncJob({ unionId });
+        return res.json({
+            jobId: result.jobId,
+            totalPnu: result.totalPnu,
+            status: 'pending',
+        });
+    } catch (error: any) {
+        logger.error(`Land price sync request failed (unionId: ${unionId})`, error);
+        return res.status(500).json({ error: error?.message || 'Internal server error.' });
+    }
+});
+
+/**
+ * 전체 공시가격 동기화 (토지 + 공동주택) — 두 개의 독립 sync_jobs 로 분리 등록
+ * body: { unionId: string }
+ */
+router.post('/sync-official-prices', authMiddleware, async (req, res) => {
+    const { unionId } = req.body;
+
+    if (!unionId || typeof unionId !== 'string') {
+        return res.status(400).json({ error: 'unionId is required.' });
+    }
+
+    if (req.user?.unionId && req.user.unionId !== 'system' && req.user.unionId !== unionId) {
+        return res.status(403).json({ error: 'unionId mismatch with authenticated token.' });
+    }
+
+    try {
+        const [landResult, apartmentResult] = await Promise.all([
+            gisQueueService.addLandPriceSyncJob({ unionId }),
+            gisQueueService.addApartmentPriceSyncJob({ unionId }),
+        ]);
+
+        return res.json({
+            land: { jobId: landResult.jobId, totalPnu: landResult.totalPnu },
+            apartment: { jobId: apartmentResult.jobId, totalPnu: apartmentResult.totalPnu },
+            status: 'pending',
+        });
+    } catch (error: any) {
+        logger.error(`Official price sync request failed (unionId: ${unionId})`, error);
+        return res.status(500).json({ error: error?.message || 'Internal server error.' });
+    }
+});
+
+/**
  * 작업 상태 조회
  */
 router.get('/status/:jobId', (req, res) => {

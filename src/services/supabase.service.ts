@@ -690,6 +690,50 @@ class SupabaseService {
     }
 
     /**
+     * 토지 공시지가 재동기화 대상 조회 (2026-04)
+     * 해당 조합의 land_lots 전체 PNU 목록을 반환 (전체 무조건 재조회)
+     */
+    async listLandPriceTargetsByUnion(unionId: string): Promise<Array<{ pnu: string }>> {
+        try {
+            const { data, error } = await this.client
+                .from('land_lots')
+                .select('pnu')
+                .eq('union_id', unionId);
+
+            if (error) {
+                logger.error(`land_lots lookup failed for union ${unionId}`, error);
+                return [];
+            }
+            return (data ?? []).map((row: { pnu: string }) => ({ pnu: row.pnu }));
+        } catch (error) {
+            logger.error(`listLandPriceTargetsByUnion error (union: ${unionId})`, error);
+            return [];
+        }
+    }
+
+    /**
+     * land_lots.official_price 단건 갱신 (토지 공시지가 재동기화용, 2026-04)
+     * union_id + pnu 복합 조건으로 갱신하여 다른 조합 데이터 오염 방지
+     */
+    async updateLandLotPrice(unionId: string, pnu: string, price: number): Promise<boolean> {
+        try {
+            const { error } = await this.client
+                .from('land_lots')
+                .update({ official_price: price })
+                .eq('union_id', unionId)
+                .eq('pnu', pnu);
+            if (error) {
+                logger.warn(`updateLandLotPrice failed (union: ${unionId}, pnu: ${pnu}): ${error.message}`);
+                return false;
+            }
+            return true;
+        } catch (error) {
+            logger.error(`updateLandLotPrice error (union: ${unionId}, pnu: ${pnu})`, error);
+            return false;
+        }
+    }
+
+    /**
      * sync_jobs 상태 업데이트
      */
     async updateSyncJobStatus(
