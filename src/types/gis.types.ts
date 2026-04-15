@@ -14,3 +14,21 @@ export interface GisJobInfo {
     startedAt?: Date;
     completedAt?: Date;
 }
+
+/**
+ * 공동주택공시가격 일괄 재동기화 요청 (2026-04)
+ * 한 조합의 공동주택(VILLA / APARTMENT / MIXED) 세대 공시가격만 갱신
+ */
+export interface ApartmentPriceSyncRequest {
+    unionId: string;
+}
+
+/**
+ * 공동주택공시가격 재동기화 대상 단위 필지
+ * building_land_lots → buildings → building_units 조인 결과의 한 행
+ */
+export interface ApartmentPriceSyncTarget {
+    pnu: string;
+    buildingId: string;
+    buildingType: string;
+}

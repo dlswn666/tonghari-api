@@ -497,6 +497,7 @@ class SupabaseService {
             ho?: string | null;
             floor?: number | null;
             area?: number | null;
+            officialPrice?: number | null; // 2026-04 추가: 공동주택공시가격 (S2 integration)
         }>
     ): Promise<boolean> {
         if (!units || units.length === 0) {
@@ -514,6 +515,8 @@ class SupabaseService {
                         ho: unit.ho,
                         floor: unit.floor,
                         area: unit.area,
+                        // 2026-04 추가: 공동주택공시가격 (Vworld API로부터 매칭된 값)
+                        official_price: unit.officialPrice ?? null,
                     },
                     {
                         onConflict: 'building_id,dong,ho',
@@ -555,6 +558,7 @@ class SupabaseService {
                 ho?: string | null;
                 floor?: number | null;
                 area?: number | null;
+                officialPrice?: number | null; // 2026-04 추가: 공동주택공시가격 (S2 integration)
             }>;
         }
     ): Promise<boolean> {
@@ -587,6 +591,100 @@ class SupabaseService {
             return true;
         } catch (error) {
             logger.error(`saveBuildingWithUnits error (PNU: ${pnu})`, error);
+            return false;
+        }
+    }
+
+    /**
+     * 조합 내 공동주택 타입(VILLA / APARTMENT / MIXED) 건물의 PNU 목록 조회 (2026-04)
+     * 공동주택공시가격 재동기화 대상 선정에 사용
+     */
+    async listApartmentBuildingTargets(
+        unionId: string
+    ): Promise<Array<{ pnu: string; buildingId: string; buildingType: string }>> {
+        try {
+            // 1. 해당 조합의 land_lots PNU 목록 조회
+            const { data: lots, error: lotsError } = await this.client
+                .from('land_lots')
+                .select('pnu')
+                .eq('union_id', unionId);
+
+            if (lotsError) {
+                logger.error(`land_lots lookup failed for union ${unionId}`, lotsError);
+                return [];
+            }
+
+            const pnus = (lots ?? []).map((l: { pnu: string }) => l.pnu);
+            if (pnus.length === 0) return [];
+
+            // 2. building_land_lots로 PNU → building_id 매핑
+            const { data: mapping, error: mapError } = await this.client
+                .from('building_land_lots')
+                .select('pnu, building_id')
+                .in('pnu', pnus);
+
+            if (mapError || !mapping || mapping.length === 0) {
+                if (mapError) logger.error(`building_land_lots lookup failed`, mapError);
+                return [];
+            }
+
+            const buildingIds = Array.from(new Set(mapping.map((m: { building_id: string }) => m.building_id)));
+
+            // 3. 공동주택 타입(VILLA/APARTMENT/MIXED) 건물 필터
+            const { data: buildings, error: buildingError } = await this.client
+                .from('buildings')
+                .select('id, building_type')
+                .in('id', buildingIds)
+                .in('building_type', ['VILLA', 'APARTMENT', 'MIXED']);
+
+            if (buildingError || !buildings) {
+                if (buildingError) logger.error(`buildings lookup failed`, buildingError);
+                return [];
+            }
+
+            const buildingIdToType = new Map<string, string>(
+                buildings.map((b: { id: string; building_type: string }) => [b.id, b.building_type])
+            );
+
+            // 4. 최종 대상: { pnu, buildingId, buildingType }
+            const targets: Array<{ pnu: string; buildingId: string; buildingType: string }> = [];
+            for (const m of mapping as Array<{ pnu: string; building_id: string }>) {
+                const bt = buildingIdToType.get(m.building_id);
+                if (bt) {
+                    targets.push({ pnu: m.pnu, buildingId: m.building_id, buildingType: bt });
+                }
+            }
+            return targets;
+        } catch (error) {
+            logger.error(`listApartmentBuildingTargets error (union: ${unionId})`, error);
+            return [];
+        }
+    }
+
+    /**
+     * building_units.official_price 단건 갱신 (공동주택공시가격 재동기화용, 2026-04)
+     * NULL dong/ho 매칭을 위해 .is() 사용
+     */
+    async updateBuildingUnitPrice(
+        buildingId: string,
+        dong: string | null,
+        ho: string | null,
+        price: number
+    ): Promise<boolean> {
+        try {
+            let query = this.client.from('building_units').update({ official_price: price }).eq('building_id', buildingId);
+            query = dong === null ? query.is('dong', null) : query.eq('dong', dong);
+            query = ho === null ? query.is('ho', null) : query.eq('ho', ho);
+            const { error } = await query;
+            if (error) {
+                logger.warn(
+                    `updateBuildingUnitPrice failed (building: ${buildingId}, dong: ${dong}, ho: ${ho}): ${error.message}`
+                );
+                return false;
+            }
+            return true;
+        } catch (error) {
+            logger.error(`updateBuildingUnitPrice error (building: ${buildingId})`, error);
             return false;
         }
     }

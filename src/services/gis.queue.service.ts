@@ -3,7 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { env } from '../config/env';
 import { gisService } from './gis.service';
 import { supabaseService } from './supabase.service';
-import { GisSyncRequest, GisJobInfo } from '../types/gis.types';
+import { GisSyncRequest, GisJobInfo, ApartmentPriceSyncRequest, ApartmentPriceSyncTarget } from '../types/gis.types';
 import { createLogger } from '../utils/logger';
 
 const logger = createLogger('GIS-QUEUE');
@@ -200,7 +200,13 @@ class GisQueueService {
                     buildingName: string | null;
                     mainPurpose: string | null;
                     floorCount: number;
-                    units: Array<{ dong: string | null; ho: string | null; floor: number | null; area: number | null }>;
+                    units: Array<{
+                        dong: string | null;
+                        ho: string | null;
+                        floor: number | null;
+                        area: number | null;
+                        officialPrice?: number | null; // 2026-04 추가: 공동주택공시가격 (S2 integration)
+                    }>;
                 } | null = null;
                 try {
                     buildingInfo = await gisService.getBuildingInfo(pnu);
@@ -220,6 +226,54 @@ class GisQueueService {
                         }`
                     );
                     // 건물 정보 조회 실패해도 계속 진행
+                }
+
+                // Step 2.8b: 공동주택공시가격 조회 (Vworld API) - 2026-04 추가
+                // 빌라/아파트/주상복합 등 공동주택 유형일 때만 호출하여 API 부하 절감.
+                // 성공하면 buildingInfo.units 각 세대에 officialPrice를 머지.
+                if (
+                    buildingInfo &&
+                    ['VILLA', 'APARTMENT', 'MIXED'].includes(buildingInfo.buildingType) &&
+                    buildingInfo.units.length > 0
+                ) {
+                    try {
+                        const apartmentPrices = await gisService.getApartmentHousePrices(pnu);
+                        if (apartmentPrices && apartmentPrices.length > 0) {
+                            // dong/ho 기준 매칭 — NULL도 동일 처리, 문자열은 trim 후 비교
+                            const normalize = (v: string | null | undefined): string | null => {
+                                if (v == null) return null;
+                                const trimmed = String(v).trim();
+                                return trimmed.length === 0 ? null : trimmed;
+                            };
+                            buildingInfo.units = buildingInfo.units.map((unit) => {
+                                const uDong = normalize(unit.dong);
+                                const uHo = normalize(unit.ho);
+                                const match = apartmentPrices.find((p) => {
+                                    const pDong = normalize(p.dong);
+                                    const pHo = normalize(p.ho);
+                                    return pDong === uDong && pHo === uHo;
+                                });
+                                return match ? { ...unit, officialPrice: match.officialPrice } : unit;
+                            });
+                            const matchedCount = buildingInfo.units.filter(
+                                (u) => u.officialPrice != null
+                            ).length;
+                            logger.info(
+                                `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Apartment prices matched for ${pnu}: ${matchedCount}/${buildingInfo.units.length} units`
+                            );
+                        } else if (apartmentPrices && apartmentPrices.length === 0) {
+                            logger.debug(
+                                `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) No apartment price data for PNU ${pnu}`
+                            );
+                        }
+                    } catch (aptPriceError: any) {
+                        // fire-and-forget: 실패해도 전체 job을 막지 않음 (기존 공시지가 패턴과 동일)
+                        logger.warn(
+                            `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Apartment price fetch error for ${pnu}: ${
+                                aptPriceError?.message || 'Unknown error'
+                            }`
+                        );
+                    }
                 }
 
                 // Step 2.9: 소유주 수 계산 (building_units 기준으로 통일)
@@ -398,6 +452,178 @@ class GisQueueService {
 
     getJobStatus(jobId: string) {
         return this.jobs.get(jobId);
+    }
+
+    /**
+     * 공동주택공시가격 일괄 재동기화 작업 추가 (2026-04)
+     * 해당 조합 소속 공동주택(VILLA / APARTMENT / MIXED) 세대의 official_price를
+     * VWorld 공동주택가격 API로 재조회해 building_units에 갱신한다.
+     */
+    async addApartmentPriceSyncJob(
+        request: ApartmentPriceSyncRequest
+    ): Promise<{ jobId: string; totalPnu: number }> {
+        const jobId = uuidv4();
+
+        // 1. 공동주택 대상 조회
+        const targets = await supabaseService.listApartmentBuildingTargets(request.unionId);
+        const totalPnu = targets.length;
+
+        const jobInfo: GisJobInfo = {
+            jobId,
+            unionId: request.unionId,
+            totalCount: totalPnu,
+            processedCount: 0,
+            status: 'pending',
+            createdAt: new Date(),
+        };
+        this.jobs.set(jobId, jobInfo);
+
+        // 2. sync_jobs 테이블 등록
+        try {
+            const { error } = await supabaseService.getClient().from('sync_jobs').insert({
+                id: jobId,
+                union_id: request.unionId,
+                job_type: 'APARTMENT_PRICE_SYNC',
+                status: 'PROCESSING',
+                progress: 0,
+            });
+            if (error) {
+                logger.error(`sync_jobs insert error (${jobId}): ${JSON.stringify(error)}`);
+            } else {
+                logger.info(`Apartment price sync job added: ${jobId} (targets: ${totalPnu})`);
+            }
+        } catch (error) {
+            logger.error(`sync_jobs registration failed (${jobId})`, error);
+        }
+
+        // 3. 대상 없으면 바로 완료 처리
+        if (totalPnu === 0) {
+            this.updateJobStatus(jobId, { status: 'completed', completedAt: new Date() });
+            await supabaseService.updateSyncJobStatus(jobId, 'COMPLETED', 100, undefined, {
+                successCount: 0,
+                failedCount: 0,
+                totalCount: 0,
+                message: '대상 공동주택이 없습니다.',
+            });
+            return { jobId, totalPnu: 0 };
+        }
+
+        // 4. 큐 등록
+        this.queue
+            .add(async () => {
+                await this.processApartmentPriceSync(jobId, targets);
+            })
+            .catch((err) => {
+                logger.error(`Apartment price sync job ${jobId} fatal error`, err);
+                this.updateJobStatus(jobId, { status: 'failed', error: err.message });
+                supabaseService.updateSyncJobStatus(jobId, 'FAILED', 0, err.message);
+            });
+
+        return { jobId, totalPnu };
+    }
+
+    /**
+     * 공동주택공시가격 재동기화 워커 핸들러 (2026-04)
+     * 각 PNU에 대해 gisService.getApartmentHousePrices()를 호출하고
+     * (building_id, dong, ho) 매칭으로 building_units.official_price를 갱신한다.
+     * 개별 세대 갱신 실패는 fire-and-forget (배치 전체를 막지 않음).
+     */
+    private async processApartmentPriceSync(jobId: string, targets: ApartmentPriceSyncTarget[]): Promise<void> {
+        const job = this.jobs.get(jobId);
+        if (!job) return;
+
+        logger.info(`[APT-PRICE ${jobId}] Apartment price sync started (targets: ${targets.length})`);
+        this.updateJobStatus(jobId, { status: 'processing', startedAt: new Date() });
+
+        let successPnuCount = 0;
+        let updatedUnitCount = 0;
+        const failedEntries: Array<{ pnu: string; reason: string }> = [];
+
+        for (let i = 0; i < targets.length; i++) {
+            const target = targets[i];
+            const currentIndex = i + 1;
+
+            try {
+                const prices = await gisService.getApartmentHousePrices(target.pnu);
+
+                if (!prices || prices.length === 0) {
+                    logger.warn(
+                        `[APT-PRICE ${jobId}] (${currentIndex}/${targets.length}) No apartment price for PNU: ${target.pnu}`
+                    );
+                    failedEntries.push({ pnu: target.pnu, reason: '공시가격 조회 결과 없음' });
+                } else {
+                    // 각 (dong, ho) 결과를 building_units에 갱신
+                    for (const entry of prices) {
+                        const updated = await supabaseService.updateBuildingUnitPrice(
+                            target.buildingId,
+                            entry.dong ?? null,
+                            entry.ho ?? null,
+                            entry.officialPrice
+                        );
+                        if (updated) {
+                            updatedUnitCount++;
+                        }
+                    }
+                    successPnuCount++;
+                    logger.debug(
+                        `[APT-PRICE ${jobId}] (${currentIndex}/${targets.length}) Updated ${prices.length} units for PNU: ${target.pnu}`
+                    );
+                }
+            } catch (err: any) {
+                logger.warn(
+                    `[APT-PRICE ${jobId}] (${currentIndex}/${targets.length}) Error for PNU ${target.pnu}: ${
+                        err?.message || 'Unknown error'
+                    }`
+                );
+                failedEntries.push({ pnu: target.pnu, reason: `Error: ${err?.message || 'Unknown error'}` });
+            }
+
+            // 진행률 갱신
+            job.processedCount = currentIndex;
+            const progress = Math.round((job.processedCount / job.totalCount) * 100);
+            if (progress % 10 === 0 || job.processedCount === job.totalCount) {
+                logger.info(
+                    `[APT-PRICE ${jobId}] Progress: ${progress}% (${job.processedCount}/${job.totalCount}, success PNU: ${successPnuCount}, updated units: ${updatedUnitCount})`
+                );
+            }
+            await supabaseService.updateSyncJobStatus(jobId, 'PROCESSING', progress);
+        }
+
+        // 완료 처리
+        const finalStatus = failedEntries.length === job.totalCount ? 'FAILED' : 'COMPLETED';
+        const errorLog =
+            failedEntries.length > 0
+                ? JSON.stringify({
+                      failedCount: failedEntries.length,
+                      successCount: successPnuCount,
+                      totalCount: job.totalCount,
+                      failedEntries: failedEntries.slice(0, 100),
+                  })
+                : null;
+
+        const previewData = {
+            successCount: successPnuCount,
+            failedCount: failedEntries.length,
+            totalCount: job.totalCount,
+            updatedUnitCount,
+        };
+
+        logger.info(
+            `[APT-PRICE ${jobId}] Completed — success PNU: ${successPnuCount}, failed: ${failedEntries.length}, updated units: ${updatedUnitCount}`
+        );
+
+        this.updateJobStatus(jobId, {
+            status: finalStatus === 'COMPLETED' ? 'completed' : 'failed',
+            completedAt: new Date(),
+        });
+
+        await supabaseService.updateSyncJobStatus(
+            jobId,
+            finalStatus as 'PROCESSING' | 'COMPLETED' | 'FAILED',
+            100,
+            errorLog || undefined,
+            previewData
+        );
     }
 }
 
