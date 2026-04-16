@@ -195,6 +195,55 @@ router.post('/search-address', async (req, res) => {
 });
 
 /**
+ * 공시가격 API 진단 (엔드포인트 검증용)
+ * body: { pnu: string, type?: 'apartment' | 'individual' | 'both' }
+ */
+router.post('/diagnose-price-api', async (req, res) => {
+    const { pnu, type = 'both' } = req.body;
+
+    if (!pnu || typeof pnu !== 'string' || pnu.length < 19) {
+        return res.status(400).json({ error: 'Valid 19-digit PNU required.' });
+    }
+
+    const results: Record<string, any> = { pnu };
+
+    if (type === 'apartment' || type === 'both') {
+        try {
+            const aptPrices = await gisService.getApartmentHousePrices(pnu);
+            results.apartment = {
+                status: aptPrices === null ? 'error' : 'ok',
+                count: aptPrices?.length ?? 0,
+                data: aptPrices?.slice(0, 5) ?? null,
+            };
+        } catch (e: any) {
+            results.apartment = { status: 'error', message: e.message };
+        }
+    }
+
+    if (type === 'individual' || type === 'both') {
+        try {
+            const housingPrice = await gisService.getIndividualHousingPrice(pnu);
+            results.individual = {
+                status: housingPrice === null ? 'no_data_or_error' : 'ok',
+                price: housingPrice,
+            };
+        } catch (e: any) {
+            results.individual = { status: 'error', message: e.message };
+        }
+    }
+
+    // 개별공시지가 (기존 작동 확인용)
+    try {
+        const landPrice = await gisService.getOfficialLandPrice(pnu);
+        results.landPrice = { status: landPrice === null ? 'no_data' : 'ok', price: landPrice };
+    } catch (e: any) {
+        results.landPrice = { status: 'error', message: e.message };
+    }
+
+    return res.json(results);
+});
+
+/**
  * 주소 추가 (전체 데이터 조회 후 DB 저장)
  */
 router.post('/add-address', async (req, res) => {

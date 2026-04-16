@@ -964,116 +964,223 @@ class GisService {
     }
 
     /**
-     * Vworld 공동주택가격 조회 (세대별 토지+건물 합산 공시가격)
+     * VWorld NED WFS 공동주택가격 조회 (세대별 토지+건물 합산 공시가격)
      *
-     * ⚠️ TODO (2026-04 production 전 필수 검증)
-     *
-     * VWorld NED 공동주택가격 WFS API의 엔드포인트/typeName/응답 필드명은
-     * 공식 공개 레퍼런스에 명시되지 않아 경험적 검증 없이 best-guess로 구현되었다.
-     * 아래 값들은 VWorld 네이밍 컨벤션(개별공시지가 getIndvdLandPriceWFS + dt_d150)
-     * 의 형제 패턴에서 유추된 것이며, 실제 API 키로 호출하여 검증해야 한다.
-     *
-     * 검증 방법:
-     * 1. VWORLD_API_KEY 확보 후 실제 공동주택 PNU로 curl 호출
-     * 2. 성공하는 URL/typeName 조합 찾기 (getApartHousPriceWFS / getAptHousePriceWFS /
-     *    getAptHousPcWFS / dt_d151 / dt_d152 / dt_d160 등)
-     * 3. 응답 properties의 실제 필드명 확인 후 아래 APT_PRICE_FIELDS 상수 교정
-     * 4. 실패 시 fallback 경로 유지 (검증되지 않은 엔드포인트가 전체 GIS sync를
-     *    지연시키지 않도록 5초 timeout + null/[] 반환으로 graceful degrade)
+     * 여러 엔드포인트/typeName 조합을 시도하여 작동하는 조합을 찾고 캐시한다.
+     * 성공한 조합은 인스턴스 수명 동안 유지되어 이후 호출은 즉시 해당 조합만 사용.
      *
      * @param pnu 필지고유번호 (19자리)
-     * @returns 세대별 공동주택가격 목록.
-     *          - 네트워크/설정 오류 → null
-     *          - 정상 응답 + 공동주택 없음 → []
-     *          - 정상 응답 + 공동주택 있음 → 세대별 배열
-     *          officialPrice 단위는 원(정수)
+     * @returns 세대별 공동주택가격 목록 | null(설정/네트워크 오류) | [](데이터 없음)
      */
+    private _aptPriceEndpoint: { endpoint: string; typeName: string } | null = null;
+    private _aptPriceProbed = false;
+
     async getApartmentHousePrices(pnu: string): Promise<Array<{
         dong: string | null;
         ho: string | null;
         area: number | null;
         officialPrice: number;
     }> | null> {
-        // best-guess 상수 — production 배포 전 반드시 실제 API 키로 검증 필요 (위 TODO 참조)
-        const APT_PRICE_ENDPOINT = 'https://api.vworld.kr/ned/wfs/getApartHousPriceWFS';
-        const APT_PRICE_TYPENAME = 'dt_d151';
-        const APT_PRICE_FIELDS = {
-            dong: 'dong_nm',
-            ho: 'ho_nm',
-            area: 'ex_lyspc_ar',
-            price: 'pblntf_pc',
-        } as const;
-
         if (!this.vworldApiKey) {
             logger.debug('VWORLD_API_KEY is not configured for apartment price lookup');
             return null;
         }
-
         if (!pnu || pnu.length < 19) {
             logger.debug(`Invalid PNU for apartment price lookup: ${pnu}`);
             return null;
         }
 
-        try {
-            // 슬래시(/)를 인코딩하지 않도록 수동 URL 구성 (기존 getOfficialLandPrice 패턴 동일)
-            const filter = `<Filter><PropertyIsEqualTo><PropertyName>pnu</PropertyName><Literal>${pnu}</Literal></PropertyIsEqualTo></Filter>`;
-            const encodedFilter = encodeURIComponent(filter).replace(/%2F/g, '/');
+        // 가격 필드 후보 (응답에서 동적 탐색)
+        const PRICE_FIELD_CANDIDATES = ['pblntf_pc', 'apt_price', 'ofcl_price', 'house_pc'];
+        const DONG_FIELD_CANDIDATES = ['dong_nm', 'dong_code', 'dong'];
+        const HO_FIELD_CANDIDATES = ['ho_nm', 'ho_code', 'ho'];
+        const AREA_FIELD_CANDIDATES = ['ex_lyspc_ar', 'spfc_ar', 'ar', 'area'];
 
-            // 한 필지의 전체 세대를 한 번에 수집 (maxFeatures=1000)
-            const url = `${APT_PRICE_ENDPOINT}?service=WFS&version=1.1.0&request=GetFeature&typeName=${APT_PRICE_TYPENAME}&maxFeatures=1000&outputFormat=application/json&filter=${encodedFilter}&key=${this.vworldApiKey}`;
+        const findField = (props: Record<string, any>, candidates: string[]): string | undefined =>
+            candidates.find((c) => props[c] !== undefined);
 
-            // 미검증 엔드포인트가 전체 GIS sync를 지연시키지 않도록 5초 타임아웃
-            const response = await axios.get(url, {
-                timeout: 5000,
-            });
+        // 엔드포인트/typeName 후보 조합
+        const ENDPOINT_CANDIDATES = [
+            { endpoint: 'https://api.vworld.kr/ned/wfs/getApartHousPriceWFS', typeName: 'dt_d151' },
+            { endpoint: 'https://api.vworld.kr/ned/wfs/getApartHousPriceWFS', typeName: 'dt_d152' },
+            { endpoint: 'https://api.vworld.kr/ned/wfs/getApartHousPriceWFS', typeName: 'dt_d160' },
+            { endpoint: 'https://api.vworld.kr/ned/wfs/getAptHousePriceWFS', typeName: 'dt_d151' },
+            { endpoint: 'https://api.vworld.kr/ned/wfs/getAptHousPcWFS', typeName: 'dt_d151' },
+        ];
 
-            const data = response.data;
+        const tryEndpoint = async (
+            endpoint: string,
+            typeName: string
+        ): Promise<Array<{ dong: string | null; ho: string | null; area: number | null; officialPrice: number }> | 'error'> => {
+            try {
+                const filter = `<Filter><PropertyIsEqualTo><PropertyName>pnu</PropertyName><Literal>${pnu}</Literal></PropertyIsEqualTo></Filter>`;
+                const encodedFilter = encodeURIComponent(filter).replace(/%2F/g, '/');
+                const url = `${endpoint}?service=WFS&version=1.1.0&request=GetFeature&typeName=${typeName}&maxFeatures=1000&outputFormat=application/json&filter=${encodedFilter}&key=${this.vworldApiKey}`;
 
-            // JSON 응답 처리 (GeoJSON FeatureCollection)
-            if (data?.features && Array.isArray(data.features)) {
-                const prices = data.features
-                    .map((f: any) => {
-                        const props = f.properties ?? {};
-                        const rawPrice = props[APT_PRICE_FIELDS.price];
-                        const price = Number(rawPrice);
-                        if (!Number.isFinite(price) || price <= 0) return null;
+                const response = await axios.get(url, { timeout: 8000 });
+                const data = response.data;
 
-                        const rawArea = props[APT_PRICE_FIELDS.area];
-                        const area = rawArea !== undefined && rawArea !== null ? Number(rawArea) : null;
+                // XML 오류 응답 감지 (INCORRECT_KEY, ServiceException 등)
+                if (typeof data === 'string' && (data.includes('ServiceException') || data.includes('INCORRECT'))) {
+                    return 'error';
+                }
 
-                        return {
-                            dong: props[APT_PRICE_FIELDS.dong] ?? null,
-                            ho: props[APT_PRICE_FIELDS.ho] ?? null,
-                            area: Number.isFinite(area as number) ? area : null,
-                            officialPrice: Math.round(price),
-                        };
-                    })
-                    .filter((x: any): x is {
-                        dong: string | null;
-                        ho: string | null;
-                        area: number | null;
-                        officialPrice: number;
-                    } => x !== null);
+                if (data?.features && Array.isArray(data.features)) {
+                    if (data.features.length === 0) return [];
 
-                logger.debug(`Apartment prices found for PNU ${pnu}: ${prices.length} units`);
-                return prices;
+                    // 첫 feature에서 동적 필드 탐색
+                    const sampleProps = data.features[0].properties ?? {};
+                    const priceKey = findField(sampleProps, PRICE_FIELD_CANDIDATES);
+                    const dongKey = findField(sampleProps, DONG_FIELD_CANDIDATES);
+                    const hoKey = findField(sampleProps, HO_FIELD_CANDIDATES);
+                    const areaKey = findField(sampleProps, AREA_FIELD_CANDIDATES);
+
+                    if (!priceKey) {
+                        logger.warn(`Apartment price response has no recognized price field. Keys: ${Object.keys(sampleProps).join(',')}`);
+                        return [];
+                    }
+
+                    logger.info(`Apartment price fields detected: price=${priceKey}, dong=${dongKey}, ho=${hoKey}, area=${areaKey}`);
+
+                    return data.features
+                        .map((f: any) => {
+                            const props = f.properties ?? {};
+                            const price = Number(props[priceKey]);
+                            if (!Number.isFinite(price) || price <= 0) return null;
+                            const rawArea = areaKey ? props[areaKey] : null;
+                            const area = rawArea != null ? Number(rawArea) : null;
+                            return {
+                                dong: dongKey ? (props[dongKey] ?? null) : null,
+                                ho: hoKey ? (props[hoKey] ?? null) : null,
+                                area: Number.isFinite(area as number) ? area : null,
+                                officialPrice: Math.round(price),
+                            };
+                        })
+                        .filter((x: any) => x !== null);
+                }
+
+                return 'error';
+            } catch {
+                return 'error';
             }
+        };
 
-            // XML fallback — 실제 필드명이 확정되기 전까지는 best-effort로 빈 배열 처리
-            if (typeof data === 'string' && data.includes(APT_PRICE_FIELDS.price)) {
-                logger.warn(`Apartment price XML fallback not fully implemented for PNU: ${pnu}`);
-                return [];
-            }
+        // 이미 성공한 엔드포인트가 있으면 바로 사용
+        if (this._aptPriceEndpoint) {
+            const result = await tryEndpoint(this._aptPriceEndpoint.endpoint, this._aptPriceEndpoint.typeName);
+            return result === 'error' ? null : result;
+        }
 
-            logger.debug(`No apartment price found for PNU: ${pnu}`);
-            return [];
-        } catch (error: any) {
-            logger.error(`Vworld apartment price API error (PNU: ${pnu})`, {
-                status: error.response?.status,
-                message: error.message,
-            });
+        // 이미 프로빙 완료했으나 성공 조합이 없었던 경우
+        if (this._aptPriceProbed) {
             return null;
         }
+
+        // 첫 호출: 모든 후보 조합 시도
+        this._aptPriceProbed = true;
+        for (const candidate of ENDPOINT_CANDIDATES) {
+            logger.info(`Probing apartment price endpoint: ${candidate.endpoint} / ${candidate.typeName}`);
+            const result = await tryEndpoint(candidate.endpoint, candidate.typeName);
+            if (result !== 'error') {
+                this._aptPriceEndpoint = candidate;
+                logger.info(`✓ Apartment price endpoint confirmed: ${candidate.endpoint} / ${candidate.typeName}`);
+                return result;
+            }
+        }
+
+        logger.warn('All apartment price endpoint candidates failed. Apartment prices will not be available.');
+        return null;
+    }
+
+    /**
+     * VWorld NED WFS 개별주택가격 조회 (단독주택 공시가격)
+     *
+     * 개별공시지가(dt_d150)와 동일한 NED WFS 패턴을 사용.
+     * typeName 후보: dt_d153 (개별주택가격 추정), dt_d155 등
+     * 응답의 공시가격 필드를 동적으로 탐색한다.
+     *
+     * @param pnu 필지고유번호 (19자리)
+     * @returns 개별주택공시가격(원) | null
+     */
+    private _indvHousingEndpoint: { endpoint: string; typeName: string } | null = null;
+    private _indvHousingProbed = false;
+
+    async getIndividualHousingPrice(pnu: string): Promise<number | null> {
+        if (!this.vworldApiKey) {
+            logger.debug('VWORLD_API_KEY is not configured for individual housing price lookup');
+            return null;
+        }
+        if (!pnu || pnu.length < 19) {
+            return null;
+        }
+
+        const PRICE_FIELD_CANDIDATES = ['pblntf_pc', 'house_pc', 'ofcl_price', 'indvd_house_pc', 'pblntf_pclnd'];
+        const ENDPOINT_CANDIDATES = [
+            { endpoint: 'https://api.vworld.kr/ned/wfs/getIndvdHousingPriceWFS', typeName: 'dt_d153' },
+            { endpoint: 'https://api.vworld.kr/ned/wfs/getIndvdHousingPriceWFS', typeName: 'dt_d155' },
+            { endpoint: 'https://api.vworld.kr/ned/wfs/getIndvdHousingPriceWFS', typeName: 'dt_d151' },
+            { endpoint: 'https://api.vworld.kr/ned/wfs/getIndvdHousPriceWFS', typeName: 'dt_d153' },
+        ];
+
+        const findField = (props: Record<string, any>, candidates: string[]): string | undefined =>
+            candidates.find((c) => props[c] !== undefined);
+
+        const tryEndpoint = async (endpoint: string, typeName: string): Promise<number | 'error'> => {
+            try {
+                const filter = `<Filter><PropertyIsEqualTo><PropertyName>pnu</PropertyName><Literal>${pnu}</Literal></PropertyIsEqualTo></Filter>`;
+                const encodedFilter = encodeURIComponent(filter).replace(/%2F/g, '/');
+                const url = `${endpoint}?service=WFS&version=1.1.0&request=GetFeature&typeName=${typeName}&maxFeatures=1&outputFormat=application/json&filter=${encodedFilter}&key=${this.vworldApiKey}`;
+
+                const response = await axios.get(url, { timeout: 8000 });
+                const data = response.data;
+
+                if (typeof data === 'string' && (data.includes('ServiceException') || data.includes('INCORRECT'))) {
+                    return 'error';
+                }
+
+                if (data?.features && Array.isArray(data.features)) {
+                    if (data.features.length === 0) return 0; // valid response, no data
+
+                    const props = data.features[0].properties ?? {};
+                    const priceKey = findField(props, PRICE_FIELD_CANDIDATES);
+                    if (!priceKey) {
+                        logger.warn(`Individual housing price response has no recognized price field. Keys: ${Object.keys(props).join(',')}`);
+                        return 0;
+                    }
+
+                    logger.info(`Individual housing price field detected: ${priceKey}`);
+                    const price = Number(props[priceKey]);
+                    return Number.isFinite(price) && price > 0 ? Math.round(price) : 0;
+                }
+
+                return 'error';
+            } catch {
+                return 'error';
+            }
+        };
+
+        if (this._indvHousingEndpoint) {
+            const result = await tryEndpoint(this._indvHousingEndpoint.endpoint, this._indvHousingEndpoint.typeName);
+            return result === 'error' ? null : (result === 0 ? null : result);
+        }
+
+        if (this._indvHousingProbed) {
+            return null;
+        }
+
+        this._indvHousingProbed = true;
+        for (const candidate of ENDPOINT_CANDIDATES) {
+            logger.info(`Probing individual housing price endpoint: ${candidate.endpoint} / ${candidate.typeName}`);
+            const result = await tryEndpoint(candidate.endpoint, candidate.typeName);
+            if (result !== 'error') {
+                this._indvHousingEndpoint = candidate;
+                logger.info(`✓ Individual housing price endpoint confirmed: ${candidate.endpoint} / ${candidate.typeName}`);
+                return result === 0 ? null : result;
+            }
+        }
+
+        logger.warn('All individual housing price endpoint candidates failed. Individual housing prices will not be available.');
+        return null;
     }
 
     /**

@@ -235,51 +235,68 @@ class GisQueueService {
                     // 건물 정보 조회 실패해도 계속 진행
                 }
 
-                // Step 2.8b: 공동주택공시가격 조회 (Vworld API) - 2026-04 추가
-                // 빌라/아파트/주상복합 등 공동주택 유형일 때만 호출하여 API 부하 절감.
-                // 성공하면 buildingInfo.units 각 세대에 officialPrice를 머지.
-                if (
-                    buildingInfo &&
-                    ['VILLA', 'APARTMENT', 'MIXED'].includes(buildingInfo.buildingType) &&
-                    buildingInfo.units.length > 0
-                ) {
-                    try {
-                        const apartmentPrices = await gisService.getApartmentHousePrices(pnu);
-                        if (apartmentPrices && apartmentPrices.length > 0) {
-                            // dong/ho 기준 매칭 — NULL도 동일 처리, 문자열은 trim 후 비교
-                            const normalize = (v: string | null | undefined): string | null => {
-                                if (v == null) return null;
-                                const trimmed = String(v).trim();
-                                return trimmed.length === 0 ? null : trimmed;
-                            };
-                            buildingInfo.units = buildingInfo.units.map((unit) => {
-                                const uDong = normalize(unit.dong);
-                                const uHo = normalize(unit.ho);
-                                const match = apartmentPrices.find((p) => {
-                                    const pDong = normalize(p.dong);
-                                    const pHo = normalize(p.ho);
-                                    return pDong === uDong && pHo === uHo;
+                // Step 2.8b: 주택 공시가격 조회 (건물 유형별 분기)
+                if (buildingInfo && buildingInfo.buildingType !== 'NONE') {
+                    // 공동주택 (VILLA/APARTMENT/MIXED): 세대별 공동주택공시가격 조회
+                    if (
+                        ['VILLA', 'APARTMENT', 'MIXED'].includes(buildingInfo.buildingType) &&
+                        buildingInfo.units.length > 0
+                    ) {
+                        try {
+                            const apartmentPrices = await gisService.getApartmentHousePrices(pnu);
+                            if (apartmentPrices && apartmentPrices.length > 0) {
+                                const normalize = (v: string | null | undefined): string | null => {
+                                    if (v == null) return null;
+                                    const trimmed = String(v).trim();
+                                    return trimmed.length === 0 ? null : trimmed;
+                                };
+                                buildingInfo.units = buildingInfo.units.map((unit) => {
+                                    const uDong = normalize(unit.dong);
+                                    const uHo = normalize(unit.ho);
+                                    const match = apartmentPrices.find((p) => {
+                                        const pDong = normalize(p.dong);
+                                        const pHo = normalize(p.ho);
+                                        return pDong === uDong && pHo === uHo;
+                                    });
+                                    return match ? { ...unit, officialPrice: match.officialPrice } : unit;
                                 });
-                                return match ? { ...unit, officialPrice: match.officialPrice } : unit;
-                            });
-                            const matchedCount = buildingInfo.units.filter(
-                                (u) => u.officialPrice != null
-                            ).length;
-                            logger.info(
-                                `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Apartment prices matched for ${pnu}: ${matchedCount}/${buildingInfo.units.length} units`
-                            );
-                        } else if (apartmentPrices && apartmentPrices.length === 0) {
-                            logger.debug(
-                                `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) No apartment price data for PNU ${pnu}`
+                                const matchedCount = buildingInfo.units.filter(
+                                    (u) => u.officialPrice != null
+                                ).length;
+                                logger.info(
+                                    `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Apartment prices matched for ${pnu}: ${matchedCount}/${buildingInfo.units.length} units`
+                                );
+                            }
+                        } catch (aptPriceError: any) {
+                            logger.warn(
+                                `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Apartment price fetch error for ${pnu}: ${
+                                    aptPriceError?.message || 'Unknown error'
+                                }`
                             );
                         }
-                    } catch (aptPriceError: any) {
-                        // fire-and-forget: 실패해도 전체 job을 막지 않음 (기존 공시지가 패턴과 동일)
-                        logger.warn(
-                            `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Apartment price fetch error for ${pnu}: ${
-                                aptPriceError?.message || 'Unknown error'
-                            }`
-                        );
+                    }
+
+                    // 단독주택 (DETACHED_HOUSE): 개별주택공시가격 조회 → building_units에 저장
+                    if (buildingInfo.buildingType === 'DETACHED_HOUSE') {
+                        try {
+                            const housingPrice = await gisService.getIndividualHousingPrice(pnu);
+                            if (housingPrice != null && housingPrice > 0) {
+                                // 단독주택은 보통 unit이 1개. 전체 unit에 동일 가격 적용.
+                                buildingInfo.units = buildingInfo.units.map((unit) => ({
+                                    ...unit,
+                                    officialPrice: housingPrice,
+                                }));
+                                logger.info(
+                                    `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Individual housing price for ${pnu}: ${housingPrice.toLocaleString()}원`
+                                );
+                            }
+                        } catch (housingPriceError: any) {
+                            logger.warn(
+                                `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Individual housing price fetch error for ${pnu}: ${
+                                    housingPriceError?.message || 'Unknown error'
+                                }`
+                            );
+                        }
                     }
                 }
 
