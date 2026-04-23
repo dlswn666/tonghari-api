@@ -309,6 +309,17 @@ class MemberQueueService {
             apiSkipped: boolean; // API 호출 생략 여부
         }
 
+        /**
+         * 동일인 판별: 이름+거주지(필수) 일치 + 생년월일/전화번호(선택, 양쪽 다 있을 때만 비교)
+         */
+        const isSamePersonCheck = (a: PreRegisterData, b: PreRegisterData): boolean => {
+            if (a.name !== b.name) return false;
+            if ((a.residentAddress || '') !== (b.residentAddress || '')) return false;
+            if (a.birthDate && b.birthDate && a.birthDate !== b.birthDate) return false;
+            if (a.phoneNumber && b.phoneNumber && a.phoneNumber !== b.phoneNumber) return false;
+            return true;
+        };
+
         const matchedMembers: MatchedMember[] = [];
 
         for (let i = 0; i < request.members.length; i++) {
@@ -376,188 +387,223 @@ class MemberQueueService {
         );
 
         // ========================================
-        // 2단계: DB 저장 (0-100%)
-        // users + building_units + user_property_units 저장
-        // Phase 1에서 진행률 업데이트 없이, DB Insert 완료 시점에만 반영
+        // 2단계: 동일인 그룹핑 + DB 저장 (0-100%)
+        // 이름+거주지(필수) + 생년월일+전화번호(선택) 기준으로 동일인 판별
+        // 1 user + N property_units 구조로 저장
         // ========================================
-        logger.info(`[Pre-Register ${jobId}] Phase 2: DB Insert`);
+        logger.info(`[Pre-Register ${jobId}] Phase 2: Grouping + DB Insert`);
 
-        for (let i = 0; i < matchedMembers.length; i++) {
-            const member = matchedMembers[i];
-            const currentIndex = i + 1;
+        // 동일인 그룹핑
+        const personGroups = this.groupByPerson(matchedMembers);
+        logger.info(`[Pre-Register ${jobId}] Grouped ${matchedMembers.length} rows into ${personGroups.length} persons`);
 
+        let processedRowCount = 0;
+
+        for (const group of personGroups) {
             try {
-                // 동호수 정규화
-                const normalizedDong = this.normalizeDong(member.row.dong);
-                const normalizedHo = this.normalizeHo(member.row.ho);
+                // 그룹 내 최선의 개인정보 취합 (null이 아닌 값 우선)
+                const firstRow = group[0].row;
+                const bestPhone = group.find((m) => m.row.phoneNumber)?.row.phoneNumber || null;
+                const bestBirthDate = group.find((m) => m.row.birthDate)?.row.birthDate || null;
+                const bestResidentAddress = group.find((m) => m.row.residentAddress)?.row.residentAddress || null;
+                const bestNotes = group.find((m) => m.row.notes)?.row.notes || null;
 
-                // 중복 체크 (PNU가 있는 경우에만)
-                // 공동 소유자 지원: 동일 PNU+동+호라도 이름이 다르면 별도 저장
-                if (member.pnu) {
-                    const duplicateResult = await this.checkDuplicatePnu(
-                        client,
-                        request.unionId,
-                        member.pnu,
-                        normalizedDong,
-                        normalizedHo,
-                        member.row.name // 현재 처리 중인 멤버 이름 전달
-                    );
+                // 그룹 내 각 물건지별 PNU 중복 체크 → 통과한 것만 저장
+                const validMembers: MatchedMember[] = [];
 
-                    if (duplicateResult.isDuplicate && duplicateResult.existingUserId) {
-                        // BUG-012: 이름 또는 전화번호가 같으면 동일인으로 판단 (개명 케이스 대응)
-                        // 이름이 같으면 실제 중복 → 기존 정보 업데이트
-                        // 전화번호가 같아도 동일인 → 기존 정보 업데이트
-                        // 둘 다 다르면 공동 소유자 → 별도 레코드로 저장 (continue 하지 않음)
-                        const nameMatch = duplicateResult.existingUserName?.trim() === member.row.name.trim();
-                        const phoneMatch = duplicateResult.existingPhoneNumber &&
-                            member.row.phoneNumber &&
-                            duplicateResult.existingPhoneNumber.replace(/-/g, '') === member.row.phoneNumber.replace(/-/g, '');
-                        const isSamePerson = nameMatch || phoneMatch;
+                for (const member of group) {
+                    const normalizedDong = this.normalizeDong(member.row.dong);
+                    const normalizedHo = this.normalizeHo(member.row.ho);
 
-                        if (isSamePerson) {
-                            // 동일인 중복인 경우 기존 사용자 정보 업데이트
-                            const { error: updateError } = await client
-                                .from('users')
-                                .update({
-                                    name: member.row.name,
-                                    phone_number: member.row.phoneNumber || null,
-                                    resident_address: member.row.residentAddress || null,
-                                    notes: member.row.notes || null,
-                                })
-                                .eq('id', duplicateResult.existingUserId);
+                    if (member.pnu) {
+                        const duplicateResult = await this.checkDuplicatePnu(
+                            client,
+                            request.unionId,
+                            member.pnu,
+                            normalizedDong,
+                            normalizedHo,
+                            member.row.name
+                        );
 
-                            if (updateError) {
-                                errors.push(`${member.row.name}: 업데이트 실패 - ${updateError.message}`);
-                            } else {
-                                // user_property_units도 업데이트
-                                if (duplicateResult.existingPropertyUnitId) {
-                                    await client
-                                        .from('user_property_units')
-                                        .update({
-                                            property_address_jibun: member.row.propertyAddress || null,
-                                            property_address_road: member.row.propertyAddressRoad || null,
-                                            building_name: member.row.buildingName || null,
-                                            dong: normalizedDong,
-                                            ho: normalizedHo,
-                                            land_area: this.sanitizeNumeric(member.row.landArea),
-                                            land_ownership_ratio: this.sanitizeNumeric(member.row.landOwnershipRatio),
-                                            building_area: this.sanitizeNumeric(member.row.buildingArea),
-                                            building_ownership_ratio: this.sanitizeNumeric(
-                                                member.row.buildingOwnershipRatio
-                                            ),
-                                        })
-                                        .eq('id', duplicateResult.existingPropertyUnitId);
+                        if (duplicateResult.isDuplicate && duplicateResult.existingUserId) {
+                            // BUG-012: 이름 또는 전화번호가 같으면 동일인으로 판단
+                            const nameMatch = duplicateResult.existingUserName?.trim() === member.row.name.trim();
+                            const phoneMatch = duplicateResult.existingPhoneNumber &&
+                                member.row.phoneNumber &&
+                                duplicateResult.existingPhoneNumber.replace(/-/g, '') === member.row.phoneNumber.replace(/-/g, '');
+                            const isSamePersonAsExisting = nameMatch || phoneMatch;
+
+                            if (isSamePersonAsExisting) {
+                                // 기존 DB 사용자와 동일인 → 기존 정보 업데이트
+                                const { error: updateError } = await client
+                                    .from('users')
+                                    .update({
+                                        name: member.row.name,
+                                        phone_number: bestPhone,
+                                        birth_date: bestBirthDate,
+                                        resident_address: bestResidentAddress,
+                                        notes: bestNotes,
+                                    })
+                                    .eq('id', duplicateResult.existingUserId);
+
+                                if (updateError) {
+                                    errors.push(`${member.row.name}: 업데이트 실패 - ${updateError.message}`);
+                                } else {
+                                    if (duplicateResult.existingPropertyUnitId) {
+                                        await client
+                                            .from('user_property_units')
+                                            .update({
+                                                property_address_jibun: member.row.propertyAddress || null,
+                                                property_address_road: member.row.propertyAddressRoad || null,
+                                                building_name: member.row.buildingName || null,
+                                                dong: normalizedDong,
+                                                ho: normalizedHo,
+                                                land_area: this.sanitizeNumeric(member.row.landArea),
+                                                land_ownership_ratio: this.sanitizeNumeric(member.row.landOwnershipRatio),
+                                                building_area: this.sanitizeNumeric(member.row.buildingArea),
+                                                building_ownership_ratio: this.sanitizeNumeric(
+                                                    member.row.buildingOwnershipRatio
+                                                ),
+                                            })
+                                            .eq('id', duplicateResult.existingPropertyUnitId);
+                                    }
+                                    updatedCount++;
+                                    duplicateCount++;
                                 }
-                                updatedCount++;
-                                duplicateCount++;
+                                continue;
                             }
-                            continue;
-                        } else {
-                            // 공동 소유자는 별도 레코드로 저장 (continue 하지 않고 아래 insert 로직 진행)
+                            // 공동 소유자는 별도 레코드로 진행
                         }
                     }
+                    validMembers.push(member);
                 }
 
-                // UUID 생성
+                processedRowCount += group.length;
+
+                if (validMembers.length === 0) {
+                    // 진행률 업데이트
+                    const progress = Math.round((processedRowCount / totalCount) * 100);
+                    this.updateJobStatus(jobId, { processedCount: processedRowCount });
+                    if (progress % 5 === 0 || processedRowCount === totalCount) {
+                        await supabaseService.updateSyncJobStatus(jobId, 'PROCESSING', progress, undefined, {
+                            job_type: 'PRE_REGISTER', phase: 'SAVING',
+                            matchedCount, unmatchedCount, savedCount, updatedCount, duplicateCount, totalCount,
+                        });
+                    }
+                    continue;
+                }
+
+                // 1 user 생성
                 const userId = uuidv4();
 
-                // users 테이블에 저장 (기본 정보만)
-                // 물건지 정보(PNU, 주소, 면적, 지분율, 동, 호수)는 user_property_units에서 관리
                 const { error: userError } = await client.from('users').insert({
                     id: userId,
-                    name: member.row.name,
-                    phone_number: member.row.phoneNumber || null,
+                    name: firstRow.name,
+                    phone_number: bestPhone,
+                    birth_date: bestBirthDate,
                     email: null,
                     role: 'USER',
                     union_id: request.unionId,
                     user_status: 'PRE_REGISTERED',
-                    resident_address: member.row.residentAddress || null,
-                    notes: member.row.notes || null,
+                    resident_address: bestResidentAddress,
+                    notes: bestNotes,
                 });
 
                 if (userError) {
-                    errors.push(`${member.row.name}: ${userError.message}`);
+                    errors.push(`${firstRow.name}: ${userError.message}`);
+                    // 진행률 업데이트
+                    const progress = Math.round((processedRowCount / totalCount) * 100);
+                    this.updateJobStatus(jobId, { processedCount: processedRowCount });
+                    if (progress % 5 === 0 || processedRowCount === totalCount) {
+                        await supabaseService.updateSyncJobStatus(jobId, 'PROCESSING', progress, undefined, {
+                            job_type: 'PRE_REGISTER', phase: 'SAVING',
+                            matchedCount, unmatchedCount, savedCount, updatedCount, duplicateCount, totalCount,
+                        });
+                    }
                     continue;
                 }
 
-                // user_property_units에 물건지 정보 저장 (building_unit_id는 선택적)
-                try {
-                    // building_unit 조회 또는 생성 (GIS 매칭용, PNU가 있는 경우만)
-                    let buildingUnitId: string | null = null;
-                    if (member.pnu) {
-                        buildingUnitId = await this.findOrCreateBuildingUnit(
-                            client,
-                            member.pnu,
-                            member.row.buildingName || null,
-                            normalizedDong,
-                            normalizedHo,
-                            this.sanitizeNumeric(member.row.landArea || member.row.area),
-                            this.sanitizeNumeric(member.row.officialPrice)
-                        );
-                    }
+                // N property_units 생성 (첫 번째만 is_primary)
+                for (let pi = 0; pi < validMembers.length; pi++) {
+                    const member = validMembers[pi];
+                    try {
+                        const normalizedDong = this.normalizeDong(member.row.dong);
+                        const normalizedHo = this.normalizeHo(member.row.ho);
 
-                    // 토지/건물 면적 및 지분율 개별 처리
-                    const landArea = this.sanitizeNumeric(member.row.landArea);
-                    const landOwnershipRatio = this.sanitizeNumeric(member.row.landOwnershipRatio);
-                    const buildingArea = this.sanitizeNumeric(member.row.buildingArea);
-                    const buildingOwnershipRatio = this.sanitizeNumeric(member.row.buildingOwnershipRatio);
+                        let buildingUnitId: string | null = null;
+                        if (member.pnu) {
+                            buildingUnitId = await this.findOrCreateBuildingUnit(
+                                client,
+                                member.pnu,
+                                member.row.buildingName || null,
+                                normalizedDong,
+                                normalizedHo,
+                                this.sanitizeNumeric(member.row.landArea || member.row.area),
+                                this.sanitizeNumeric(member.row.officialPrice)
+                            );
+                        }
 
-                    // 소유유형 결정: 토지 또는 건물 지분율이 100% 미만이면 CO_OWNER
-                    const effectiveRatio = landOwnershipRatio || buildingOwnershipRatio || 100;
-                    let ownershipType: 'OWNER' | 'CO_OWNER' | 'FAMILY' = 'OWNER';
-                    if (member.row.ownershipType) {
-                        ownershipType = member.row.ownershipType;
-                    } else if (effectiveRatio < 100) {
-                        ownershipType = 'CO_OWNER';
-                    }
+                        const landArea = this.sanitizeNumeric(member.row.landArea);
+                        const landOwnershipRatio = this.sanitizeNumeric(member.row.landOwnershipRatio);
+                        const buildingArea = this.sanitizeNumeric(member.row.buildingArea);
+                        const buildingOwnershipRatio = this.sanitizeNumeric(member.row.buildingOwnershipRatio);
 
-                    // user_property_units에 모든 물건지 정보 저장
-                    const { error: propUnitError } = await client.from('user_property_units').insert({
-                        id: uuidv4(),
-                        user_id: userId,
-                        building_unit_id: buildingUnitId, // nullable - GIS 매칭 시 연결됨
-                        pnu: member.pnu || null,
-                        property_address_jibun: member.row.propertyAddress || null,
-                        property_address_road: member.row.propertyAddressRoad || null,
-                        building_name: member.row.buildingName || null,
-                        dong: normalizedDong,
-                        ho: normalizedHo,
-                        ownership_type: ownershipType,
-                        is_primary: true,
-                        land_area: landArea,
-                        land_ownership_ratio: landOwnershipRatio,
-                        building_area: buildingArea,
-                        building_ownership_ratio: buildingOwnershipRatio,
-                    });
+                        const effectiveRatio = landOwnershipRatio || buildingOwnershipRatio || 100;
+                        let ownershipType: 'OWNER' | 'CO_OWNER' | 'FAMILY' = 'OWNER';
+                        if (member.row.ownershipType) {
+                            ownershipType = member.row.ownershipType;
+                        } else if (effectiveRatio < 100) {
+                            ownershipType = 'CO_OWNER';
+                        }
 
-                    if (propUnitError) {
+                        const { error: propUnitError } = await client.from('user_property_units').insert({
+                            id: uuidv4(),
+                            user_id: userId,
+                            building_unit_id: buildingUnitId,
+                            pnu: member.pnu || null,
+                            property_address_jibun: member.row.propertyAddress || null,
+                            property_address_road: member.row.propertyAddressRoad || null,
+                            building_name: member.row.buildingName || null,
+                            dong: normalizedDong,
+                            ho: normalizedHo,
+                            ownership_type: ownershipType,
+                            is_primary: pi === 0,
+                            land_area: landArea,
+                            land_ownership_ratio: landOwnershipRatio,
+                            building_area: buildingArea,
+                            building_ownership_ratio: buildingOwnershipRatio,
+                        });
+
+                        if (propUnitError) {
+                            logger.warn(
+                                `[Pre-Register ${jobId}] user_property_units insert failed for ${member.row.name}: ${propUnitError.message}`
+                            );
+                        } else {
+                            logger.debug(
+                                `[Pre-Register ${jobId}] user_property_units created for ${member.row.name} (pnu=${member.pnu}, dong=${normalizedDong}, ho=${normalizedHo})`
+                            );
+                        }
+                    } catch (propErr: any) {
                         logger.warn(
-                            `[Pre-Register ${jobId}] user_property_units insert failed for ${member.row.name}: ${propUnitError.message}`
-                        );
-                    } else {
-                        logger.debug(
-                            `[Pre-Register ${jobId}] user_property_units created for ${member.row.name} (pnu=${member.pnu}, dong=${normalizedDong}, ho=${normalizedHo})`
+                            `[Pre-Register ${jobId}] user_property_units creation failed for ${member.row.name}: ${propErr.message}`
                         );
                     }
-                } catch (propErr: any) {
-                    logger.warn(
-                        `[Pre-Register ${jobId}] user_property_units creation failed for ${member.row.name}: ${propErr.message}`
-                    );
                 }
 
                 savedCount++;
             } catch (err: any) {
-                errors.push(`${member.row.name}: ${err.message || 'Unknown error'}`);
+                errors.push(`${group[0].row.name}: ${err.message || 'Unknown error'}`);
+                processedRowCount += group.length;
             }
 
-            // 진행률 업데이트 (0-100%) - DB Insert 완료 시점에만 진행률 반영
-            const progress = Math.round((currentIndex / totalCount) * 100);
+            // 진행률 업데이트 (0-100%) - DB Insert 완료 시점에만 반영
+            const progress = Math.round((processedRowCount / totalCount) * 100);
 
             // 인메모리 상태 업데이트 (클라이언트 폴링용)
-            this.updateJobStatus(jobId, { processedCount: currentIndex });
+            this.updateJobStatus(jobId, { processedCount: processedRowCount });
 
             // 5% 단위로 DB 업데이트
-            if (progress % 5 === 0 || currentIndex === totalCount) {
+            if (progress % 5 === 0 || processedRowCount === totalCount) {
                 const previewData = {
                     job_type: 'PRE_REGISTER',
                     phase: 'SAVING',
@@ -611,6 +657,46 @@ class MemberQueueService {
         logger.info(
             `[Pre-Register ${jobId}] Completed - Matched: ${matchedCount}, Saved: ${savedCount}, Updated: ${updatedCount}, Duplicates: ${duplicateCount}, Errors: ${errors.length}, Total: ${totalCount}`
         );
+    }
+
+    /**
+     * 동일인 그룹핑: 이름+거주지(필수) + 생년월일+전화번호(선택) 기준
+     * 같은 이름+거주지 그룹 내에서 생년월일/전화번호가 충돌하면 별도 그룹으로 분리
+     */
+    private groupByPerson<T extends { row: PreRegisterData }>(members: T[]): T[][] {
+        // 1차: 이름+거주지로 그룹핑
+        const baseGroups = new Map<string, T[]>();
+        for (const m of members) {
+            const baseKey = `${m.row.name}||${m.row.residentAddress || ''}`;
+            if (!baseGroups.has(baseKey)) baseGroups.set(baseKey, []);
+            baseGroups.get(baseKey)!.push(m);
+        }
+
+        // 2차: 같은 이름+거주지 그룹 내에서 생년월일/전화번호 충돌 시 분리
+        const finalGroups: T[][] = [];
+        for (const group of baseGroups.values()) {
+            if (group.length === 1) {
+                finalGroups.push(group);
+                continue;
+            }
+            const subGroups: T[][] = [];
+            for (const m of group) {
+                const matched = subGroups.find((sg) => {
+                    const a = m.row;
+                    const b = sg[0].row;
+                    if (a.birthDate && b.birthDate && a.birthDate !== b.birthDate) return false;
+                    if (a.phoneNumber && b.phoneNumber && a.phoneNumber !== b.phoneNumber) return false;
+                    return true;
+                });
+                if (matched) {
+                    matched.push(m);
+                } else {
+                    subGroups.push([m]);
+                }
+            }
+            finalGroups.push(...subGroups);
+        }
+        return finalGroups;
     }
 
     /**

@@ -65,6 +65,7 @@ export const OWNERSHIP_TYPE_LABELS: Record<OwnershipType, string> = {
  */
 export interface PreRegisterData {
     name: string;
+    birthDate?: string; // 생년월일 (YYYY-MM-DD)
     phoneNumber?: string;
     propertyAddress: string; // 소유지 지번 (필수)
     propertyAddressRoad?: string; // 소유지 도로명 (선택)
