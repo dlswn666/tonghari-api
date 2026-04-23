@@ -556,11 +556,23 @@ class MemberQueueService {
                             ownershipType = 'CO_OWNER';
                         }
 
+                        // 합필 PNU 해소: land_lots에 없는 PNU를 합필된 대표 PNU로 변환
+                        let finalPnu = member.pnu || null;
+                        let previousPnu: string | null = null;
+                        if (finalPnu) {
+                            const resolved = await this.resolveMergedPnu(client, request.unionId, finalPnu, member.row.propertyAddress);
+                            if (resolved.merged) {
+                                previousPnu = finalPnu;
+                                finalPnu = resolved.resolvedPnu;
+                            }
+                        }
+
                         const { error: propUnitError } = await client.from('user_property_units').insert({
                             id: uuidv4(),
                             user_id: userId,
                             building_unit_id: buildingUnitId,
-                            pnu: member.pnu || null,
+                            pnu: finalPnu,
+                            previous_pnu: previousPnu,
                             property_address_jibun: member.row.propertyAddress || null,
                             property_address_road: member.row.propertyAddressRoad || null,
                             building_name: member.row.buildingName || null,
@@ -697,6 +709,62 @@ class MemberQueueService {
             finalGroups.push(...subGroups);
         }
         return finalGroups;
+    }
+
+    /**
+     * 합필 PNU 해소: property_unit의 PNU가 land_lots에 없으면
+     * 합필된 대표 필지의 PNU를 찾아서 반환한다.
+     * 예: 836-77(폐지) → land_lots에 "836-75, 836-77, 836-78, 836-79" → 836-75의 PNU 반환
+     */
+    private async resolveMergedPnu(
+        client: ReturnType<typeof supabaseService.getClient>,
+        unionId: string,
+        pnu: string,
+        propertyAddress: string
+    ): Promise<{ resolvedPnu: string; merged: boolean }> {
+        // 1. PNU가 이 조합의 land_lots에 있는지 확인
+        const { data: existing } = await client
+            .from('land_lots')
+            .select('pnu')
+            .eq('pnu', pnu)
+            .eq('union_id', unionId)
+            .limit(1);
+
+        if (existing && existing.length > 0) {
+            return { resolvedPnu: pnu, merged: false };
+        }
+
+        // 2. 주소에서 지번 추출 (예: "서울특별시 강북구 미아동 836-77" → "836-77")
+        const jibunMatch = propertyAddress.match(/(\d+(-\d+)?)\s*$/);
+        if (!jibunMatch) return { resolvedPnu: pnu, merged: false };
+
+        const jibun = jibunMatch[1];
+
+        // 3. land_lots.address에서 이 지번을 포함하는 합필 필지 검색
+        const { data: candidates } = await client
+            .from('land_lots')
+            .select('pnu, address')
+            .eq('union_id', unionId)
+            .ilike('address', `%${jibun}%`);
+
+        if (!candidates || candidates.length === 0) {
+            return { resolvedPnu: pnu, merged: false };
+        }
+
+        // 4. 정확한 지번 매칭 (836-77이 836-770을 오매칭하지 않도록)
+        for (const candidate of candidates) {
+            const addressJibuns = candidate.address
+                .replace(/.*[동리가]\s*/, '') // 법정동 이후만
+                .split(/[,\s]+/)
+                .map((j: string) => j.trim())
+                .filter((j: string) => j);
+            if (addressJibuns.includes(jibun)) {
+                logger.info(`[PNU-Merge] ${pnu} (${jibun}) → ${candidate.pnu} (합필 필지: ${candidate.address})`);
+                return { resolvedPnu: candidate.pnu, merged: true };
+            }
+        }
+
+        return { resolvedPnu: pnu, merged: false };
     }
 
     /**
