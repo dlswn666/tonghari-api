@@ -268,7 +268,7 @@ router.post('/diagnose-price-api', async (req, res) => {
 
     // 개별공시지가 (기존 작동 확인용)
     try {
-        const landPrice = await gisService.getOfficialLandPrice(pnu);
+        const landPrice = await gisService.getOfficialLandPrice(pnu, stdrYear);
         results.landPrice = { status: landPrice === null ? 'no_data' : 'ok', price: landPrice };
     } catch (e: any) {
         results.landPrice = { status: 'error', message: e.message };

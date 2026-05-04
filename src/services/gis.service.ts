@@ -964,6 +964,11 @@ class GisService {
         return Number.isFinite(parsed) ? parsed : null;
     }
 
+    private getObjectKeys(value: unknown): string {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
+        return Object.keys(value as Record<string, unknown>).join(',');
+    }
+
     private getLatestOfficialPriceYears(stdrYear?: string | number): string[] {
         if (stdrYear) return [String(stdrYear)];
 
@@ -995,9 +1000,11 @@ class GisService {
                     },
                 });
 
-                const container = response.data?.[containerKey];
+                const container = response.data?.[containerKey] ?? response.data?.response;
                 if (!container) {
-                    logger.warn(`VWorld attr response missing container: ${containerKey}`);
+                    logger.warn(
+                        `VWorld attr response missing container: ${containerKey}. Top-level keys: ${this.getObjectKeys(response.data)}`
+                    );
                     return null;
                 }
 
@@ -1006,7 +1013,7 @@ class GisService {
                     return null;
                 }
 
-                const pageRows = this.toArray<Record<string, any>>(container.field);
+                const pageRows = this.toArray<Record<string, any>>(container.field ?? container.fields?.field);
                 totalCount = this.parseNumber(container.totalCount) ?? pageRows.length;
                 rows.push(...pageRows);
 
