@@ -53,6 +53,7 @@ export const env = {
     // GIS & Public Data API
     VWORLD_API_KEY: process.env.VWORLD_API_KEY || '',
     VWORLD_API_DOMAIN: process.env.VWORLD_API_DOMAIN || process.env.VWORLD_DOMAIN || 'www.johapon.kr',
+    VWORLD_ATTR_REQUEST_INTERVAL_MS: getEnvNumber('VWORLD_ATTR_REQUEST_INTERVAL_MS', 300),
     DATA_PORTAL_API_KEY: process.env.DATA_PORTAL_API_KEY || '',
 
     // 헬퍼

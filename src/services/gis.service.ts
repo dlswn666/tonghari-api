@@ -58,6 +58,8 @@ const SIDO_NORMALIZE_MAP: Record<string, string> = {
 class GisService {
     private vworldApiKey: string;
     private vworldApiDomain: string;
+    private vworldAttrRequestChain: Promise<void> = Promise.resolve();
+    private lastVworldAttrRequestAt = 0;
     private dataPortalApiKey: string;
     private bjdCodeMap: Map<string, string> = new Map();
 
@@ -969,6 +971,59 @@ class GisService {
         return Object.keys(value as Record<string, unknown>).join(',');
     }
 
+    private sleep(ms: number): Promise<void> {
+        return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    private isRetryableVworldError(error: any): boolean {
+        const status = error?.response?.status;
+        if (typeof status === 'number') {
+            return status >= 500 || status === 429;
+        }
+
+        const code = String(error?.code || error?.cause?.code || '');
+        const message = String(error?.message || '').toLowerCase();
+        const retryableCodes = new Set([
+            'ECONNRESET',
+            'ETIMEDOUT',
+            'ECONNABORTED',
+            'EAI_AGAIN',
+            'ENOTFOUND',
+            'UND_ERR_SOCKET',
+            'UND_ERR_HEADERS_TIMEOUT',
+            'UND_ERR_BODY_TIMEOUT',
+        ]);
+
+        return (
+            retryableCodes.has(code) ||
+            message.includes('socket hang up') ||
+            message.includes('timeout') ||
+            message.includes('network error')
+        );
+    }
+
+    private async waitForVworldAttrRequestSlot(): Promise<void> {
+        const previous = this.vworldAttrRequestChain;
+        let release: () => void = () => undefined;
+
+        this.vworldAttrRequestChain = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+
+        await previous;
+
+        try {
+            const intervalMs = Math.max(env.VWORLD_ATTR_REQUEST_INTERVAL_MS, 0);
+            const elapsedMs = Date.now() - this.lastVworldAttrRequestAt;
+            if (elapsedMs < intervalMs) {
+                await this.sleep(intervalMs - elapsedMs);
+            }
+            this.lastVworldAttrRequestAt = Date.now();
+        } finally {
+            release();
+        }
+    }
+
     private getLatestOfficialPriceYears(stdrYear?: string | number): string[] {
         if (stdrYear) return [String(stdrYear)];
 
@@ -987,45 +1042,68 @@ class GisService {
         let totalCount: number | null = null;
 
         for (let pageNo = 1; pageNo <= maxPages; pageNo++) {
-            try {
-                const response = await axios.get(endpoint, {
-                    timeout: 15000,
-                    params: {
-                        ...params,
-                        key: this.vworldApiKey,
-                        domain: this.vworldApiDomain,
-                        format: 'json',
-                        numOfRows,
-                        pageNo,
-                    },
-                });
+            const maxAttempts = 3;
+            let responseData: any = null;
 
-                const container = response.data?.[containerKey] ?? response.data?.response;
-                if (!container) {
-                    logger.warn(
-                        `VWorld attr response missing container: ${containerKey}. Top-level keys: ${this.getObjectKeys(response.data)}`
-                    );
-                    return null;
+            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                try {
+                    await this.waitForVworldAttrRequestSlot();
+                    const response = await axios.get(endpoint, {
+                        timeout: 15000,
+                        params: {
+                            ...params,
+                            key: this.vworldApiKey,
+                            domain: this.vworldApiDomain,
+                            format: 'json',
+                            numOfRows,
+                            pageNo,
+                        },
+                    });
+                    responseData = response.data;
+                    break;
+                } catch (error: any) {
+                    const canRetry = attempt < maxAttempts && this.isRetryableVworldError(error);
+                    if (!canRetry) {
+                        logger.error(`VWorld attr API request failed (${containerKey})`, {
+                            status: error.response?.status,
+                            code: error.code || error.cause?.code,
+                            message: error.message,
+                            attempt,
+                        });
+                        return null;
+                    }
+
+                    const delayMs = attempt * 750;
+                    logger.warn(`VWorld attr API retry (${containerKey})`, {
+                        status: error.response?.status,
+                        code: error.code || error.cause?.code,
+                        message: error.message,
+                        attempt,
+                        nextDelayMs: delayMs,
+                    });
+                    await this.sleep(delayMs);
                 }
+            }
 
-                if (container.resultCode && container.resultCode !== '00') {
-                    logger.warn(`VWorld attr API error (${containerKey}): ${container.resultCode} ${container.resultMsg ?? ''}`);
-                    return null;
-                }
-
-                const pageRows = this.toArray<Record<string, any>>(container.field ?? container.fields?.field);
-                totalCount = this.parseNumber(container.totalCount) ?? pageRows.length;
-                rows.push(...pageRows);
-
-                if (pageRows.length === 0 || rows.length >= totalCount || pageRows.length < numOfRows) {
-                    return rows;
-                }
-            } catch (error: any) {
-                logger.error(`VWorld attr API request failed (${containerKey})`, {
-                    status: error.response?.status,
-                    message: error.message,
-                });
+            const container = responseData?.[containerKey] ?? responseData?.response;
+            if (!container) {
+                logger.warn(
+                    `VWorld attr response missing container: ${containerKey}. Top-level keys: ${this.getObjectKeys(responseData)}`
+                );
                 return null;
+            }
+
+            if (container.resultCode && container.resultCode !== '00') {
+                logger.warn(`VWorld attr API error (${containerKey}): ${container.resultCode} ${container.resultMsg ?? ''}`);
+                return null;
+            }
+
+            const pageRows = this.toArray<Record<string, any>>(container.field ?? container.fields?.field);
+            totalCount = this.parseNumber(container.totalCount) ?? pageRows.length;
+            rows.push(...pageRows);
+
+            if (pageRows.length === 0 || rows.length >= totalCount || pageRows.length < numOfRows) {
+                return rows;
             }
         }
 
