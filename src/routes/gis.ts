@@ -196,10 +196,10 @@ router.post('/search-address', async (req, res) => {
 
 /**
  * 공시가격 API 진단 (엔드포인트 검증용)
- * body: { pnu: string, type?: 'apartment' | 'individual' | 'both' }
+ * body: { pnu: string, type?: 'apartment' | 'individual' | 'both', stdrYear?: string | number }
  */
 router.post('/diagnose-price-api', async (req, res) => {
-    const { pnu, type = 'both' } = req.body;
+    const { pnu, type = 'both', stdrYear } = req.body;
 
     if (!pnu || typeof pnu !== 'string' || pnu.length < 19) {
         return res.status(400).json({ error: 'Valid 19-digit PNU required.' });
@@ -209,7 +209,7 @@ router.post('/diagnose-price-api', async (req, res) => {
 
     if (type === 'apartment' || type === 'both') {
         try {
-            const aptPrices = await gisService.getApartmentHousePrices(pnu);
+            const aptPrices = await gisService.getApartmentHousePrices(pnu, stdrYear);
             results.apartment = {
                 status: aptPrices === null ? 'error' : 'ok',
                 count: aptPrices?.length ?? 0,
@@ -222,7 +222,7 @@ router.post('/diagnose-price-api', async (req, res) => {
 
     if (type === 'individual' || type === 'both') {
         try {
-            const housingPrice = await gisService.getIndividualHousingPrice(pnu);
+            const housingPrice = await gisService.getIndividualHousingPrice(pnu, stdrYear);
             results.individual = {
                 status: housingPrice === null ? 'no_data_or_error' : 'ok',
                 price: housingPrice,
