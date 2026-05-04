@@ -662,6 +662,71 @@ class SupabaseService {
     }
 
     /**
+     * 조합 내 단독주택 타입(DETACHED_HOUSE) 건물의 PNU 목록 조회 (2026-05)
+     * 개별주택가격 재동기화 대상 선정에 사용
+     */
+    async listIndividualHousingBuildingTargets(
+        unionId: string
+    ): Promise<Array<{ pnu: string; buildingId: string; buildingType: string }>> {
+        try {
+            const { data: lots, error: lotsError } = await this.client
+                .from('land_lots')
+                .select('pnu')
+                .eq('union_id', unionId);
+
+            if (lotsError) {
+                logger.error(`land_lots lookup failed for union ${unionId}`, lotsError);
+                return [];
+            }
+
+            const pnus = (lots ?? []).map((l: { pnu: string }) => l.pnu);
+            if (pnus.length === 0) return [];
+
+            const { data: mapping, error: mapError } = await this.client
+                .from('building_land_lots')
+                .select('pnu, building_id')
+                .in('pnu', pnus);
+
+            if (mapError || !mapping || mapping.length === 0) {
+                if (mapError) logger.error(`building_land_lots lookup failed`, mapError);
+                return [];
+            }
+
+            const buildingIds = Array.from(new Set(mapping.map((m: { building_id: string }) => m.building_id)));
+
+            const { data: buildings, error: buildingError } = await this.client
+                .from('buildings')
+                .select('id, building_type')
+                .in('id', buildingIds)
+                .eq('building_type', 'DETACHED_HOUSE');
+
+            if (buildingError || !buildings) {
+                if (buildingError) logger.error(`buildings lookup failed`, buildingError);
+                return [];
+            }
+
+            const buildingIdToType = new Map<string, string>(
+                buildings.map((b: { id: string; building_type: string }) => [b.id, b.building_type])
+            );
+
+            const targets: Array<{ pnu: string; buildingId: string; buildingType: string }> = [];
+            const seen = new Set<string>();
+            for (const m of mapping as Array<{ pnu: string; building_id: string }>) {
+                const bt = buildingIdToType.get(m.building_id);
+                const targetKey = `${m.pnu}:${m.building_id}`;
+                if (bt && !seen.has(targetKey)) {
+                    targets.push({ pnu: m.pnu, buildingId: m.building_id, buildingType: bt });
+                    seen.add(targetKey);
+                }
+            }
+            return targets;
+        } catch (error) {
+            logger.error(`listIndividualHousingBuildingTargets error (union: ${unionId})`, error);
+            return [];
+        }
+    }
+
+    /**
      * building_units.official_price 단건 갱신 (공동주택공시가격 재동기화용, 2026-04)
      * NULL dong/ho 매칭을 위해 .is() 사용
      */
@@ -686,6 +751,30 @@ class SupabaseService {
         } catch (error) {
             logger.error(`updateBuildingUnitPrice error (building: ${buildingId})`, error);
             return false;
+        }
+    }
+
+    /**
+     * building_units.official_price 건물 단위 일괄 갱신 (개별주택가격 재동기화용, 2026-05)
+     * 단독/다가구 주택은 세대 구분 없이 같은 개별주택가격을 연결된 unit 전체에 적용한다.
+     */
+    async updateBuildingUnitsPriceByBuildingId(buildingId: string, price: number): Promise<number> {
+        try {
+            const { data, error } = await this.client
+                .from('building_units')
+                .update({ official_price: price })
+                .eq('building_id', buildingId)
+                .select('id');
+
+            if (error) {
+                logger.warn(`updateBuildingUnitsPriceByBuildingId failed (building: ${buildingId}): ${error.message}`);
+                return 0;
+            }
+
+            return data?.length ?? 0;
+        } catch (error) {
+            logger.error(`updateBuildingUnitsPriceByBuildingId error (building: ${buildingId})`, error);
+            return 0;
         }
     }
 
@@ -786,4 +875,3 @@ class SupabaseService {
 
 export const supabaseService = new SupabaseService();
 export default supabaseService;
-

@@ -901,11 +901,15 @@ class GisService {
     }
 
     /**
-     * Vworld 개별공시지가 조회
+     * VWorld 개별공시지가 속성조회
+     *
+     * 공식 엔드포인트: /ned/data/getIndvdLandPriceAttr
+     *
      * @param pnu 필지고유번호 (19자리)
-     * @returns 공시지가 (원/m²) 또는 null
+     * @param stdrYear 기준연도. 생략 시 올해 → 전년도 순서로 조회한다.
+     * @returns 개별공시지가 단가(원/m²) 또는 null
      */
-    async getOfficialLandPrice(pnu: string): Promise<number | null> {
+    async getOfficialLandPrice(pnu: string, stdrYear?: string | number): Promise<number | null> {
         if (!this.vworldApiKey) {
             logger.debug('VWORLD_API_KEY is not configured for land price lookup');
             return null;
@@ -916,51 +920,33 @@ class GisService {
             return null;
         }
 
-        try {
-            // Vworld 개별공시지가 WFS API (typeName: dt_d150)
-            // filter 파라미터의 슬래시(/)를 인코딩하지 않도록 수동으로 URL 구성
-            const filter = `<Filter><PropertyIsEqualTo><PropertyName>pnu</PropertyName><Literal>${pnu}</Literal></PropertyIsEqualTo></Filter>`;
-            // 슬래시를 제외하고 인코딩 (Vworld API 요구사항)
-            const encodedFilter = encodeURIComponent(filter).replace(/%2F/g, '/');
+        const endpoint = 'https://api.vworld.kr/ned/data/getIndvdLandPriceAttr';
 
-            const url = `https://api.vworld.kr/ned/wfs/getIndvdLandPriceWFS?service=WFS&version=1.1.0&request=GetFeature&typeName=dt_d150&maxFeatures=1&outputFormat=application/json&filter=${encodedFilter}&key=${this.vworldApiKey}`;
-
-            const response = await axios.get(url, {
-                timeout: 15000,
+        for (const year of this.getLatestOfficialPriceYears(stdrYear)) {
+            const fields = await this.fetchVworldAttrFields(endpoint, 'indvdLandPrices', {
+                pnu,
+                stdrYear: year,
             });
 
-            const data = response.data;
+            if (fields === null) return null;
+            if (fields.length === 0) continue;
 
-            // JSON 응답 처리 (GeoJSON FeatureCollection)
-            if (data?.features && data.features.length > 0) {
-                const feature = data.features[0];
-                const price = feature.properties?.pblntf_pclnd;
-
-                if (price !== undefined && price !== null) {
-                    logger.debug(`Land price found for PNU ${pnu}: ${price} 원/m²`);
-                    return Number(price);
+            for (const field of fields) {
+                const price = this.parseNumber(
+                    field.pblntfPclnd ?? field.pbIntfPcInd ?? field.pblntf_pclnd
+                );
+                if (price && price > 0) {
+                    logger.debug(`Land price found for PNU ${pnu} (${year}): ${price} 원/m²`);
+                    return Math.round(price);
                 }
             }
 
-            // XML 응답 처리 (WFS 기본 응답)
-            if (typeof data === 'string' && data.includes('pblntf_pclnd')) {
-                const priceMatch = data.match(/<sop:pblntf_pclnd>(\d+)<\/sop:pblntf_pclnd>/);
-                if (priceMatch && priceMatch[1]) {
-                    const price = Number(priceMatch[1]);
-                    logger.debug(`Land price found (XML) for PNU ${pnu}: ${price} 원/m²`);
-                    return price;
-                }
-            }
-
-            logger.debug(`No land price found for PNU: ${pnu}`);
-            return null;
-        } catch (error: any) {
-            logger.error(`Vworld land price API error (PNU: ${pnu})`, {
-                status: error.response?.status,
-                message: error.message,
-            });
+            logger.warn(`Land price response has no valid pblntfPclnd. Keys: ${Object.keys(fields[0] ?? {}).join(',')}`);
             return null;
         }
+
+        logger.debug(`No land price found for PNU: ${pnu}`);
+        return null;
     }
 
     private toArray<T>(value: T | T[] | null | undefined): T[] {
@@ -980,7 +966,7 @@ class GisService {
         if (stdrYear) return [String(stdrYear)];
 
         const currentYear = new Date().getFullYear();
-        return [String(currentYear), String(currentYear - 1)];
+        return [String(currentYear), String(currentYear - 1), String(currentYear - 2)];
     }
 
     private async fetchVworldAttrFields(

@@ -8,6 +8,8 @@ import {
     GisJobInfo,
     ApartmentPriceSyncRequest,
     ApartmentPriceSyncTarget,
+    IndividualHousingPriceSyncRequest,
+    IndividualHousingPriceSyncTarget,
     LandPriceSyncRequest,
     LandPriceSyncTarget,
 } from '../types/gis.types';
@@ -634,6 +636,171 @@ class GisQueueService {
 
         logger.info(
             `[APT-PRICE ${jobId}] Completed — success PNU: ${successPnuCount}, failed: ${failedEntries.length}, updated units: ${updatedUnitCount}`
+        );
+
+        this.updateJobStatus(jobId, {
+            status: finalStatus === 'COMPLETED' ? 'completed' : 'failed',
+            completedAt: new Date(),
+        });
+
+        await supabaseService.updateSyncJobStatus(
+            jobId,
+            finalStatus as 'PROCESSING' | 'COMPLETED' | 'FAILED',
+            100,
+            errorLog || undefined,
+            previewData
+        );
+    }
+
+    /**
+     * 개별주택가격 일괄 재동기화 작업 추가 (2026-05)
+     * 해당 조합 소속 단독주택(DETACHED_HOUSE)의 official_price를
+     * VWorld 개별주택가격 API로 재조회해 building_units에 갱신한다.
+     */
+    async addIndividualHousingPriceSyncJob(
+        request: IndividualHousingPriceSyncRequest
+    ): Promise<{ jobId: string; totalPnu: number }> {
+        const jobId = uuidv4();
+
+        const targets = await supabaseService.listIndividualHousingBuildingTargets(request.unionId);
+        const totalPnu = targets.length;
+
+        const jobInfo: GisJobInfo = {
+            jobId,
+            unionId: request.unionId,
+            totalCount: totalPnu,
+            processedCount: 0,
+            status: 'pending',
+            createdAt: new Date(),
+        };
+        this.jobs.set(jobId, jobInfo);
+
+        try {
+            const { error } = await supabaseService.getClient().from('sync_jobs').insert({
+                id: jobId,
+                union_id: request.unionId,
+                job_type: 'INDIVIDUAL_HOUSING_PRICE_SYNC',
+                status: 'PROCESSING',
+                progress: 0,
+            });
+            if (error) {
+                logger.error(`sync_jobs insert error (${jobId}): ${JSON.stringify(error)}`);
+            } else {
+                logger.info(`Individual housing price sync job added: ${jobId} (targets: ${totalPnu})`);
+            }
+        } catch (error) {
+            logger.error(`sync_jobs registration failed (${jobId})`, error);
+        }
+
+        if (totalPnu === 0) {
+            this.updateJobStatus(jobId, { status: 'completed', completedAt: new Date() });
+            await supabaseService.updateSyncJobStatus(jobId, 'COMPLETED', 100, undefined, {
+                successCount: 0,
+                failedCount: 0,
+                totalCount: 0,
+                message: '대상 개별주택이 없습니다.',
+            });
+            return { jobId, totalPnu: 0 };
+        }
+
+        this.queue
+            .add(async () => {
+                await this.processIndividualHousingPriceSync(jobId, targets);
+            })
+            .catch((err) => {
+                logger.error(`Individual housing price sync job ${jobId} fatal error`, err);
+                this.updateJobStatus(jobId, { status: 'failed', error: err.message });
+                supabaseService.updateSyncJobStatus(jobId, 'FAILED', 0, err.message);
+            });
+
+        return { jobId, totalPnu };
+    }
+
+    /**
+     * 개별주택가격 재동기화 워커 핸들러 (2026-05)
+     * 각 PNU에 대해 gisService.getIndividualHousingPrice()를 호출하고
+     * 건물에 연결된 building_units 전체 official_price를 갱신한다.
+     */
+    private async processIndividualHousingPriceSync(
+        jobId: string,
+        targets: IndividualHousingPriceSyncTarget[]
+    ): Promise<void> {
+        const job = this.jobs.get(jobId);
+        if (!job) return;
+
+        logger.info(`[INDVD-HOUSE-PRICE ${jobId}] Individual housing price sync started (targets: ${targets.length})`);
+        this.updateJobStatus(jobId, { status: 'processing', startedAt: new Date() });
+
+        let successPnuCount = 0;
+        let updatedUnitCount = 0;
+        const failedEntries: Array<{ pnu: string; reason: string }> = [];
+
+        for (let i = 0; i < targets.length; i++) {
+            const target = targets[i];
+            const currentIndex = i + 1;
+
+            try {
+                const price = await gisService.getIndividualHousingPrice(target.pnu);
+
+                if (price === null || price === undefined) {
+                    logger.warn(
+                        `[INDVD-HOUSE-PRICE ${jobId}] (${currentIndex}/${targets.length}) No individual housing price for PNU: ${target.pnu}`
+                    );
+                    failedEntries.push({ pnu: target.pnu, reason: '개별주택가격 조회 결과 없음' });
+                } else {
+                    const updatedCount = await supabaseService.updateBuildingUnitsPriceByBuildingId(
+                        target.buildingId,
+                        price
+                    );
+                    if (updatedCount > 0) {
+                        successPnuCount++;
+                        updatedUnitCount += updatedCount;
+                        logger.debug(
+                            `[INDVD-HOUSE-PRICE ${jobId}] (${currentIndex}/${targets.length}) Updated building ${target.buildingId}: ${price} (${updatedCount} units)`
+                        );
+                    } else {
+                        failedEntries.push({ pnu: target.pnu, reason: 'DB 갱신 대상 unit 없음' });
+                    }
+                }
+            } catch (err: any) {
+                logger.warn(
+                    `[INDVD-HOUSE-PRICE ${jobId}] (${currentIndex}/${targets.length}) Error for PNU ${target.pnu}: ${
+                        err?.message || 'Unknown error'
+                    }`
+                );
+                failedEntries.push({ pnu: target.pnu, reason: `Error: ${err?.message || 'Unknown error'}` });
+            }
+
+            job.processedCount = currentIndex;
+            const progress = Math.round((job.processedCount / job.totalCount) * 100);
+            if (progress % 10 === 0 || job.processedCount === job.totalCount) {
+                logger.info(
+                    `[INDVD-HOUSE-PRICE ${jobId}] Progress: ${progress}% (${job.processedCount}/${job.totalCount}, success PNU: ${successPnuCount}, updated units: ${updatedUnitCount})`
+                );
+            }
+            await supabaseService.updateSyncJobStatus(jobId, 'PROCESSING', progress);
+        }
+
+        const finalStatus = failedEntries.length === job.totalCount ? 'FAILED' : 'COMPLETED';
+        const errorLog =
+            failedEntries.length > 0
+                ? JSON.stringify({
+                      failedCount: failedEntries.length,
+                      successCount: successPnuCount,
+                      totalCount: job.totalCount,
+                      failedEntries: failedEntries.slice(0, 100),
+                  })
+                : null;
+
+        const previewData = {
+            successCount: successPnuCount,
+            failedCount: failedEntries.length,
+            totalCount: job.totalCount,
+            updatedUnitCount,
+        };
+
+        logger.info(
+            `[INDVD-HOUSE-PRICE ${jobId}] Completed — success PNU: ${successPnuCount}, failed: ${failedEntries.length}, updated units: ${updatedUnitCount}`
         );
 
         this.updateJobStatus(jobId, {

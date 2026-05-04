@@ -58,6 +58,35 @@ router.post('/sync-apartment-prices', authMiddleware, async (req, res) => {
 });
 
 /**
+ * 개별주택가격 일괄 재동기화 (2026-05)
+ * 해당 조합의 단독주택 building_units.official_price를 VWorld API로 재갱신
+ * body: { unionId: string }
+ */
+router.post('/sync-individual-housing-prices', authMiddleware, async (req, res) => {
+    const { unionId } = req.body;
+
+    if (!unionId || typeof unionId !== 'string') {
+        return res.status(400).json({ error: 'unionId is required.' });
+    }
+
+    if (req.user?.unionId && req.user.unionId !== 'system' && req.user.unionId !== unionId) {
+        return res.status(403).json({ error: 'unionId mismatch with authenticated token.' });
+    }
+
+    try {
+        const result = await gisQueueService.addIndividualHousingPriceSyncJob({ unionId });
+        return res.json({
+            jobId: result.jobId,
+            totalPnu: result.totalPnu,
+            status: 'pending',
+        });
+    } catch (error: any) {
+        logger.error(`Individual housing price sync request failed (unionId: ${unionId})`, error);
+        return res.status(500).json({ error: error?.message || 'Internal server error.' });
+    }
+});
+
+/**
  * 토지 공시지가 일괄 재동기화 (2026-04)
  * 해당 조합의 land_lots 전체 PNU 의 official_price 를 VWorld API 로 재갱신
  * body: { unionId: string }
@@ -87,7 +116,7 @@ router.post('/sync-land-prices', authMiddleware, async (req, res) => {
 });
 
 /**
- * 전체 공시가격 동기화 (토지 + 공동주택) — 두 개의 독립 sync_jobs 로 분리 등록
+ * 전체 공시가격 동기화 (토지 + 공동주택 + 개별주택) — 세 개의 독립 sync_jobs 로 분리 등록
  * body: { unionId: string }
  */
 router.post('/sync-official-prices', authMiddleware, async (req, res) => {
@@ -102,14 +131,19 @@ router.post('/sync-official-prices', authMiddleware, async (req, res) => {
     }
 
     try {
-        const [landResult, apartmentResult] = await Promise.all([
+        const [landResult, apartmentResult, individualHousingResult] = await Promise.all([
             gisQueueService.addLandPriceSyncJob({ unionId }),
             gisQueueService.addApartmentPriceSyncJob({ unionId }),
+            gisQueueService.addIndividualHousingPriceSyncJob({ unionId }),
         ]);
 
         return res.json({
             land: { jobId: landResult.jobId, totalPnu: landResult.totalPnu },
             apartment: { jobId: apartmentResult.jobId, totalPnu: apartmentResult.totalPnu },
+            individualHousing: {
+                jobId: individualHousingResult.jobId,
+                totalPnu: individualHousingResult.totalPnu,
+            },
             status: 'pending',
         });
     } catch (error: any) {
