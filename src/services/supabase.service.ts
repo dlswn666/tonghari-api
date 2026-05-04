@@ -602,63 +602,7 @@ class SupabaseService {
     async listApartmentBuildingTargets(
         unionId: string
     ): Promise<Array<{ pnu: string; buildingId: string; buildingType: string }>> {
-        try {
-            // 1. 해당 조합의 land_lots PNU 목록 조회
-            const { data: lots, error: lotsError } = await this.client
-                .from('land_lots')
-                .select('pnu')
-                .eq('union_id', unionId);
-
-            if (lotsError) {
-                logger.error(`land_lots lookup failed for union ${unionId}`, lotsError);
-                return [];
-            }
-
-            const pnus = (lots ?? []).map((l: { pnu: string }) => l.pnu);
-            if (pnus.length === 0) return [];
-
-            // 2. building_land_lots로 PNU → building_id 매핑
-            const { data: mapping, error: mapError } = await this.client
-                .from('building_land_lots')
-                .select('pnu, building_id')
-                .in('pnu', pnus);
-
-            if (mapError || !mapping || mapping.length === 0) {
-                if (mapError) logger.error(`building_land_lots lookup failed`, mapError);
-                return [];
-            }
-
-            const buildingIds = Array.from(new Set(mapping.map((m: { building_id: string }) => m.building_id)));
-
-            // 3. 공동주택 타입(VILLA/APARTMENT/MIXED) 건물 필터
-            const { data: buildings, error: buildingError } = await this.client
-                .from('buildings')
-                .select('id, building_type')
-                .in('id', buildingIds)
-                .in('building_type', ['VILLA', 'APARTMENT', 'MIXED']);
-
-            if (buildingError || !buildings) {
-                if (buildingError) logger.error(`buildings lookup failed`, buildingError);
-                return [];
-            }
-
-            const buildingIdToType = new Map<string, string>(
-                buildings.map((b: { id: string; building_type: string }) => [b.id, b.building_type])
-            );
-
-            // 4. 최종 대상: { pnu, buildingId, buildingType }
-            const targets: Array<{ pnu: string; buildingId: string; buildingType: string }> = [];
-            for (const m of mapping as Array<{ pnu: string; building_id: string }>) {
-                const bt = buildingIdToType.get(m.building_id);
-                if (bt) {
-                    targets.push({ pnu: m.pnu, buildingId: m.building_id, buildingType: bt });
-                }
-            }
-            return targets;
-        } catch (error) {
-            logger.error(`listApartmentBuildingTargets error (union: ${unionId})`, error);
-            return [];
-        }
+        return this.listOfficialPriceBuildingTargets(unionId, ['VILLA', 'APARTMENT', 'MIXED']);
     }
 
     /**
@@ -668,60 +612,41 @@ class SupabaseService {
     async listIndividualHousingBuildingTargets(
         unionId: string
     ): Promise<Array<{ pnu: string; buildingId: string; buildingType: string }>> {
+        return this.listOfficialPriceBuildingTargets(unionId, ['DETACHED_HOUSE']);
+    }
+
+    /**
+     * 공시가격 갱신 대상 건물 조회
+     * 큰 PNU 배열을 PostgREST `.in(...)`으로 보내지 않고 DB RPC 내부 join으로 조회한다.
+     */
+    private async listOfficialPriceBuildingTargets(
+        unionId: string,
+        buildingTypes: string[]
+    ): Promise<Array<{ pnu: string; buildingId: string; buildingType: string }>> {
         try {
-            const { data: lots, error: lotsError } = await this.client
-                .from('land_lots')
-                .select('pnu')
-                .eq('union_id', unionId);
+            const { data, error } = await this.client.rpc('get_official_price_building_targets', {
+                p_union_id: unionId,
+                p_building_types: buildingTypes,
+            });
 
-            if (lotsError) {
-                logger.error(`land_lots lookup failed for union ${unionId}`, lotsError);
+            if (error) {
+                logger.error(
+                    `get_official_price_building_targets RPC failed (union: ${unionId}, types: ${buildingTypes.join(',')})`,
+                    error
+                );
                 return [];
             }
 
-            const pnus = (lots ?? []).map((l: { pnu: string }) => l.pnu);
-            if (pnus.length === 0) return [];
-
-            const { data: mapping, error: mapError } = await this.client
-                .from('building_land_lots')
-                .select('pnu, building_id')
-                .in('pnu', pnus);
-
-            if (mapError || !mapping || mapping.length === 0) {
-                if (mapError) logger.error(`building_land_lots lookup failed`, mapError);
-                return [];
-            }
-
-            const buildingIds = Array.from(new Set(mapping.map((m: { building_id: string }) => m.building_id)));
-
-            const { data: buildings, error: buildingError } = await this.client
-                .from('buildings')
-                .select('id, building_type')
-                .in('id', buildingIds)
-                .eq('building_type', 'DETACHED_HOUSE');
-
-            if (buildingError || !buildings) {
-                if (buildingError) logger.error(`buildings lookup failed`, buildingError);
-                return [];
-            }
-
-            const buildingIdToType = new Map<string, string>(
-                buildings.map((b: { id: string; building_type: string }) => [b.id, b.building_type])
-            );
-
-            const targets: Array<{ pnu: string; buildingId: string; buildingType: string }> = [];
-            const seen = new Set<string>();
-            for (const m of mapping as Array<{ pnu: string; building_id: string }>) {
-                const bt = buildingIdToType.get(m.building_id);
-                const targetKey = `${m.pnu}:${m.building_id}`;
-                if (bt && !seen.has(targetKey)) {
-                    targets.push({ pnu: m.pnu, buildingId: m.building_id, buildingType: bt });
-                    seen.add(targetKey);
-                }
-            }
-            return targets;
+            return (data ?? []).map((row: { pnu: string; building_id: string; building_type: string }) => ({
+                pnu: row.pnu,
+                buildingId: row.building_id,
+                buildingType: row.building_type,
+            }));
         } catch (error) {
-            logger.error(`listIndividualHousingBuildingTargets error (union: ${unionId})`, error);
+            logger.error(
+                `listOfficialPriceBuildingTargets error (union: ${unionId}, types: ${buildingTypes.join(',')})`,
+                error
+            );
             return [];
         }
     }
