@@ -57,11 +57,13 @@ const SIDO_NORMALIZE_MAP: Record<string, string> = {
  */
 class GisService {
     private vworldApiKey: string;
+    private vworldApiDomain: string;
     private dataPortalApiKey: string;
     private bjdCodeMap: Map<string, string> = new Map();
 
     constructor() {
         this.vworldApiKey = env.VWORLD_API_KEY;
+        this.vworldApiDomain = env.VWORLD_API_DOMAIN;
         this.dataPortalApiKey = env.DATA_PORTAL_API_KEY;
         this.loadBjdCodeFromCSV();
     }
@@ -269,7 +271,7 @@ class GisService {
                     data: 'LP_PA_CBND_BUBUN',
                     key: this.vworldApiKey,
                     format: 'json',
-                    domain: 'localhost',
+                    domain: this.vworldApiDomain,
                     geomFilter: `POINT(${x} ${y})`,
                     geometry: true,
                     size: 1,
@@ -431,7 +433,7 @@ class GisService {
                     data: 'LP_PA_CBND_BUBUN',
                     key: this.vworldApiKey,
                     format: 'json',
-                    domain: 'localhost',
+                    domain: this.vworldApiDomain,
                     attrFilter: `pnu:=:${pnu}`,
                     geometry: true,
                     size: 1,
@@ -474,7 +476,7 @@ class GisService {
                     data: 'LP_PA_CBND_BUBUN',
                     key: this.vworldApiKey,
                     format: 'json',
-                    domain: 'localhost',
+                    domain: this.vworldApiDomain,
                     geomFilter: `POINT(${x} ${y})`,
                     geometry: true,
                     size: 1,
@@ -711,7 +713,7 @@ class GisService {
                     data: 'LP_PA_CBND_BU_INFO',
                     key: this.vworldApiKey,
                     format: 'json',
-                    domain: 'localhost',
+                    domain: this.vworldApiDomain,
                     attrFilter: `pnu:like:${pnu}`,
                 },
             });
@@ -813,7 +815,7 @@ class GisService {
                     numOfRows: 10,
                     pageNo: 1,
                     key: this.vworldApiKey,
-                    domain: 'johapon.kr',
+                    domain: this.vworldApiDomain,
                 },
                 timeout: 15000,
             });
@@ -986,6 +988,7 @@ class GisService {
                     params: {
                         ...params,
                         key: this.vworldApiKey,
+                        domain: this.vworldApiDomain,
                         format: 'json',
                         numOfRows,
                         pageNo,

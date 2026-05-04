@@ -31,6 +31,7 @@ const server = app.listen(env.PORT, () => {
     
     // GIS 환경 변수 상태 로깅
     logger.info(`GIS Config - VWORLD_API_KEY: ${env.VWORLD_API_KEY ? 'SET' : 'NOT SET'}`);
+    logger.info(`GIS Config - VWORLD_API_DOMAIN: ${env.VWORLD_API_DOMAIN}`);
     logger.info(`GIS Config - DATA_PORTAL_API_KEY: ${env.DATA_PORTAL_API_KEY ? 'SET' : 'NOT SET'}`);
 
     // KG이니시스 통합인증 환경 변수 상태 로깅
@@ -58,4 +59,3 @@ process.on('SIGINT', () => {
 });
 
 export default app;
-
