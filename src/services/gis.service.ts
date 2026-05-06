@@ -1074,6 +1074,12 @@ class GisService {
         return [String(currentYear), String(currentYear - 1), String(currentYear - 2)];
     }
 
+    private getLatestHousingOfficialPriceYears(stdrYear?: string | number): string[] {
+        if (stdrYear) return [String(stdrYear)];
+
+        return this.getLatestOfficialPriceYears();
+    }
+
     private async fetchVworldAttrFields(
         endpoint: string,
         containerKey: string,
@@ -1179,7 +1185,7 @@ class GisService {
 
         const endpoint = 'https://api.vworld.kr/ned/data/getApartHousingPriceAttr';
 
-        for (const year of this.getLatestOfficialPriceYears(stdrYear)) {
+        for (const year of this.getLatestHousingOfficialPriceYears(stdrYear)) {
             const fields = await this.fetchVworldAttrFields(endpoint, 'apartHousingPrices', {
                 pnu,
                 stdrYear: year,
@@ -1253,7 +1259,7 @@ class GisService {
 
         const endpoint = 'https://api.vworld.kr/ned/data/getIndvdHousingPriceAttr';
 
-        for (const year of this.getLatestOfficialPriceYears(stdrYear)) {
+        for (const year of this.getLatestHousingOfficialPriceYears(stdrYear)) {
             const fields = await this.fetchVworldAttrFields(endpoint, 'indvdHousingPrices', {
                 pnu,
                 stdrYear: year,

@@ -37,6 +37,7 @@ interface BuildingUnitMatchRow {
     id: string;
     dong: string | null;
     ho: string | null;
+    official_price?: number | null;
 }
 
 interface PropertyUnitMatchCandidate {
@@ -713,8 +714,17 @@ class SupabaseService {
         );
         if (dongMatches.length === 1) return dongMatches[0];
 
-        // 동 값이 없더라도 같은 호수가 건물 안에서 유일하면 연결한다.
-        if (!candidate.dong && hoMatches.length === 1) return hoMatches[0];
+        const candidateDong = this.normalizeDongForMatch(candidate.dong, candidate.building_name);
+        const incompleteDongMatches = hoMatches.filter((unit) => {
+            const unitDong = this.normalizeDongForMatch(unit.dong);
+            return !candidateDong || !unitDong;
+        });
+
+        // 동 값이 한쪽에 없고 같은 호수가 건물 안에서 유일하면 연결한다.
+        if (incompleteDongMatches.length === 1) return incompleteDongMatches[0];
+
+        const pricedIncompleteMatches = incompleteDongMatches.filter((unit) => unit.official_price !== null && unit.official_price !== undefined);
+        if (pricedIncompleteMatches.length === 1) return pricedIncompleteMatches[0];
 
         return null;
     }
@@ -838,21 +848,30 @@ class SupabaseService {
 
         const now = new Date().toISOString();
 
-        let lookup = this.client
+        const { data: candidates, error: lookupError } = await this.client
             .from('building_units')
-            .select('id, source_metadata')
-            .eq('building_id', buildingId);
-
-        lookup = dong ? lookup.eq('dong', dong) : lookup.is('dong', null);
-        lookup = lookup.eq('ho', ho);
-
-        const { data: existingUnit, error: lookupError } = await lookup.limit(1).maybeSingle();
+            .select('id, dong, source_metadata, official_price, official_price_aphus_code')
+            .eq('building_id', buildingId)
+            .eq('ho', ho);
 
         if (lookupError) {
             logger.warn(
                 `building_units official price lookup failed (building: ${buildingId}, dong: ${dong}, ho: ${ho}): ${lookupError.message}`
             );
         }
+
+        const matchingCandidates = ((candidates ?? []) as Array<{
+            id: string;
+            dong: string | null;
+            source_metadata: Record<string, unknown> | null;
+            official_price: number | null;
+            official_price_aphus_code: string | null;
+        }>).filter((candidate) => this.cleanText(candidate.dong) === dong);
+
+        const existingUnit =
+            matchingCandidates.find((candidate) => candidate.official_price_aphus_code || candidate.official_price !== null) ??
+            matchingCandidates[0] ??
+            null;
 
         const updateData = {
             building_id: buildingId,
@@ -1058,7 +1077,7 @@ class SupabaseService {
 
         const { data: units, error: unitsError } = await this.client
             .from('building_units')
-            .select('id, dong, ho')
+            .select('id, dong, ho, official_price')
             .eq('building_id', buildingId);
 
         if (unitsError) {
