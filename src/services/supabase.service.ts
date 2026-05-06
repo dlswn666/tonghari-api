@@ -21,6 +21,32 @@ interface BuildingExternalRefInput {
     metadata?: Record<string, unknown>;
 }
 
+interface ApartmentOfficialPriceUnitInput {
+    dong: string | null;
+    ho: string | null;
+    area: number | null;
+    officialPrice: number;
+    sourcePnu: string;
+    stdrYear: string;
+    externalId: string | null;
+    externalName: string | null;
+    metadata: Record<string, unknown>;
+}
+
+interface BuildingUnitMatchRow {
+    id: string;
+    dong: string | null;
+    ho: string | null;
+}
+
+interface PropertyUnitMatchCandidate {
+    id: string;
+    dong: string | null;
+    ho: string | null;
+    building_unit_id: string | null;
+    building_name?: string | null;
+}
+
 /**
  * Supabase 서비스
  * - Vault에서 Sender Key 조회
@@ -571,6 +597,131 @@ class SupabaseService {
         }
     }
 
+    private cleanText(value: string | null | undefined): string | null {
+        if (value === null || value === undefined) return null;
+        const trimmed = String(value).trim();
+        return trimmed.length > 0 ? trimmed : null;
+    }
+
+    private normalizeDongForMatch(value: string | null | undefined, buildingName?: string | null): string | null {
+        const cleaned = this.cleanText(value);
+        if (!cleaned) return null;
+
+        let normalized = cleaned
+            .toLowerCase()
+            .replace(/\s+/g, '')
+            .replace(/[()（）\[\]{}·.,_-]/g, '');
+
+        const normalizedBuildingName = this.cleanText(buildingName)
+            ?.toLowerCase()
+            .replace(/\s+/g, '')
+            .replace(/[()（）\[\]{}·.,_-]/g, '');
+
+        if (normalizedBuildingName && normalized.startsWith(normalizedBuildingName)) {
+            normalized = normalized.slice(normalizedBuildingName.length);
+        }
+
+        if (normalized.endsWith('동') && normalized.length > 1) {
+            normalized = normalized.slice(0, -1);
+        }
+
+        const suffixMap: Array<[RegExp, string]> = [
+            [/에이$/, 'a'],
+            [/비$/, 'b'],
+            [/씨$/, 'c'],
+            [/시$/, 'c'],
+            [/디$/, 'd'],
+            [/이$/, 'e'],
+            [/에프$/, 'f'],
+            [/지$/, 'g'],
+            [/에이치$/, 'h'],
+        ];
+
+        for (const [pattern, replacement] of suffixMap) {
+            if (pattern.test(normalized)) {
+                normalized = normalized.replace(pattern, replacement);
+                break;
+            }
+        }
+
+        return normalized || null;
+    }
+
+    private normalizeHoForMatch(value: string | null | undefined): string | null {
+        const cleaned = this.cleanText(value);
+        if (!cleaned) return null;
+
+        const normalized = cleaned
+            .toLowerCase()
+            .replace(/\s+/g, '')
+            .replace(/호$/g, '')
+            .replace(/[()（）\[\]{}·.,_-]/g, '');
+
+        if (/^\d+$/.test(normalized)) {
+            return String(Number(normalized));
+        }
+
+        return normalized || null;
+    }
+
+    private isDongMatch(
+        candidateDong: string | null | undefined,
+        unitDong: string | null | undefined,
+        candidateBuildingName?: string | null
+    ): boolean {
+        const candidate = this.normalizeDongForMatch(candidateDong, candidateBuildingName);
+        const unit = this.normalizeDongForMatch(unitDong);
+
+        if (!candidate && !unit) return true;
+        if (!candidate || !unit) return false;
+        if (candidate === unit) return true;
+
+        // 예: "주일빌라 B" ↔ "비", "삼각산아이원아파트 102동" ↔ "102"
+        return candidate.endsWith(unit) || unit.endsWith(candidate);
+    }
+
+    private findMatchingBuildingUnit(
+        candidate: PropertyUnitMatchCandidate,
+        units: BuildingUnitMatchRow[]
+    ): BuildingUnitMatchRow | null {
+        const candidateHo = this.normalizeHoForMatch(candidate.ho);
+        if (!candidateHo) return null;
+
+        const hoMatches = units.filter((unit) => this.normalizeHoForMatch(unit.ho) === candidateHo);
+        if (hoMatches.length === 0) return null;
+
+        const dongMatches = hoMatches.filter((unit) =>
+            this.isDongMatch(candidate.dong, unit.dong, candidate.building_name)
+        );
+        if (dongMatches.length === 1) return dongMatches[0];
+
+        // 동 값이 없더라도 같은 호수가 건물 안에서 유일하면 연결한다.
+        if (!candidate.dong && hoMatches.length === 1) return hoMatches[0];
+
+        return null;
+    }
+
+    private buildOfficialPriceMetadata(
+        existingMetadata: Record<string, unknown> | null | undefined,
+        price: ApartmentOfficialPriceUnitInput,
+        requestedPnu: string
+    ): Record<string, unknown> {
+        return {
+            ...(existingMetadata ?? {}),
+            officialPrice: {
+                ...(price.metadata ?? {}),
+                source: 'APART_HOUSING_PRICE',
+                requestedPnu,
+                sourcePnu: price.sourcePnu,
+                aphusCode: price.externalId,
+                aphusName: price.externalName,
+                stdrYear: price.stdrYear,
+                area: price.area,
+                officialPrice: price.officialPrice,
+            },
+        };
+    }
+
     /**
      * 공동주택/개별주택 가격 API 공식명이 안정적으로 하나일 때만 대표 건물명으로 반영
      */
@@ -654,6 +805,272 @@ class SupabaseService {
         }
     }
 
+    private async upsertApartmentOfficialPriceUnit(
+        buildingId: string,
+        price: ApartmentOfficialPriceUnitInput,
+        requestedPnu: string
+    ): Promise<string | null> {
+        const dong = this.cleanText(price.dong);
+        const ho = this.cleanText(price.ho);
+
+        if (!ho) {
+            logger.warn(`Apartment official price unit skipped: missing ho (building: ${buildingId}, pnu: ${requestedPnu})`);
+            return null;
+        }
+
+        const now = new Date().toISOString();
+
+        let lookup = this.client
+            .from('building_units')
+            .select('id, source_metadata')
+            .eq('building_id', buildingId);
+
+        lookup = dong ? lookup.eq('dong', dong) : lookup.is('dong', null);
+        lookup = lookup.eq('ho', ho);
+
+        const { data: existingUnit, error: lookupError } = await lookup.limit(1).maybeSingle();
+
+        if (lookupError) {
+            logger.warn(
+                `building_units official price lookup failed (building: ${buildingId}, dong: ${dong}, ho: ${ho}): ${lookupError.message}`
+            );
+        }
+
+        const updateData = {
+            building_id: buildingId,
+            dong,
+            ho,
+            area: price.area,
+            official_price: price.officialPrice,
+            official_price_aphus_code: price.externalId,
+            official_price_year: price.stdrYear,
+            official_price_pnu: price.sourcePnu || requestedPnu,
+            official_price_area: price.area,
+            official_price_updated_at: now,
+            updated_at: now,
+            source_metadata: this.buildOfficialPriceMetadata(
+                (existingUnit?.source_metadata as Record<string, unknown> | null | undefined) ?? null,
+                price,
+                requestedPnu
+            ),
+        };
+
+        if (existingUnit?.id) {
+            const { data, error } = await this.client
+                .from('building_units')
+                .update(updateData)
+                .eq('id', existingUnit.id)
+                .select('id')
+                .single();
+
+            if (error) {
+                logger.warn(
+                    `building_units official price update failed (building: ${buildingId}, dong: ${dong}, ho: ${ho}): ${error.message}`
+                );
+                return null;
+            }
+
+            return data.id;
+        }
+
+        const { data, error } = await this.client
+            .from('building_units')
+            .insert(updateData)
+            .select('id')
+            .single();
+
+        if (error) {
+            logger.warn(
+                `building_units official price insert failed (building: ${buildingId}, dong: ${dong}, ho: ${ho}): ${error.message}`
+            );
+            return null;
+        }
+
+        return data.id;
+    }
+
+    private async listBuildingPnus(buildingId: string): Promise<string[]> {
+        const { data, error } = await this.client
+            .from('building_land_lots')
+            .select('pnu')
+            .eq('building_id', buildingId);
+
+        if (error) {
+            logger.warn(`building_land_lots lookup failed for building ${buildingId}: ${error.message}`);
+            return [];
+        }
+
+        return (data ?? [])
+            .map((row: { pnu: string | null }) => row.pnu)
+            .filter((pnu: string | null): pnu is string => Boolean(pnu));
+    }
+
+    private async linkUserPropertyUnitsToBuildingUnits(
+        pnus: string[],
+        units: BuildingUnitMatchRow[]
+    ): Promise<{ linkedCount: number; skippedCount: number }> {
+        if (pnus.length === 0 || units.length === 0) {
+            return { linkedCount: 0, skippedCount: 0 };
+        }
+
+        const { data, error } = await this.client
+            .from('user_property_units')
+            .select('id, dong, ho, building_unit_id, building_name')
+            .in('pnu', pnus)
+            .eq('is_active', true);
+
+        if (error) {
+            logger.warn(`user_property_units lookup failed for official price linking: ${error.message}`);
+            return { linkedCount: 0, skippedCount: 0 };
+        }
+
+        let linkedCount = 0;
+        let skippedCount = 0;
+
+        for (const row of (data ?? []) as PropertyUnitMatchCandidate[]) {
+            const matchedUnit = this.findMatchingBuildingUnit(row, units);
+            if (!matchedUnit) {
+                skippedCount++;
+                continue;
+            }
+
+            const updateData: Record<string, unknown> = {};
+            if (row.building_unit_id !== matchedUnit.id) updateData.building_unit_id = matchedUnit.id;
+            if (matchedUnit.dong !== null && row.dong !== matchedUnit.dong) updateData.dong = matchedUnit.dong;
+            if (matchedUnit.ho !== null && row.ho !== matchedUnit.ho) updateData.ho = matchedUnit.ho;
+
+            if (Object.keys(updateData).length === 0) continue;
+
+            updateData.updated_at = new Date().toISOString();
+
+            const { error: updateError } = await this.client
+                .from('user_property_units')
+                .update(updateData)
+                .eq('id', row.id);
+
+            if (updateError) {
+                logger.warn(`user_property_units official price link failed (${row.id}): ${updateError.message}`);
+                skippedCount++;
+                continue;
+            }
+
+            linkedCount++;
+        }
+
+        return { linkedCount, skippedCount };
+    }
+
+    private async linkPropertyUnitsToBuildingUnits(
+        pnus: string[],
+        units: BuildingUnitMatchRow[]
+    ): Promise<{ linkedCount: number; skippedCount: number }> {
+        if (pnus.length === 0 || units.length === 0) {
+            return { linkedCount: 0, skippedCount: 0 };
+        }
+
+        const { data, error } = await this.client
+            .from('property_units')
+            .select('id, dong, ho, building_unit_id, building_name')
+            .in('pnu', pnus)
+            .eq('is_deleted', false);
+
+        if (error) {
+            logger.warn(`property_units lookup failed for official price linking: ${error.message}`);
+            return { linkedCount: 0, skippedCount: 0 };
+        }
+
+        let linkedCount = 0;
+        let skippedCount = 0;
+
+        for (const row of (data ?? []) as PropertyUnitMatchCandidate[]) {
+            const matchedUnit = this.findMatchingBuildingUnit(row, units);
+            if (!matchedUnit) {
+                skippedCount++;
+                continue;
+            }
+
+            const updateData: Record<string, unknown> = {};
+            if (row.building_unit_id !== matchedUnit.id) updateData.building_unit_id = matchedUnit.id;
+            if (matchedUnit.dong !== null && row.dong !== matchedUnit.dong) updateData.dong = matchedUnit.dong;
+            if (matchedUnit.ho !== null && row.ho !== matchedUnit.ho) updateData.ho = matchedUnit.ho;
+
+            if (Object.keys(updateData).length === 0) continue;
+
+            updateData.updated_at = new Date().toISOString();
+
+            const { error: updateError } = await this.client
+                .from('property_units')
+                .update(updateData)
+                .eq('id', row.id);
+
+            if (updateError) {
+                logger.warn(`property_units official price link failed (${row.id}): ${updateError.message}`);
+                skippedCount++;
+                continue;
+            }
+
+            linkedCount++;
+        }
+
+        return { linkedCount, skippedCount };
+    }
+
+    async upsertApartmentOfficialPriceUnits(
+        buildingId: string,
+        requestedPnu: string,
+        prices: ApartmentOfficialPriceUnitInput[]
+    ): Promise<{
+        upsertedCount: number;
+        skippedCount: number;
+        linkedUserPropertyCount: number;
+        linkedPropertyUnitCount: number;
+        linkSkippedCount: number;
+    }> {
+        let upsertedCount = 0;
+        let skippedCount = 0;
+
+        for (const price of prices) {
+            const unitId = await this.upsertApartmentOfficialPriceUnit(buildingId, price, requestedPnu);
+            if (unitId) {
+                upsertedCount++;
+            } else {
+                skippedCount++;
+            }
+        }
+
+        const { data: units, error: unitsError } = await this.client
+            .from('building_units')
+            .select('id, dong, ho')
+            .eq('building_id', buildingId);
+
+        if (unitsError) {
+            logger.warn(`building_units lookup failed after official price upsert (${buildingId}): ${unitsError.message}`);
+            return {
+                upsertedCount,
+                skippedCount,
+                linkedUserPropertyCount: 0,
+                linkedPropertyUnitCount: 0,
+                linkSkippedCount: 0,
+            };
+        }
+
+        const buildingPnus = await this.listBuildingPnus(buildingId);
+        const pricePnus = prices.map((price) => price.sourcePnu).filter((pnu): pnu is string => Boolean(pnu));
+        const linkPnus = Array.from(new Set([requestedPnu, ...buildingPnus, ...pricePnus].filter(Boolean)));
+
+        const normalizedUnits = ((units ?? []) as BuildingUnitMatchRow[]).filter((unit) => this.cleanText(unit.ho));
+        const userLinkResult = await this.linkUserPropertyUnitsToBuildingUnits(linkPnus, normalizedUnits);
+        const propertyLinkResult = await this.linkPropertyUnitsToBuildingUnits(linkPnus, normalizedUnits);
+
+        return {
+            upsertedCount,
+            skippedCount,
+            linkedUserPropertyCount: userLinkResult.linkedCount,
+            linkedPropertyUnitCount: propertyLinkResult.linkedCount,
+            linkSkippedCount: userLinkResult.skippedCount + propertyLinkResult.skippedCount,
+        };
+    }
+
     /**
      * 세대(동/호수) 정보 UPSERT (building_units 테이블)
      * 기존 세대는 유지하고 새 세대만 추가
@@ -666,6 +1083,7 @@ class SupabaseService {
             floor?: number | null;
             area?: number | null;
             officialPrice?: number | null; // 2026-04 추가: 공동주택공시가격 (S2 integration)
+            registryExternalId?: string | null;
         }>
     ): Promise<boolean> {
         if (!units || units.length === 0) {
@@ -676,16 +1094,25 @@ class SupabaseService {
         try {
             // 각 세대별로 upsert
             for (const unit of units) {
+                const unitPayload: Record<string, unknown> = {
+                    building_id: buildingId,
+                    dong: unit.dong,
+                    ho: unit.ho,
+                    floor: unit.floor,
+                    area: unit.area,
+                    updated_at: new Date().toISOString(),
+                };
+
+                if (unit.officialPrice !== null && unit.officialPrice !== undefined) {
+                    unitPayload.official_price = unit.officialPrice;
+                }
+
+                if (unit.registryExternalId) {
+                    unitPayload.registry_external_id = unit.registryExternalId;
+                }
+
                 const { error } = await this.client.from('building_units').upsert(
-                    {
-                        building_id: buildingId,
-                        dong: unit.dong,
-                        ho: unit.ho,
-                        floor: unit.floor,
-                        area: unit.area,
-                        // 2026-04 추가: 공동주택공시가격 (Vworld API로부터 매칭된 값)
-                        official_price: unit.officialPrice ?? null,
-                    },
+                    unitPayload,
                     {
                         onConflict: 'building_id,dong,ho',
                         ignoreDuplicates: false,
@@ -734,6 +1161,7 @@ class SupabaseService {
                 floor?: number | null;
                 area?: number | null;
                 officialPrice?: number | null; // 2026-04 추가: 공동주택공시가격 (S2 integration)
+                registryExternalId?: string | null;
             }>;
         }
     ): Promise<boolean> {

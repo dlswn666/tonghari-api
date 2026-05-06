@@ -31,6 +31,42 @@ interface FailedAddress {
     index: number;
 }
 
+type IndividualHousingPriceFailureCode =
+    | 'NO_OFFICIAL_HOUSING_PRICE'
+    | 'WRONG_BUILDING_TYPE_CANDIDATE'
+    | 'DB_UPDATE_TARGET_MISSING'
+    | 'INDIVIDUAL_HOUSING_PRICE_ERROR';
+
+interface IndividualHousingPriceFailure {
+    pnu: string;
+    buildingId?: string;
+    reason: string;
+    code?: IndividualHousingPriceFailureCode;
+    attemptedPnus?: string[];
+    matchedPnu?: string;
+}
+
+type IndividualHousingPriceResolution =
+    | {
+          status: 'FOUND';
+          price: IndividualHousingOfficialPrice;
+          requestedPnu: string;
+          matchedPnu: string;
+          attemptedPnus: string[];
+      }
+    | {
+          status: 'APARTMENT_PRICE_CANDIDATE';
+          requestedPnu: string;
+          matchedPnu: string;
+          attemptedPnus: string[];
+          apartmentPrices: ApartmentHouseOfficialPrice[];
+      }
+    | {
+          status: 'NO_DATA';
+          requestedPnu: string;
+          attemptedPnus: string[];
+      };
+
 /**
  * GIS 수집 큐 서비스
  */
@@ -121,6 +157,75 @@ class GisQueueService {
                 },
             },
         ];
+    }
+
+    private buildBuildingPnuMap(
+        targets: Array<{ pnu: string; buildingId: string }>
+    ): Map<string, string[]> {
+        const pnuMap = new Map<string, Set<string>>();
+
+        for (const target of targets) {
+            if (!pnuMap.has(target.buildingId)) {
+                pnuMap.set(target.buildingId, new Set<string>());
+            }
+            pnuMap.get(target.buildingId)?.add(target.pnu);
+        }
+
+        return new Map(
+            Array.from(pnuMap.entries()).map(([buildingId, pnus]) => [
+                buildingId,
+                Array.from(pnus).sort(),
+            ])
+        );
+    }
+
+    private getCandidatePnusForBuilding(
+        target: IndividualHousingPriceSyncTarget,
+        buildingPnuMap: Map<string, string[]>
+    ): string[] {
+        const buildingPnus = buildingPnuMap.get(target.buildingId) ?? [];
+        return Array.from(new Set([target.pnu, ...buildingPnus].filter(Boolean)));
+    }
+
+    private async resolveIndividualHousingPrice(
+        target: IndividualHousingPriceSyncTarget,
+        buildingPnuMap: Map<string, string[]>
+    ): Promise<IndividualHousingPriceResolution> {
+        const candidatePnus = this.getCandidatePnusForBuilding(target, buildingPnuMap);
+        const attemptedPnus: string[] = [];
+
+        for (const candidatePnu of candidatePnus) {
+            attemptedPnus.push(candidatePnu);
+            const price = await gisService.getIndividualHousingPrice(candidatePnu);
+            if (price) {
+                return {
+                    status: 'FOUND',
+                    price,
+                    requestedPnu: target.pnu,
+                    matchedPnu: candidatePnu,
+                    attemptedPnus,
+                };
+            }
+        }
+
+        for (const candidatePnu of candidatePnus) {
+            const apartmentPrices = await gisService.getApartmentHousePrices(candidatePnu);
+            if (apartmentPrices && apartmentPrices.length > 0) {
+                return {
+                    status: 'APARTMENT_PRICE_CANDIDATE',
+                    requestedPnu: target.pnu,
+                    matchedPnu: candidatePnu,
+                    attemptedPnus,
+                    apartmentPrices,
+                };
+            }
+        }
+
+        return {
+            status: 'NO_DATA',
+            requestedPnu: target.pnu,
+            attemptedPnus,
+        };
     }
 
     async addSyncJob(request: GisSyncRequest): Promise<GisJobInfo> {
@@ -654,6 +759,10 @@ class GisQueueService {
 
         let successPnuCount = 0;
         let updatedUnitCount = 0;
+        let linkedUserPropertyCount = 0;
+        let linkedPropertyUnitCount = 0;
+        let skippedUnitCount = 0;
+        let linkSkippedCount = 0;
         const failedEntries: Array<{ pnu: string; reason: string }> = [];
 
         for (let i = 0; i < targets.length; i++) {
@@ -676,21 +785,20 @@ class GisQueueService {
                         }))
                     );
 
-                    // 각 (dong, ho) 결과를 building_units에 갱신
-                    for (const entry of prices) {
-                        const updated = await supabaseService.updateBuildingUnitPrice(
-                            target.buildingId,
-                            entry.dong ?? null,
-                            entry.ho ?? null,
-                            entry.officialPrice
-                        );
-                        if (updated) {
-                            updatedUnitCount++;
-                        }
-                    }
+                    const syncResult = await supabaseService.upsertApartmentOfficialPriceUnits(
+                        target.buildingId,
+                        target.pnu,
+                        prices
+                    );
+
+                    updatedUnitCount += syncResult.upsertedCount;
+                    skippedUnitCount += syncResult.skippedCount;
+                    linkedUserPropertyCount += syncResult.linkedUserPropertyCount;
+                    linkedPropertyUnitCount += syncResult.linkedPropertyUnitCount;
+                    linkSkippedCount += syncResult.linkSkippedCount;
                     successPnuCount++;
                     logger.debug(
-                        `[APT-PRICE ${jobId}] (${currentIndex}/${targets.length}) Updated ${prices.length} units for PNU: ${target.pnu}`
+                        `[APT-PRICE ${jobId}] (${currentIndex}/${targets.length}) Synced apartment units for PNU ${target.pnu}: upserted=${syncResult.upsertedCount}, skipped=${syncResult.skippedCount}, linkedUserProperties=${syncResult.linkedUserPropertyCount}, linkedPropertyUnits=${syncResult.linkedPropertyUnitCount}`
                     );
                 }
             } catch (err: any) {
@@ -707,7 +815,7 @@ class GisQueueService {
             const progress = Math.round((job.processedCount / job.totalCount) * 100);
             if (progress % 10 === 0 || job.processedCount === job.totalCount) {
                 logger.info(
-                    `[APT-PRICE ${jobId}] Progress: ${progress}% (${job.processedCount}/${job.totalCount}, success PNU: ${successPnuCount}, updated units: ${updatedUnitCount})`
+                    `[APT-PRICE ${jobId}] Progress: ${progress}% (${job.processedCount}/${job.totalCount}, success PNU: ${successPnuCount}, upserted units: ${updatedUnitCount}, linked user properties: ${linkedUserPropertyCount})`
                 );
             }
             await supabaseService.updateSyncJobStatus(jobId, 'PROCESSING', progress);
@@ -730,10 +838,14 @@ class GisQueueService {
             failedCount: failedEntries.length,
             totalCount: job.totalCount,
             updatedUnitCount,
+            skippedUnitCount,
+            linkedUserPropertyCount,
+            linkedPropertyUnitCount,
+            linkSkippedCount,
         };
 
         logger.info(
-            `[APT-PRICE ${jobId}] Completed — success PNU: ${successPnuCount}, failed: ${failedEntries.length}, updated units: ${updatedUnitCount}`
+            `[APT-PRICE ${jobId}] Completed — success PNU: ${successPnuCount}, failed: ${failedEntries.length}, upserted units: ${updatedUnitCount}, linked user properties: ${linkedUserPropertyCount}, linked property units: ${linkedPropertyUnitCount}`
         );
 
         this.updateJobStatus(jobId, {
@@ -816,7 +928,8 @@ class GisQueueService {
 
     /**
      * 개별주택가격 재동기화 워커 핸들러 (2026-05)
-     * 각 PNU에 대해 gisService.getIndividualHousingPrice()를 호출하고
+     * 각 PNU에 대해 개별주택가격을 조회하고, 없으면 같은 건물의 다른 PNU로 보정 조회한다.
+     * 그래도 없으면 공동주택공시가격 API를 진단 조회하여 건물 유형 보정 후보를 남긴다.
      * 건물에 연결된 building_units 전체 official_price를 갱신한다.
      */
     private async processIndividualHousingPriceSync(
@@ -831,40 +944,113 @@ class GisQueueService {
 
         let successPnuCount = 0;
         let updatedUnitCount = 0;
-        const failedEntries: Array<{ pnu: string; reason: string }> = [];
+        let fallbackSuccessCount = 0;
+        let apartmentCandidateCount = 0;
+        let skippedDuplicateBuildingCount = 0;
+        const buildingPnuMap = this.buildBuildingPnuMap(targets);
+        const updatedBuildingIds = new Set<string>();
+        const diagnosticBuildingIds = new Set<string>();
+        const failedEntries: IndividualHousingPriceFailure[] = [];
 
         for (let i = 0; i < targets.length; i++) {
             const target = targets[i];
             const currentIndex = i + 1;
 
             try {
-                const price = await gisService.getIndividualHousingPrice(target.pnu);
-
-                if (price === null || price === undefined) {
-                    logger.warn(
-                        `[INDVD-HOUSE-PRICE ${jobId}] (${currentIndex}/${targets.length}) No individual housing price for PNU: ${target.pnu}`
+                if (updatedBuildingIds.has(target.buildingId) || diagnosticBuildingIds.has(target.buildingId)) {
+                    skippedDuplicateBuildingCount++;
+                    logger.debug(
+                        `[INDVD-HOUSE-PRICE ${jobId}] (${currentIndex}/${targets.length}) Skipped duplicate building target: ${target.buildingId} / ${target.pnu}`
                     );
-                    failedEntries.push({ pnu: target.pnu, reason: '개별주택가격 조회 결과 없음' });
                 } else {
-                    await supabaseService.upsertBuildingExternalRefs(
-                        this.buildIndividualHousingExternalRefs(target.pnu, price).map((ref) => ({
-                            buildingId: target.buildingId,
-                            ...ref,
-                        }))
-                    );
+                    const resolution = await this.resolveIndividualHousingPrice(target, buildingPnuMap);
 
-                    const updatedCount = await supabaseService.updateBuildingUnitsPriceByBuildingId(
-                        target.buildingId,
-                        price.officialPrice
-                    );
-                    if (updatedCount > 0) {
-                        successPnuCount++;
-                        updatedUnitCount += updatedCount;
-                        logger.debug(
-                            `[INDVD-HOUSE-PRICE ${jobId}] (${currentIndex}/${targets.length}) Updated building ${target.buildingId}: ${price.officialPrice} (${updatedCount} units)`
+                    if (resolution.status === 'NO_DATA') {
+                        diagnosticBuildingIds.add(target.buildingId);
+                        logger.warn(
+                            `[INDVD-HOUSE-PRICE ${jobId}] (${currentIndex}/${targets.length}) No individual housing price for PNU: ${target.pnu} (attempted: ${resolution.attemptedPnus.join(', ')})`
                         );
+                        failedEntries.push({
+                            pnu: target.pnu,
+                            buildingId: target.buildingId,
+                            reason: '개별주택가격 조회 결과 없음',
+                            code: 'NO_OFFICIAL_HOUSING_PRICE',
+                            attemptedPnus: resolution.attemptedPnus,
+                        });
+                    } else if (resolution.status === 'APARTMENT_PRICE_CANDIDATE') {
+                        apartmentCandidateCount++;
+                        diagnosticBuildingIds.add(target.buildingId);
+
+                        await supabaseService.upsertBuildingExternalRefs(
+                            this.buildApartmentPriceExternalRefs(
+                                resolution.matchedPnu,
+                                resolution.apartmentPrices
+                            ).map((ref) => ({
+                                buildingId: target.buildingId,
+                                ...ref,
+                                metadata: {
+                                    ...ref.metadata,
+                                    requestedPnu: target.pnu,
+                                    matchedPnu: resolution.matchedPnu,
+                                    diagnosticSource: 'INDIVIDUAL_HOUSING_PRICE_SYNC',
+                                },
+                            }))
+                        );
+
+                        logger.warn(
+                            `[INDVD-HOUSE-PRICE ${jobId}] (${currentIndex}/${targets.length}) Apartment price data found for DETACHED_HOUSE target. building=${target.buildingId}, requested=${target.pnu}, matched=${resolution.matchedPnu}, units=${resolution.apartmentPrices.length}`
+                        );
+                        failedEntries.push({
+                            pnu: target.pnu,
+                            buildingId: target.buildingId,
+                            reason: '공동주택공시가격 조회됨 - 건물 유형 분류 확인 필요',
+                            code: 'WRONG_BUILDING_TYPE_CANDIDATE',
+                            attemptedPnus: resolution.attemptedPnus,
+                            matchedPnu: resolution.matchedPnu,
+                        });
                     } else {
-                        failedEntries.push({ pnu: target.pnu, reason: 'DB 갱신 대상 unit 없음' });
+                        const { price } = resolution;
+                        if (resolution.matchedPnu !== target.pnu) {
+                            fallbackSuccessCount++;
+                            logger.info(
+                                `[INDVD-HOUSE-PRICE ${jobId}] (${currentIndex}/${targets.length}) Individual housing price fallback matched: requested=${target.pnu}, matched=${resolution.matchedPnu}`
+                            );
+                        }
+
+                        await supabaseService.upsertBuildingExternalRefs(
+                            this.buildIndividualHousingExternalRefs(target.pnu, price).map((ref) => ({
+                                buildingId: target.buildingId,
+                                ...ref,
+                                metadata: {
+                                    ...ref.metadata,
+                                    matchedPnu: resolution.matchedPnu,
+                                    attemptedPnus: resolution.attemptedPnus,
+                                },
+                            }))
+                        );
+
+                        const updatedCount = await supabaseService.updateBuildingUnitsPriceByBuildingId(
+                            target.buildingId,
+                            price.officialPrice
+                        );
+                        if (updatedCount > 0) {
+                            successPnuCount++;
+                            updatedBuildingIds.add(target.buildingId);
+                            updatedUnitCount += updatedCount;
+                            logger.debug(
+                                `[INDVD-HOUSE-PRICE ${jobId}] (${currentIndex}/${targets.length}) Updated building ${target.buildingId}: ${price.officialPrice} (${updatedCount} units)`
+                            );
+                        } else {
+                            diagnosticBuildingIds.add(target.buildingId);
+                            failedEntries.push({
+                                pnu: target.pnu,
+                                buildingId: target.buildingId,
+                                reason: 'DB 갱신 대상 unit 없음',
+                                code: 'DB_UPDATE_TARGET_MISSING',
+                                attemptedPnus: resolution.attemptedPnus,
+                                matchedPnu: resolution.matchedPnu,
+                            });
+                        }
                     }
                 }
             } catch (err: any) {
@@ -873,25 +1059,33 @@ class GisQueueService {
                         err?.message || 'Unknown error'
                     }`
                 );
-                failedEntries.push({ pnu: target.pnu, reason: `Error: ${err?.message || 'Unknown error'}` });
+                failedEntries.push({
+                    pnu: target.pnu,
+                    buildingId: target.buildingId,
+                    reason: `Error: ${err?.message || 'Unknown error'}`,
+                    code: 'INDIVIDUAL_HOUSING_PRICE_ERROR',
+                });
             }
 
             job.processedCount = currentIndex;
             const progress = Math.round((job.processedCount / job.totalCount) * 100);
             if (progress % 10 === 0 || job.processedCount === job.totalCount) {
                 logger.info(
-                    `[INDVD-HOUSE-PRICE ${jobId}] Progress: ${progress}% (${job.processedCount}/${job.totalCount}, success PNU: ${successPnuCount}, updated units: ${updatedUnitCount})`
+                    `[INDVD-HOUSE-PRICE ${jobId}] Progress: ${progress}% (${job.processedCount}/${job.totalCount}, success buildings: ${successPnuCount}, fallback: ${fallbackSuccessCount}, apartment candidates: ${apartmentCandidateCount}, updated units: ${updatedUnitCount})`
                 );
             }
             await supabaseService.updateSyncJobStatus(jobId, 'PROCESSING', progress);
         }
 
-        const finalStatus = failedEntries.length === job.totalCount ? 'FAILED' : 'COMPLETED';
+        const finalStatus = successPnuCount === 0 && apartmentCandidateCount === 0 ? 'FAILED' : 'COMPLETED';
         const errorLog =
             failedEntries.length > 0
                 ? JSON.stringify({
                       failedCount: failedEntries.length,
                       successCount: successPnuCount,
+                      fallbackSuccessCount,
+                      apartmentCandidateCount,
+                      skippedDuplicateBuildingCount,
                       totalCount: job.totalCount,
                       failedEntries: failedEntries.slice(0, 100),
                   })
@@ -902,10 +1096,13 @@ class GisQueueService {
             failedCount: failedEntries.length,
             totalCount: job.totalCount,
             updatedUnitCount,
+            fallbackSuccessCount,
+            apartmentCandidateCount,
+            skippedDuplicateBuildingCount,
         };
 
         logger.info(
-            `[INDVD-HOUSE-PRICE ${jobId}] Completed — success PNU: ${successPnuCount}, failed: ${failedEntries.length}, updated units: ${updatedUnitCount}`
+            `[INDVD-HOUSE-PRICE ${jobId}] Completed — success buildings: ${successPnuCount}, fallback: ${fallbackSuccessCount}, apartment candidates: ${apartmentCandidateCount}, failed: ${failedEntries.length}, updated units: ${updatedUnitCount}`
         );
 
         this.updateJobStatus(jobId, {

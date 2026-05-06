@@ -1485,22 +1485,29 @@ class GisService {
             const unitInfoList = await this.getBuildingUnits(pnu);
 
             // 세대 정보 파싱
-            const units: Array<{ dong: string | null; ho: string | null; floor: number | null; area: number | null }> =
-                [];
+            const units: Array<{
+                dong: string | null;
+                ho: string | null;
+                floor: number | null;
+                area: number | null;
+                registryExternalId?: string | null;
+            }> = [];
 
             if (unitInfoList && unitInfoList.length > 0) {
                 for (const unit of unitInfoList) {
                     const unitData = unit as Record<string, unknown>;
-                    const dongNm = (unitData.dongNm as string) || null;
-                    const hoNm = (unitData.hoNm as string) || null;
-                    const flrNo = unitData.flrNo ? Number(unitData.flrNo) : null;
-                    const area = unitData.area ? Number(unitData.area) : null;
+                    const dongNm = this.parseText(unitData.dongNm);
+                    const hoNm = this.parseText(unitData.hoNm);
+                    const flrNo = this.parseNumber(unitData.flrNo);
+                    const area = this.parseNumber(unitData.area);
+                    const registryExternalId = this.parseText(unitData.mgmBldrgstPk);
 
                     units.push({
                         dong: dongNm,
                         ho: hoNm,
                         floor: flrNo,
                         area: area,
+                        registryExternalId,
                     });
                 }
             }
