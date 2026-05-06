@@ -833,6 +833,79 @@ class SupabaseService {
         }
     }
 
+    private resolveExistingUnitForOfficialPriceUpsert(
+        candidates: Array<{
+            id: string;
+            dong: string | null;
+            ho: string | null;
+            source_metadata: Record<string, unknown> | null;
+            official_price: number | null;
+            official_price_aphus_code: string | null;
+        }>,
+        dong: string | null,
+        ho: string,
+        buildingName?: string | null
+    ): {
+        match: { id: string; source_metadata: Record<string, unknown> | null } | null;
+        ambiguous: boolean;
+    } {
+        if (candidates.length === 0) return { match: null, ambiguous: false };
+
+        const pickPriced = <T extends { official_price: number | null; official_price_aphus_code: string | null }>(
+            rows: T[]
+        ): T => rows.find((r) => r.official_price_aphus_code || r.official_price !== null) ?? rows[0];
+
+        // 1) cleanText 정확 매칭
+        const exact = candidates.filter(
+            (c) => this.cleanText(c.ho) === ho && this.cleanText(c.dong) === dong
+        );
+        if (exact.length >= 1) {
+            const chosen = exact.length === 1 ? exact[0] : pickPriced(exact);
+            return { match: { id: chosen.id, source_metadata: chosen.source_metadata }, ambiguous: false };
+        }
+
+        // 2) 정규화 매칭
+        const hoMatches = candidates.filter((c) => this.isHoMatch(ho, c.ho, c.dong));
+        if (hoMatches.length === 0) return { match: null, ambiguous: false };
+
+        const candidateDongNorm = this.normalizeDongForMatch(dong, buildingName);
+
+        // 2-1) dong 양쪽 정규화 가능 + isDongMatch 통과
+        const dongMatches = hoMatches.filter((c) => {
+            const unitDongNorm = this.normalizeDongForMatch(c.dong);
+            return Boolean(candidateDongNorm) && Boolean(unitDongNorm) && this.isDongMatch(dong, c.dong, buildingName);
+        });
+        if (dongMatches.length >= 1) {
+            const chosen = dongMatches.length === 1 ? dongMatches[0] : pickPriced(dongMatches);
+            return { match: { id: chosen.id, source_metadata: chosen.source_metadata }, ambiguous: false };
+        }
+
+        // 2-2) incomplete dong (한쪽이 비어있음) — shadow row 방지 핵심 path
+        const incompleteMatches = hoMatches.filter((c) => {
+            const unitDongNorm = this.normalizeDongForMatch(c.dong);
+            return !candidateDongNorm || !unitDongNorm;
+        });
+        if (incompleteMatches.length === 1) {
+            const chosen = incompleteMatches[0];
+            return { match: { id: chosen.id, source_metadata: chosen.source_metadata }, ambiguous: false };
+        }
+
+        if (incompleteMatches.length > 1) {
+            // 같은 dong-norm(둘 다 null 포함)끼리 묶어 1건이면 update, 아니면 ambiguous
+            const sameDongNorm = incompleteMatches.filter((c) => {
+                const unitDongNorm = this.normalizeDongForMatch(c.dong);
+                return (candidateDongNorm ?? null) === (unitDongNorm ?? null);
+            });
+            if (sameDongNorm.length >= 1) {
+                const chosen = sameDongNorm.length === 1 ? sameDongNorm[0] : pickPriced(sameDongNorm);
+                return { match: { id: chosen.id, source_metadata: chosen.source_metadata }, ambiguous: false };
+            }
+            return { match: null, ambiguous: true };
+        }
+
+        return { match: null, ambiguous: false };
+    }
+
     private async upsertApartmentOfficialPriceUnit(
         buildingId: string,
         price: ApartmentOfficialPriceUnitInput,
@@ -848,11 +921,11 @@ class SupabaseService {
 
         const now = new Date().toISOString();
 
+        // building 내 모든 unit 조회 (정규화 매칭을 위해 ho 필터 제거)
         const { data: candidates, error: lookupError } = await this.client
             .from('building_units')
-            .select('id, dong, source_metadata, official_price, official_price_aphus_code')
-            .eq('building_id', buildingId)
-            .eq('ho', ho);
+            .select('id, dong, ho, source_metadata, official_price, official_price_aphus_code')
+            .eq('building_id', buildingId);
 
         if (lookupError) {
             logger.warn(
@@ -860,23 +933,23 @@ class SupabaseService {
             );
         }
 
-        const matchingCandidates = ((candidates ?? []) as Array<{
+        const allCandidates = (candidates ?? []) as Array<{
             id: string;
             dong: string | null;
+            ho: string | null;
             source_metadata: Record<string, unknown> | null;
             official_price: number | null;
             official_price_aphus_code: string | null;
-        }>).filter((candidate) => this.cleanText(candidate.dong) === dong);
+        }>;
 
-        const existingUnit =
-            matchingCandidates.find((candidate) => candidate.official_price_aphus_code || candidate.official_price !== null) ??
-            matchingCandidates[0] ??
-            null;
-
-        const updateData = {
-            building_id: buildingId,
+        const { match: existingUnit, ambiguous } = this.resolveExistingUnitForOfficialPriceUpsert(
+            allCandidates,
             dong,
             ho,
+            price.externalName
+        );
+
+        const officialFields = {
             area: price.area,
             official_price: price.officialPrice,
             official_price_aphus_code: price.externalId,
@@ -893,16 +966,17 @@ class SupabaseService {
         };
 
         if (existingUnit?.id) {
+            // dong/ho 컬럼은 보존(사용자 입력 형식 유지) — 가격 관련 필드만 갱신
             const { data, error } = await this.client
                 .from('building_units')
-                .update(updateData)
+                .update(officialFields)
                 .eq('id', existingUnit.id)
                 .select('id')
                 .single();
 
             if (error) {
                 logger.warn(
-                    `building_units official price update failed (building: ${buildingId}, dong: ${dong}, ho: ${ho}): ${error.message}`
+                    `building_units official price update failed (building: ${buildingId}, dong: ${dong}, ho: ${ho}, target unit: ${existingUnit.id}): ${error.message}`
                 );
                 return null;
             }
@@ -910,9 +984,18 @@ class SupabaseService {
             return data.id;
         }
 
+        if (ambiguous) {
+            // 여러 동에 같은 호수 존재 + VWorld가 동 정보 안 줌 → 잘못 박지 않고 skip (shadow row 방지)
+            logger.warn(
+                `building_units official price ambiguous match — skipped to avoid shadow row (building: ${buildingId}, dong: ${dong ?? 'null'}, ho: ${ho}, pnu: ${requestedPnu})`
+            );
+            return null;
+        }
+
+        // 정규화로도 매칭 안됨 → 진짜 신규 unit, INSERT
         const { data, error } = await this.client
             .from('building_units')
-            .insert(updateData)
+            .insert({ building_id: buildingId, dong, ho, ...officialFields })
             .select('id')
             .single();
 
