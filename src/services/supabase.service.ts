@@ -654,6 +654,7 @@ class SupabaseService {
         const normalized = cleaned
             .toLowerCase()
             .replace(/\s+/g, '')
+            .replace(/^제/g, '')
             .replace(/호$/g, '')
             .replace(/[()（）\[\]{}·.,_-]/g, '');
 
@@ -662,6 +663,23 @@ class SupabaseService {
         }
 
         return normalized || null;
+    }
+
+    private isHoMatch(
+        candidateHoValue: string | null | undefined,
+        unitHoValue: string | null | undefined,
+        unitDongValue: string | null | undefined
+    ): boolean {
+        const candidateHo = this.normalizeHoForMatch(candidateHoValue);
+        const unitHo = this.normalizeHoForMatch(unitHoValue);
+        if (!candidateHo || !unitHo) return false;
+        if (candidateHo === unitHo) return true;
+
+        const unitDong = this.normalizeDongForMatch(unitDongValue);
+        if (unitDong && unitHo === `${unitDong}${candidateHo}`) return true;
+
+        // 예: 조합원 "302" ↔ 공시가격 "A302", "비202"
+        return unitHo.endsWith(candidateHo);
     }
 
     private isDongMatch(
@@ -687,7 +705,7 @@ class SupabaseService {
         const candidateHo = this.normalizeHoForMatch(candidate.ho);
         if (!candidateHo) return null;
 
-        const hoMatches = units.filter((unit) => this.normalizeHoForMatch(unit.ho) === candidateHo);
+        const hoMatches = units.filter((unit) => this.isHoMatch(candidate.ho, unit.ho, unit.dong));
         if (hoMatches.length === 0) return null;
 
         const dongMatches = hoMatches.filter((unit) =>

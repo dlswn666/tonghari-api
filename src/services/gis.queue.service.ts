@@ -67,6 +67,20 @@ type IndividualHousingPriceResolution =
           attemptedPnus: string[];
       };
 
+type ApartmentPriceResolution =
+    | {
+          status: 'FOUND';
+          requestedPnu: string;
+          matchedPnu: string;
+          attemptedPnus: string[];
+          prices: ApartmentHouseOfficialPrice[];
+      }
+    | {
+          status: 'NO_DATA';
+          requestedPnu: string;
+          attemptedPnus: string[];
+      };
+
 /**
  * GIS 수집 큐 서비스
  */
@@ -185,6 +199,34 @@ class GisQueueService {
     ): string[] {
         const buildingPnus = buildingPnuMap.get(target.buildingId) ?? [];
         return Array.from(new Set([target.pnu, ...buildingPnus].filter(Boolean)));
+    }
+
+    private async resolveApartmentHousePrices(
+        target: ApartmentPriceSyncTarget,
+        buildingPnuMap: Map<string, string[]>
+    ): Promise<ApartmentPriceResolution> {
+        const candidatePnus = this.getCandidatePnusForBuilding(target, buildingPnuMap);
+        const attemptedPnus: string[] = [];
+
+        for (const candidatePnu of candidatePnus) {
+            attemptedPnus.push(candidatePnu);
+            const prices = await gisService.getApartmentHousePrices(candidatePnu);
+            if (prices && prices.length > 0) {
+                return {
+                    status: 'FOUND',
+                    requestedPnu: target.pnu,
+                    matchedPnu: candidatePnu,
+                    attemptedPnus,
+                    prices,
+                };
+            }
+        }
+
+        return {
+            status: 'NO_DATA',
+            requestedPnu: target.pnu,
+            attemptedPnus,
+        };
     }
 
     private async resolveIndividualHousingPrice(
@@ -763,6 +805,10 @@ class GisQueueService {
         let linkedPropertyUnitCount = 0;
         let skippedUnitCount = 0;
         let linkSkippedCount = 0;
+        let fallbackSuccessCount = 0;
+        let skippedDuplicateBuildingCount = 0;
+        const buildingPnuMap = this.buildBuildingPnuMap(targets);
+        const processedBuildingIds = new Set<string>();
         const failedEntries: Array<{ pnu: string; reason: string }> = [];
 
         for (let i = 0; i < targets.length; i++) {
@@ -770,36 +816,58 @@ class GisQueueService {
             const currentIndex = i + 1;
 
             try {
-                const prices = await gisService.getApartmentHousePrices(target.pnu);
-
-                if (!prices || prices.length === 0) {
-                    logger.warn(
-                        `[APT-PRICE ${jobId}] (${currentIndex}/${targets.length}) No apartment price for PNU: ${target.pnu}`
-                    );
-                    failedEntries.push({ pnu: target.pnu, reason: '공시가격 조회 결과 없음' });
-                } else {
-                    await supabaseService.upsertBuildingExternalRefs(
-                        this.buildApartmentPriceExternalRefs(target.pnu, prices).map((ref) => ({
-                            buildingId: target.buildingId,
-                            ...ref,
-                        }))
-                    );
-
-                    const syncResult = await supabaseService.upsertApartmentOfficialPriceUnits(
-                        target.buildingId,
-                        target.pnu,
-                        prices
-                    );
-
-                    updatedUnitCount += syncResult.upsertedCount;
-                    skippedUnitCount += syncResult.skippedCount;
-                    linkedUserPropertyCount += syncResult.linkedUserPropertyCount;
-                    linkedPropertyUnitCount += syncResult.linkedPropertyUnitCount;
-                    linkSkippedCount += syncResult.linkSkippedCount;
-                    successPnuCount++;
+                if (processedBuildingIds.has(target.buildingId)) {
+                    skippedDuplicateBuildingCount++;
                     logger.debug(
-                        `[APT-PRICE ${jobId}] (${currentIndex}/${targets.length}) Synced apartment units for PNU ${target.pnu}: upserted=${syncResult.upsertedCount}, skipped=${syncResult.skippedCount}, linkedUserProperties=${syncResult.linkedUserPropertyCount}, linkedPropertyUnits=${syncResult.linkedPropertyUnitCount}`
+                        `[APT-PRICE ${jobId}] (${currentIndex}/${targets.length}) Skipped duplicate building target: ${target.buildingId} / ${target.pnu}`
                     );
+                } else {
+                    const resolution = await this.resolveApartmentHousePrices(target, buildingPnuMap);
+
+                    if (resolution.status === 'NO_DATA') {
+                        processedBuildingIds.add(target.buildingId);
+                        logger.warn(
+                            `[APT-PRICE ${jobId}] (${currentIndex}/${targets.length}) No apartment price for PNU: ${target.pnu} (attempted: ${resolution.attemptedPnus.join(', ')})`
+                        );
+                        failedEntries.push({ pnu: target.pnu, reason: '공시가격 조회 결과 없음' });
+                    } else {
+                        processedBuildingIds.add(target.buildingId);
+                        if (resolution.matchedPnu !== target.pnu) {
+                            fallbackSuccessCount++;
+                            logger.info(
+                                `[APT-PRICE ${jobId}] (${currentIndex}/${targets.length}) Apartment price fallback matched: requested=${target.pnu}, matched=${resolution.matchedPnu}`
+                            );
+                        }
+
+                        await supabaseService.upsertBuildingExternalRefs(
+                            this.buildApartmentPriceExternalRefs(resolution.matchedPnu, resolution.prices).map((ref) => ({
+                                buildingId: target.buildingId,
+                                ...ref,
+                                metadata: {
+                                    ...ref.metadata,
+                                    requestedPnu: target.pnu,
+                                    matchedPnu: resolution.matchedPnu,
+                                    attemptedPnus: resolution.attemptedPnus,
+                                },
+                            }))
+                        );
+
+                        const syncResult = await supabaseService.upsertApartmentOfficialPriceUnits(
+                            target.buildingId,
+                            resolution.matchedPnu,
+                            resolution.prices
+                        );
+
+                        updatedUnitCount += syncResult.upsertedCount;
+                        skippedUnitCount += syncResult.skippedCount;
+                        linkedUserPropertyCount += syncResult.linkedUserPropertyCount;
+                        linkedPropertyUnitCount += syncResult.linkedPropertyUnitCount;
+                        linkSkippedCount += syncResult.linkSkippedCount;
+                        successPnuCount++;
+                        logger.debug(
+                            `[APT-PRICE ${jobId}] (${currentIndex}/${targets.length}) Synced apartment units for PNU ${resolution.matchedPnu}: upserted=${syncResult.upsertedCount}, skipped=${syncResult.skippedCount}, linkedUserProperties=${syncResult.linkedUserPropertyCount}, linkedPropertyUnits=${syncResult.linkedPropertyUnitCount}`
+                        );
+                    }
                 }
             } catch (err: any) {
                 logger.warn(
@@ -815,7 +883,7 @@ class GisQueueService {
             const progress = Math.round((job.processedCount / job.totalCount) * 100);
             if (progress % 10 === 0 || job.processedCount === job.totalCount) {
                 logger.info(
-                    `[APT-PRICE ${jobId}] Progress: ${progress}% (${job.processedCount}/${job.totalCount}, success PNU: ${successPnuCount}, upserted units: ${updatedUnitCount}, linked user properties: ${linkedUserPropertyCount})`
+                    `[APT-PRICE ${jobId}] Progress: ${progress}% (${job.processedCount}/${job.totalCount}, success buildings: ${successPnuCount}, fallback: ${fallbackSuccessCount}, upserted units: ${updatedUnitCount}, linked user properties: ${linkedUserPropertyCount})`
                 );
             }
             await supabaseService.updateSyncJobStatus(jobId, 'PROCESSING', progress);
@@ -842,10 +910,12 @@ class GisQueueService {
             linkedUserPropertyCount,
             linkedPropertyUnitCount,
             linkSkippedCount,
+            fallbackSuccessCount,
+            skippedDuplicateBuildingCount,
         };
 
         logger.info(
-            `[APT-PRICE ${jobId}] Completed — success PNU: ${successPnuCount}, failed: ${failedEntries.length}, upserted units: ${updatedUnitCount}, linked user properties: ${linkedUserPropertyCount}, linked property units: ${linkedPropertyUnitCount}`
+            `[APT-PRICE ${jobId}] Completed — success buildings: ${successPnuCount}, fallback: ${fallbackSuccessCount}, skipped duplicates: ${skippedDuplicateBuildingCount}, failed: ${failedEntries.length}, upserted units: ${updatedUnitCount}, linked user properties: ${linkedUserPropertyCount}, linked property units: ${linkedPropertyUnitCount}`
         );
 
         this.updateJobStatus(jobId, {
