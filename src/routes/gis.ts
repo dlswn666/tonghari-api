@@ -259,7 +259,8 @@ router.post('/diagnose-price-api', async (req, res) => {
             const housingPrice = await gisService.getIndividualHousingPrice(pnu, stdrYear);
             results.individual = {
                 status: housingPrice === null ? 'no_data_or_error' : 'ok',
-                price: housingPrice,
+                price: housingPrice?.officialPrice ?? null,
+                data: housingPrice,
             };
         } catch (e: any) {
             results.individual = { status: 'error', message: e.message };

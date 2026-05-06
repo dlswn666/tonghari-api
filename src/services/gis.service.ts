@@ -7,6 +7,37 @@ import { createLogger } from '../utils/logger';
 
 const logger = createLogger('GIS-API');
 
+type BuildingExternalRefSource = 'BUILDING_REGISTER' | 'APART_HOUSING_PRICE' | 'INDIVIDUAL_HOUSING_PRICE';
+
+export interface BuildingExternalRefInfo {
+    source: BuildingExternalRefSource;
+    externalId: string;
+    externalName: string | null;
+    pnu: string | null;
+    metadata: Record<string, unknown>;
+}
+
+export interface ApartmentHouseOfficialPrice {
+    dong: string | null;
+    ho: string | null;
+    area: number | null;
+    officialPrice: number;
+    sourcePnu: string;
+    stdrYear: string;
+    externalId: string | null;
+    externalName: string | null;
+    metadata: Record<string, unknown>;
+}
+
+export interface IndividualHousingOfficialPrice {
+    officialPrice: number;
+    sourcePnu: string;
+    stdrYear: string;
+    externalId: string | null;
+    externalName: string | null;
+    metadata: Record<string, unknown>;
+}
+
 // 시도명 정규화 매핑 (짧은 이름 -> 전체 이름)
 const SIDO_NORMALIZE_MAP: Record<string, string> = {
     // 짧은 형식
@@ -966,6 +997,18 @@ class GisService {
         return Number.isFinite(parsed) ? parsed : null;
     }
 
+    private parseText(value: unknown): string | null {
+        if (value === null || value === undefined) return null;
+        const trimmed = String(value).trim();
+        return trimmed.length > 0 ? trimmed : null;
+    }
+
+    private compactMetadata(input: Record<string, unknown>): Record<string, unknown> {
+        return Object.fromEntries(
+            Object.entries(input).filter(([, value]) => value !== null && value !== undefined && value !== '')
+        );
+    }
+
     private getObjectKeys(value: unknown): string {
         if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
         return Object.keys(value as Record<string, unknown>).join(',');
@@ -1121,12 +1164,10 @@ class GisService {
      * @returns 세대별 공동주택가격 목록 | null(설정/네트워크 오류) | [](데이터 없음)
      */
 
-    async getApartmentHousePrices(pnu: string, stdrYear?: string | number): Promise<Array<{
-        dong: string | null;
-        ho: string | null;
-        area: number | null;
-        officialPrice: number;
-    }> | null> {
+    async getApartmentHousePrices(
+        pnu: string,
+        stdrYear?: string | number
+    ): Promise<ApartmentHouseOfficialPrice[] | null> {
         if (!this.vworldApiKey) {
             logger.debug('VWORLD_API_KEY is not configured for apartment price lookup');
             return null;
@@ -1151,15 +1192,30 @@ class GisService {
                 .map((field) => {
                     const officialPrice = this.parseNumber(field.pblntfPc);
                     if (!officialPrice || officialPrice <= 0) return null;
+                    const effectiveYear = this.parseText(field.stdrYear) ?? String(year);
 
                     return {
-                        dong: field.dongNm ?? null,
-                        ho: field.hoNm ?? null,
+                        dong: this.parseText(field.dongNm),
+                        ho: this.parseText(field.hoNm),
                         area: this.parseNumber(field.prvuseAr),
                         officialPrice: Math.round(officialPrice),
+                        sourcePnu: this.parseText(field.pnu) ?? pnu,
+                        stdrYear: effectiveYear,
+                        externalId: this.parseText(field.aphusCode),
+                        externalName: this.parseText(field.aphusNm),
+                        metadata: this.compactMetadata({
+                            aphusCode: this.parseText(field.aphusCode),
+                            aphusNm: this.parseText(field.aphusNm),
+                            pnu: this.parseText(field.pnu) ?? pnu,
+                            stdrYear: effectiveYear,
+                            stdrMt: this.parseText(field.stdrMt),
+                            prvuseAr: this.parseNumber(field.prvuseAr),
+                            pblntfPc: Math.round(officialPrice),
+                            lastUpdtDt: this.parseText(field.lastUpdtDt),
+                        }),
                     };
                 })
-                .filter((item): item is { dong: string | null; ho: string | null; area: number | null; officialPrice: number } => item !== null);
+                .filter((item): item is ApartmentHouseOfficialPrice => item !== null);
 
             if (prices.length === 0) {
                 logger.warn(`Apartment price response has no valid pblntfPc. Keys: ${Object.keys(fields[0] ?? {}).join(',')}`);
@@ -1183,7 +1239,10 @@ class GisService {
      * @param stdrYear 기준연도. 생략 시 올해 → 전년도 순서로 조회한다.
      * @returns 개별주택공시가격(원) | null
      */
-    async getIndividualHousingPrice(pnu: string, stdrYear?: string | number): Promise<number | null> {
+    async getIndividualHousingPrice(
+        pnu: string,
+        stdrYear?: string | number
+    ): Promise<IndividualHousingOfficialPrice | null> {
         if (!this.vworldApiKey) {
             logger.debug('VWORLD_API_KEY is not configured for individual housing price lookup');
             return null;
@@ -1207,7 +1266,27 @@ class GisService {
             const price = this.parseNumber(field.housePc);
             if (price && price > 0) {
                 logger.info(`Individual housing official price found for PNU ${pnu} (${year}): ${price}`);
-                return Math.round(price);
+                const effectiveYear = this.parseText(field.stdrYear) ?? String(year);
+                return {
+                    officialPrice: Math.round(price),
+                    sourcePnu: this.parseText(field.pnu) ?? pnu,
+                    stdrYear: effectiveYear,
+                    externalId:
+                        this.parseText(field.bildRegstrEsntlNo) ??
+                        this.parseText(field.mgmBldrgstPk) ??
+                        this.parseText(field.bdMgtSn),
+                    externalName: this.parseText(field.bldNm),
+                    metadata: this.compactMetadata({
+                        bildRegstrEsntlNo: this.parseText(field.bildRegstrEsntlNo),
+                        mgmBldrgstPk: this.parseText(field.mgmBldrgstPk),
+                        bdMgtSn: this.parseText(field.bdMgtSn),
+                        pnu: this.parseText(field.pnu) ?? pnu,
+                        stdrYear: effectiveYear,
+                        stdrMt: this.parseText(field.stdrMt),
+                        housePc: Math.round(price),
+                        lastUpdtDt: this.parseText(field.lastUpdtDt),
+                    }),
+                };
             }
 
             logger.warn(`Individual housing price response has no valid housePc. Keys: ${Object.keys(field).join(',')}`);
@@ -1330,6 +1409,7 @@ class GisService {
         buildingName: string | null;
         mainPurpose: string | null;
         floorCount: number;
+        externalRefs: BuildingExternalRefInfo[];
         units: Array<{
             dong: string | null;
             ho: string | null;
@@ -1346,6 +1426,7 @@ class GisService {
             buildingName: null,
             mainPurpose: null,
             floorCount: 0,
+            externalRefs: [] as BuildingExternalRefInfo[],
             units: [] as Array<{ dong: string | null; ho: string | null; floor: number | null; area: number | null }>,
         };
 
@@ -1361,8 +1442,37 @@ class GisService {
             // 첫 번째 표제부 정보 사용 (대표 건물)
             const titleInfo = titleInfoList[0] as Record<string, unknown>;
             const mainPurpose = (titleInfo.mainPurpsCdNm as string) || (titleInfo.etcPurps as string) || null;
-            const buildingName = (titleInfo.bldNm as string) || null;
+            const buildingName = this.parseText(titleInfo.bldNm);
             const floorCount = Number(titleInfo.grndFlrCnt) || 0;
+            const externalRefs = titleInfoList
+                .map((item): BuildingExternalRefInfo | null => {
+                    const title = item as Record<string, unknown>;
+                    const externalId = this.parseText(title.mgmBldrgstPk);
+                    if (!externalId) return null;
+
+                    return {
+                        source: 'BUILDING_REGISTER' as const,
+                        externalId,
+                        externalName: this.parseText(title.bldNm),
+                        pnu,
+                        metadata: this.compactMetadata({
+                            mgmBldrgstPk: externalId,
+                            pnu,
+                            regstrGbCdNm: this.parseText(title.regstrGbCdNm),
+                            regstrKindCdNm: this.parseText(title.regstrKindCdNm),
+                            platPlc: this.parseText(title.platPlc),
+                            newPlatPlc: this.parseText(title.newPlatPlc),
+                            bldNm: this.parseText(title.bldNm),
+                            dongNm: this.parseText(title.dongNm),
+                            mainPurpsCd: this.parseText(title.mainPurpsCd),
+                            mainPurpsCdNm: this.parseText(title.mainPurpsCdNm),
+                            etcPurps: this.parseText(title.etcPurps),
+                            grndFlrCnt: this.parseNumber(title.grndFlrCnt),
+                            useAprDay: this.parseText(title.useAprDay),
+                        }),
+                    };
+                })
+                .filter((item): item is BuildingExternalRefInfo => item !== null);
 
             // 건물 유형 분류
             const buildingType = this.classifyBuildingType(mainPurpose);
@@ -1414,6 +1524,7 @@ class GisService {
                 buildingName,
                 mainPurpose,
                 floorCount,
+                externalRefs,
                 units,
             };
         } catch (error) {

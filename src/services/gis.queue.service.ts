@@ -1,7 +1,12 @@
 import PQueue from 'p-queue';
 import { v4 as uuidv4 } from 'uuid';
 import { env } from '../config/env';
-import { gisService } from './gis.service';
+import {
+    ApartmentHouseOfficialPrice,
+    BuildingExternalRefInfo,
+    gisService,
+    IndividualHousingOfficialPrice,
+} from './gis.service';
 import { supabaseService } from './supabase.service';
 import {
     GisSyncRequest,
@@ -39,6 +44,83 @@ class GisQueueService {
             timeout: 600000, // 10분
         });
         this.jobs = new Map();
+    }
+
+    private buildApartmentPriceExternalRefs(
+        pnu: string,
+        prices: ApartmentHouseOfficialPrice[]
+    ): Array<{
+        source: 'APART_HOUSING_PRICE';
+        externalId: string;
+        externalName: string | null;
+        pnu: string;
+        metadata: Record<string, unknown>;
+    }> {
+        const refs = new Map<
+            string,
+            {
+                source: 'APART_HOUSING_PRICE';
+                externalId: string;
+                externalName: string | null;
+                pnu: string;
+                metadata: Record<string, unknown>;
+            }
+        >();
+
+        for (const price of prices) {
+            if (!price.externalId) continue;
+
+            const sourcePnu = price.sourcePnu || pnu;
+            const key = `${price.externalId}:${sourcePnu}`;
+            const existing = refs.get(key);
+            if (existing) {
+                existing.metadata = {
+                    ...existing.metadata,
+                    unitCount: Number(existing.metadata.unitCount ?? 0) + 1,
+                };
+                continue;
+            }
+
+            refs.set(key, {
+                source: 'APART_HOUSING_PRICE',
+                externalId: price.externalId,
+                externalName: price.externalName,
+                pnu: sourcePnu,
+                metadata: {
+                    ...price.metadata,
+                    requestedPnu: pnu,
+                    unitCount: 1,
+                },
+            });
+        }
+
+        return Array.from(refs.values());
+    }
+
+    private buildIndividualHousingExternalRefs(
+        pnu: string,
+        price: IndividualHousingOfficialPrice
+    ): Array<{
+        source: 'INDIVIDUAL_HOUSING_PRICE';
+        externalId: string;
+        externalName: string | null;
+        pnu: string;
+        metadata: Record<string, unknown>;
+    }> {
+        if (!price.externalId) return [];
+
+        return [
+            {
+                source: 'INDIVIDUAL_HOUSING_PRICE',
+                externalId: price.externalId,
+                externalName: price.externalName,
+                pnu: price.sourcePnu || pnu,
+                metadata: {
+                    ...price.metadata,
+                    requestedPnu: pnu,
+                },
+            },
+        ];
     }
 
     async addSyncJob(request: GisSyncRequest): Promise<GisJobInfo> {
@@ -209,6 +291,7 @@ class GisQueueService {
                     buildingName: string | null;
                     mainPurpose: string | null;
                     floorCount: number;
+                    externalRefs: BuildingExternalRefInfo[];
                     units: Array<{
                         dong: string | null;
                         ho: string | null;
@@ -247,6 +330,10 @@ class GisQueueService {
                         try {
                             const apartmentPrices = await gisService.getApartmentHousePrices(pnu);
                             if (apartmentPrices && apartmentPrices.length > 0) {
+                                buildingInfo.externalRefs = [
+                                    ...buildingInfo.externalRefs,
+                                    ...this.buildApartmentPriceExternalRefs(pnu, apartmentPrices),
+                                ];
                                 const normalize = (v: string | null | undefined): string | null => {
                                     if (v == null) return null;
                                     const trimmed = String(v).trim();
@@ -282,14 +369,18 @@ class GisQueueService {
                     if (buildingInfo.buildingType === 'DETACHED_HOUSE') {
                         try {
                             const housingPrice = await gisService.getIndividualHousingPrice(pnu);
-                            if (housingPrice != null && housingPrice > 0) {
+                            if (housingPrice != null && housingPrice.officialPrice > 0) {
+                                buildingInfo.externalRefs = [
+                                    ...buildingInfo.externalRefs,
+                                    ...this.buildIndividualHousingExternalRefs(pnu, housingPrice),
+                                ];
                                 // 단독주택은 보통 unit이 1개. 전체 unit에 동일 가격 적용.
                                 buildingInfo.units = buildingInfo.units.map((unit) => ({
                                     ...unit,
-                                    officialPrice: housingPrice,
+                                    officialPrice: housingPrice.officialPrice,
                                 }));
                                 logger.info(
-                                    `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Individual housing price for ${pnu}: ${housingPrice.toLocaleString()}원`
+                                    `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Individual housing price for ${pnu}: ${housingPrice.officialPrice.toLocaleString()}원`
                                 );
                             }
                         } catch (housingPriceError: any) {
@@ -578,6 +669,13 @@ class GisQueueService {
                     );
                     failedEntries.push({ pnu: target.pnu, reason: '공시가격 조회 결과 없음' });
                 } else {
+                    await supabaseService.upsertBuildingExternalRefs(
+                        this.buildApartmentPriceExternalRefs(target.pnu, prices).map((ref) => ({
+                            buildingId: target.buildingId,
+                            ...ref,
+                        }))
+                    );
+
                     // 각 (dong, ho) 결과를 building_units에 갱신
                     for (const entry of prices) {
                         const updated = await supabaseService.updateBuildingUnitPrice(
@@ -748,15 +846,22 @@ class GisQueueService {
                     );
                     failedEntries.push({ pnu: target.pnu, reason: '개별주택가격 조회 결과 없음' });
                 } else {
+                    await supabaseService.upsertBuildingExternalRefs(
+                        this.buildIndividualHousingExternalRefs(target.pnu, price).map((ref) => ({
+                            buildingId: target.buildingId,
+                            ...ref,
+                        }))
+                    );
+
                     const updatedCount = await supabaseService.updateBuildingUnitsPriceByBuildingId(
                         target.buildingId,
-                        price
+                        price.officialPrice
                     );
                     if (updatedCount > 0) {
                         successPnuCount++;
                         updatedUnitCount += updatedCount;
                         logger.debug(
-                            `[INDVD-HOUSE-PRICE ${jobId}] (${currentIndex}/${targets.length}) Updated building ${target.buildingId}: ${price} (${updatedCount} units)`
+                            `[INDVD-HOUSE-PRICE ${jobId}] (${currentIndex}/${targets.length}) Updated building ${target.buildingId}: ${price.officialPrice} (${updatedCount} units)`
                         );
                     } else {
                         failedEntries.push({ pnu: target.pnu, reason: 'DB 갱신 대상 unit 없음' });

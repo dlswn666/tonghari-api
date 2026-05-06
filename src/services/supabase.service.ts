@@ -6,6 +6,21 @@ import { createLogger } from '../utils/logger';
 
 const logger = createLogger('SUPABASE');
 
+type BuildingExternalRefSource =
+    | 'BUILDING_REGISTER'
+    | 'APART_HOUSING_PRICE'
+    | 'INDIVIDUAL_HOUSING_PRICE'
+    | 'ROAD_ADDRESS';
+
+interface BuildingExternalRefInput {
+    buildingId: string;
+    source: BuildingExternalRefSource;
+    externalId: string | null | undefined;
+    externalName?: string | null;
+    pnu?: string | null;
+    metadata?: Record<string, unknown>;
+}
+
 /**
  * Supabase 서비스
  * - Vault에서 Sender Key 조회
@@ -487,6 +502,159 @@ class SupabaseService {
     }
 
     /**
+     * 공공 API가 제공한 건물 외부 식별자와 공식명을 저장
+     */
+    async upsertBuildingExternalRef(input: BuildingExternalRefInput): Promise<boolean> {
+        const externalId = input.externalId?.trim();
+        if (!externalId) return false;
+
+        const pnu = input.pnu?.trim() || null;
+        const externalName = input.externalName?.trim() || null;
+        const now = new Date().toISOString();
+
+        try {
+            let lookup = this.client
+                .from('building_external_refs')
+                .select('building_id')
+                .eq('source', input.source)
+                .eq('external_id', externalId);
+
+            lookup = pnu ? lookup.eq('pnu', pnu) : lookup.is('pnu', null);
+            const { data: existingRef, error: lookupError } = await lookup.maybeSingle();
+
+            if (lookupError) {
+                logger.warn(
+                    `building_external_refs lookup failed (${input.source}/${externalId}/${pnu ?? 'no-pnu'}): ${lookupError.message}`
+                );
+            } else if (existingRef && existingRef.building_id !== input.buildingId) {
+                logger.warn(
+                    `building_external_refs remapped (${input.source}/${externalId}/${pnu ?? 'no-pnu'}): ${existingRef.building_id} -> ${input.buildingId}`
+                );
+            }
+
+            const { error } = await this.client.from('building_external_refs').upsert(
+                {
+                    building_id: input.buildingId,
+                    source: input.source,
+                    external_id: externalId,
+                    external_name: externalName,
+                    pnu,
+                    metadata: input.metadata ?? {},
+                    last_seen_at: now,
+                    updated_at: now,
+                },
+                { onConflict: 'source,external_id,pnu' }
+            );
+
+            if (error) {
+                logger.warn(
+                    `building_external_refs upsert failed (${input.source}/${externalId}/${pnu ?? 'no-pnu'}): ${error.message}`
+                );
+                return false;
+            }
+
+            await this.adoptOfficialBuildingNameIfStable({
+                buildingId: input.buildingId,
+                source: input.source,
+                externalName,
+            });
+            return true;
+        } catch (error) {
+            logger.error(`building_external_refs upsert error (${input.source}/${externalId})`, error);
+            return false;
+        }
+    }
+
+    async upsertBuildingExternalRefs(inputs: BuildingExternalRefInput[]): Promise<void> {
+        for (const input of inputs) {
+            await this.upsertBuildingExternalRef(input);
+        }
+    }
+
+    /**
+     * 공동주택/개별주택 가격 API 공식명이 안정적으로 하나일 때만 대표 건물명으로 반영
+     */
+    private async adoptOfficialBuildingNameIfStable(input: {
+        buildingId: string;
+        source: BuildingExternalRefSource;
+        externalName: string | null;
+    }): Promise<void> {
+        if (!input.externalName || !['APART_HOUSING_PRICE', 'INDIVIDUAL_HOUSING_PRICE'].includes(input.source)) {
+            return;
+        }
+
+        try {
+            const { data: mappings, error: mappingError } = await this.client
+                .from('building_land_lots')
+                .select('pnu')
+                .eq('building_id', input.buildingId);
+
+            if (mappingError) {
+                logger.warn(`building_land_lots lookup failed for official name adoption: ${mappingError.message}`);
+                return;
+            }
+
+            if ((mappings?.length ?? 0) > 1) {
+                logger.info(
+                    `Official building name adoption skipped for multi-lot building ${input.buildingId}: ${input.externalName}`
+                );
+                return;
+            }
+
+            const { data: refs, error: refsError } = await this.client
+                .from('building_external_refs')
+                .select('external_name')
+                .eq('building_id', input.buildingId)
+                .eq('source', input.source);
+
+            if (refsError) {
+                logger.warn(`building_external_refs name check failed: ${refsError.message}`);
+                return;
+            }
+
+            const names = new Set(
+                (refs ?? [])
+                    .map((ref: { external_name: string | null }) => ref.external_name?.trim())
+                    .filter((name: string | undefined): name is string => Boolean(name))
+            );
+
+            if (names.size > 1) {
+                logger.warn(
+                    `Official building name conflict for ${input.buildingId}: ${Array.from(names).join(', ')}`
+                );
+                return;
+            }
+
+            const { data: building, error: buildingError } = await this.client
+                .from('buildings')
+                .select('building_name')
+                .eq('id', input.buildingId)
+                .single();
+
+            if (buildingError) {
+                logger.warn(`buildings lookup failed for official name adoption: ${buildingError.message}`);
+                return;
+            }
+
+            if (building?.building_name === input.externalName) return;
+
+            const { error: updateError } = await this.client
+                .from('buildings')
+                .update({
+                    building_name: input.externalName,
+                    updated_at: new Date().toISOString(),
+                })
+                .eq('id', input.buildingId);
+
+            if (updateError) {
+                logger.warn(`buildings official name update failed (${input.buildingId}): ${updateError.message}`);
+            }
+        } catch (error) {
+            logger.error(`Official building name adoption error (${input.buildingId})`, error);
+        }
+    }
+
+    /**
      * 세대(동/호수) 정보 UPSERT (building_units 테이블)
      * 기존 세대는 유지하고 새 세대만 추가
      */
@@ -553,6 +721,13 @@ class SupabaseService {
             buildingName?: string | null;
             mainPurpose?: string | null;
             floorCount?: number;
+            externalRefs?: Array<{
+                source: BuildingExternalRefSource;
+                externalId: string;
+                externalName?: string | null;
+                pnu?: string | null;
+                metadata?: Record<string, unknown>;
+            }>;
             units: Array<{
                 dong?: string | null;
                 ho?: string | null;
@@ -576,6 +751,19 @@ class SupabaseService {
             if (!buildingId) {
                 logger.error(`Failed to save building for PNU: ${pnu}`);
                 return false;
+            }
+
+            if (buildingInfo.externalRefs && buildingInfo.externalRefs.length > 0) {
+                await this.upsertBuildingExternalRefs(
+                    buildingInfo.externalRefs.map((ref) => ({
+                        buildingId,
+                        source: ref.source,
+                        externalId: ref.externalId,
+                        externalName: ref.externalName,
+                        pnu: ref.pnu ?? pnu,
+                        metadata: ref.metadata,
+                    }))
+                );
             }
 
             // 2. 세대 정보 저장
