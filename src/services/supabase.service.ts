@@ -33,6 +33,15 @@ interface ApartmentOfficialPriceUnitInput {
     metadata: Record<string, unknown>;
 }
 
+interface IndividualHousingOfficialPriceInput {
+    officialPrice: number;
+    sourcePnu: string;
+    stdrYear: string;
+    externalId: string | null;
+    externalName: string | null;
+    metadata: Record<string, unknown>;
+}
+
 interface BuildingUnitMatchRow {
     id: string;
     dong: string | null;
@@ -704,7 +713,21 @@ class SupabaseService {
         units: BuildingUnitMatchRow[]
     ): BuildingUnitMatchRow | null {
         const candidateHo = this.normalizeHoForMatch(candidate.ho);
-        if (!candidateHo) return null;
+
+        // 단독주택 fallback: candidate.ho가 없고, 후보 풀의 unit이 단 1건이며
+        // 그 unit도 dong/ho 둘 다 비어있으면 1:1 매칭으로 본다.
+        if (!candidateHo) {
+            const candidateDongNorm = this.normalizeDongForMatch(candidate.dong, candidate.building_name);
+            if (units.length === 1) {
+                const sole = units[0];
+                const soleDongNorm = this.normalizeDongForMatch(sole.dong);
+                const soleHoNorm = this.normalizeHoForMatch(sole.ho);
+                if (!soleHoNorm && (!candidateDongNorm || !soleDongNorm || candidateDongNorm === soleDongNorm)) {
+                    return sole;
+                }
+            }
+            return null;
+        }
 
         const hoMatches = units.filter((unit) => this.isHoMatch(candidate.ho, unit.ho, unit.dong));
         if (hoMatches.length === 0) return null;
@@ -745,6 +768,26 @@ class SupabaseService {
                 aphusName: price.externalName,
                 stdrYear: price.stdrYear,
                 area: price.area,
+                officialPrice: price.officialPrice,
+            },
+        };
+    }
+
+    private buildIndividualHousingPriceMetadata(
+        existingMetadata: Record<string, unknown> | null | undefined,
+        price: IndividualHousingOfficialPriceInput,
+        requestedPnu: string
+    ): Record<string, unknown> {
+        return {
+            ...(existingMetadata ?? {}),
+            officialPrice: {
+                ...(price.metadata ?? {}),
+                source: 'INDIVIDUAL_HOUSING_PRICE',
+                requestedPnu,
+                sourcePnu: price.sourcePnu,
+                aphusCode: price.externalId,
+                aphusName: price.externalName,
+                stdrYear: price.stdrYear,
                 officialPrice: price.officialPrice,
             },
         };
@@ -1418,25 +1461,98 @@ class SupabaseService {
     /**
      * building_units.official_price 건물 단위 일괄 갱신 (개별주택가격 재동기화용, 2026-05)
      * 단독/다가구 주택은 세대 구분 없이 같은 개별주택가격을 연결된 unit 전체에 적용한다.
+     * 가격뿐 아니라 stdrYear/aphusCode/sourcePnu/source_metadata 등 메타데이터를 함께 갱신한다.
      */
-    async updateBuildingUnitsPriceByBuildingId(buildingId: string, price: number): Promise<number> {
+    async updateBuildingUnitsOfficialPriceByBuildingId(
+        buildingId: string,
+        price: IndividualHousingOfficialPriceInput,
+        requestedPnu: string
+    ): Promise<{ updatedCount: number; updatedUnitIds: string[] }> {
         try {
-            const { data, error } = await this.client
-                .from('building_units')
-                .update({ official_price: price })
-                .eq('building_id', buildingId)
-                .select('id');
+            const now = new Date().toISOString();
 
-            if (error) {
-                logger.warn(`updateBuildingUnitsPriceByBuildingId failed (building: ${buildingId}): ${error.message}`);
-                return 0;
+            const { data: existing, error: lookupError } = await this.client
+                .from('building_units')
+                .select('id, source_metadata')
+                .eq('building_id', buildingId);
+
+            if (lookupError) {
+                logger.warn(
+                    `building_units lookup failed for individual housing price update (building: ${buildingId}): ${lookupError.message}`
+                );
+                return { updatedCount: 0, updatedUnitIds: [] };
             }
 
-            return data?.length ?? 0;
+            const rows = (existing ?? []) as Array<{ id: string; source_metadata: Record<string, unknown> | null }>;
+            if (rows.length === 0) return { updatedCount: 0, updatedUnitIds: [] };
+
+            const updatedUnitIds: string[] = [];
+            for (const row of rows) {
+                const { error: updateError } = await this.client
+                    .from('building_units')
+                    .update({
+                        official_price: price.officialPrice,
+                        official_price_aphus_code: price.externalId,
+                        official_price_year: price.stdrYear,
+                        official_price_pnu: price.sourcePnu || requestedPnu,
+                        official_price_updated_at: now,
+                        updated_at: now,
+                        source_metadata: this.buildIndividualHousingPriceMetadata(row.source_metadata, price, requestedPnu),
+                    })
+                    .eq('id', row.id);
+
+                if (updateError) {
+                    logger.warn(
+                        `building_units individual housing price update failed (building: ${buildingId}, unit: ${row.id}): ${updateError.message}`
+                    );
+                    continue;
+                }
+                updatedUnitIds.push(row.id);
+            }
+
+            return { updatedCount: updatedUnitIds.length, updatedUnitIds };
         } catch (error) {
-            logger.error(`updateBuildingUnitsPriceByBuildingId error (building: ${buildingId})`, error);
-            return 0;
+            logger.error(
+                `updateBuildingUnitsOfficialPriceByBuildingId error (building: ${buildingId})`,
+                error
+            );
+            return { updatedCount: 0, updatedUnitIds: [] };
         }
+    }
+
+    /**
+     * 개별주택 building에 대한 후속 link 처리 — building_units가 단독주택(unit 1건+dong/ho null)이면
+     * 단독주택 fallback 매칭으로 user_property_units / property_units 의 building_unit_id 채움.
+     */
+    async linkPropertyUnitsForIndividualHousing(
+        buildingId: string,
+        updatedUnitIds: string[]
+    ): Promise<{ linkedUserCount: number; linkedPropertyCount: number }> {
+        if (updatedUnitIds.length === 0) {
+            return { linkedUserCount: 0, linkedPropertyCount: 0 };
+        }
+
+        const pnus = await this.listBuildingPnus(buildingId);
+        if (pnus.length === 0) return { linkedUserCount: 0, linkedPropertyCount: 0 };
+
+        const { data: unitRows, error: unitError } = await this.client
+            .from('building_units')
+            .select('id, dong, ho, official_price')
+            .in('id', updatedUnitIds);
+
+        if (unitError) {
+            logger.warn(`building_units fetch for individual housing link failed: ${unitError.message}`);
+            return { linkedUserCount: 0, linkedPropertyCount: 0 };
+        }
+
+        const units = ((unitRows ?? []) as BuildingUnitMatchRow[]);
+
+        const userResult = await this.linkUserPropertyUnitsToBuildingUnits(pnus, units);
+        const propertyResult = await this.linkPropertyUnitsToBuildingUnits(pnus, units);
+        return {
+            linkedUserCount: userResult.linkedCount,
+            linkedPropertyCount: propertyResult.linkedCount,
+        };
     }
 
     /**

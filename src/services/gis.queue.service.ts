@@ -1099,10 +1099,12 @@ class GisQueueService {
                             }))
                         );
 
-                        const updatedCount = await supabaseService.updateBuildingUnitsPriceByBuildingId(
-                            target.buildingId,
-                            price.officialPrice
-                        );
+                        const { updatedCount, updatedUnitIds } =
+                            await supabaseService.updateBuildingUnitsOfficialPriceByBuildingId(
+                                target.buildingId,
+                                price,
+                                target.pnu
+                            );
                         if (updatedCount > 0) {
                             successPnuCount++;
                             updatedBuildingIds.add(target.buildingId);
@@ -1110,6 +1112,17 @@ class GisQueueService {
                             logger.debug(
                                 `[INDVD-HOUSE-PRICE ${jobId}] (${currentIndex}/${targets.length}) Updated building ${target.buildingId}: ${price.officialPrice} (${updatedCount} units)`
                             );
+
+                            // 단독주택 후속 link — user_property_units / property_units → building_unit_id 채움
+                            const linkResult = await supabaseService.linkPropertyUnitsForIndividualHousing(
+                                target.buildingId,
+                                updatedUnitIds
+                            );
+                            if (linkResult.linkedUserCount > 0 || linkResult.linkedPropertyCount > 0) {
+                                logger.debug(
+                                    `[INDVD-HOUSE-PRICE ${jobId}] (${currentIndex}/${targets.length}) Linked building ${target.buildingId}: upu=${linkResult.linkedUserCount}, pu=${linkResult.linkedPropertyCount}`
+                                );
+                            }
                         } else {
                             diagnosticBuildingIds.add(target.buildingId);
                             failedEntries.push({
