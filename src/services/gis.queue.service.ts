@@ -481,17 +481,32 @@ class GisQueueService {
                                     ...buildingInfo.externalRefs,
                                     ...this.buildApartmentPriceExternalRefs(pnu, apartmentPrices),
                                 ];
-                                const normalize = (v: string | null | undefined): string | null => {
+                                // 동/호 정규화 — 건축물대장(BldRgstHubService)과 VWorld 공시가격 API의
+                                // 표기 차이(지층/지하/패딩/접미사) 흡수
+                                const normalizeDong = (v: string | null | undefined): string | null => {
                                     if (v == null) return null;
-                                    const trimmed = String(v).trim();
-                                    return trimmed.length === 0 ? null : trimmed;
+                                    let t = String(v).trim().replace(/동$/, '');
+                                    t = t.replace(/^0+(\d)/, '$1'); // 앞 0 제거
+                                    return t.length === 0 ? null : t;
+                                };
+                                const normalizeHo = (v: string | null | undefined): string | null => {
+                                    if (v == null) return null;
+                                    let t = String(v).trim().replace(/호$/, '');
+                                    // 지층/지하 → B 접두사 통일
+                                    if (/^(지층|지하|B-?)/i.test(t)) {
+                                        const digits = t.replace(/[^\d]/g, '');
+                                        return 'B' + (digits || '1');
+                                    }
+                                    // 앞 0 제거 (예: '01' → '1', '101' 그대로)
+                                    t = t.replace(/^0+(\d)/, '$1');
+                                    return t.length === 0 ? null : t;
                                 };
                                 buildingInfo.units = buildingInfo.units.map((unit) => {
-                                    const uDong = normalize(unit.dong);
-                                    const uHo = normalize(unit.ho);
+                                    const uDong = normalizeDong(unit.dong);
+                                    const uHo = normalizeHo(unit.ho);
                                     const match = apartmentPrices.find((p) => {
-                                        const pDong = normalize(p.dong);
-                                        const pHo = normalize(p.ho);
+                                        const pDong = normalizeDong(p.dong);
+                                        const pHo = normalizeHo(p.ho);
                                         return pDong === uDong && pHo === uHo;
                                     });
                                     return match ? { ...unit, officialPrice: match.officialPrice } : unit;

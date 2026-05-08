@@ -1519,12 +1519,16 @@ class GisService {
             }
 
             // 단독주택인 경우 세대 정보가 없으면 단일 세대로 처리
+            // 표제부의 totlAr(연면적) 또는 archArea(건축면적)을 단일 unit area로 사용
+            // (전유부 응답이 없는 단독건물의 면적 누락 방지)
             if (units.length === 0 && buildingType !== 'NONE') {
+                const fallbackArea =
+                    this.parseNumber(titleInfo.totlAr) ?? this.parseNumber(titleInfo.archArea) ?? null;
                 units.push({
                     dong: null,
                     ho: null,
                     floor: null,
-                    area: null,
+                    area: fallbackArea,
                 });
             }
 
