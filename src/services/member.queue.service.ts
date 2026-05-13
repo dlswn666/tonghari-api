@@ -389,13 +389,77 @@ class MemberQueueService {
         // ========================================
         // 2단계: 동일인 그룹핑 + DB 저장 (0-100%)
         // 이름+거주지(필수) + 생년월일+전화번호(선택) 기준으로 동일인 판별
-        // 1 user + N property_units 구조로 저장
+        // 1 user + N property_units 구조로 저장 (다물건자 자연 표현)
+        //
+        // ★ 동일인 판별 룰 (2026-05 개편):
+        //   1) 업로드 배치 내부 그룹핑: groupByPerson()
+        //   2) 같은 union 의 기존 active user 와 글로벌 매칭:
+        //      - 자연인: (이름+거주지) OR (이름+전화) 일치
+        //      - 법인:   (이름+거주지) 일치 (사업자번호 컬럼 추가 시 우선)
+        //      - 매칭 시 user 재사용, user_property_units 만 추가 → 1 user = N property
+        //      - 미매칭 시 새 user 생성
         // ========================================
         logger.info(`[Pre-Register ${jobId}] Phase 2: Grouping + DB Insert`);
 
-        // 동일인 그룹핑
+        // 동일인 그룹핑 (배치 내부)
         const personGroups = this.groupByPerson(matchedMembers);
         logger.info(`[Pre-Register ${jobId}] Grouped ${matchedMembers.length} rows into ${personGroups.length} persons`);
+
+        // 글로벌 매칭용: union 의 기존 active user 캐시 로드
+        const { data: existingUsersData } = await client
+            .from('users')
+            .select('id, name, phone_number, birth_date, resident_address')
+            .eq('union_id', request.unionId)
+            .in('user_status', ['APPROVED', 'PRE_REGISTERED']);
+
+        interface ExistingUser {
+            id: string;
+            name: string;
+            phone_number: string | null;
+            birth_date: string | null;
+            resident_address: string | null;
+        }
+
+        const existingUsers: ExistingUser[] = (existingUsersData || []) as ExistingUser[];
+
+        const normalizeName = (n?: string | null) => (n || '').replace(/\s+/g, '').trim();
+        const normalizeAddr = (a?: string | null) => (a || '').replace(/\s+/g, ' ').trim();
+        const normalizePhone = (p?: string | null) => (p || '').replace(/[^0-9]/g, '');
+
+        // 이름 기반 인덱스 (소문자/공백 제거)
+        const byName = new Map<string, ExistingUser[]>();
+        for (const u of existingUsers) {
+            const key = normalizeName(u.name);
+            if (!key) continue;
+            if (!byName.has(key)) byName.set(key, []);
+            byName.get(key)!.push(u);
+        }
+
+        const findExistingPerson = (
+            name: string,
+            addr: string | null,
+            phone: string | null,
+            birth: string | null
+        ): ExistingUser | null => {
+            const key = normalizeName(name);
+            const candidates = byName.get(key);
+            if (!candidates || candidates.length === 0) return null;
+            const nAddr = normalizeAddr(addr);
+            const nPhone = normalizePhone(phone);
+            for (const u of candidates) {
+                const cAddr = normalizeAddr(u.resident_address);
+                const cPhone = normalizePhone(u.phone_number);
+                // 자연인 충돌 회피: 생년월일 양쪽 다 있고 다르면 다른 사람
+                if (birth && u.birth_date && birth !== u.birth_date) continue;
+                // 전화번호 양쪽 다 있고 다르면 다른 사람
+                if (nPhone && cPhone && nPhone !== cPhone) continue;
+                // 일치 조건: 거주지 일치(8자 초과) 또는 전화 일치
+                const addrMatch = !!nAddr && !!cAddr && nAddr === cAddr && nAddr.length > 8;
+                const phoneMatch = !!nPhone && nPhone === cPhone;
+                if (addrMatch || phoneMatch) return u;
+            }
+            return null;
+        };
 
         let processedRowCount = 0;
 
@@ -408,74 +472,78 @@ class MemberQueueService {
                 const bestResidentAddress = group.find((m) => m.row.residentAddress)?.row.residentAddress || null;
                 const bestNotes = group.find((m) => m.row.notes)?.row.notes || null;
 
+                // ★ 글로벌 동일인 검색 (union 내 기존 user)
+                const existingPerson = findExistingPerson(
+                    firstRow.name,
+                    bestResidentAddress,
+                    bestPhone,
+                    bestBirthDate
+                );
+
+                let userId: string = '';
+                let isReusedUser = false;
+
+                if (existingPerson) {
+                    // 동일인 발견 → 기존 user 재사용 (다물건자 추가 property)
+                    userId = existingPerson.id;
+                    isReusedUser = true;
+
+                    // 누락된 개인정보가 있으면 채우기
+                    const updates: Record<string, unknown> = {};
+                    if (!existingPerson.phone_number && bestPhone) updates.phone_number = bestPhone;
+                    if (!existingPerson.birth_date && bestBirthDate) updates.birth_date = bestBirthDate;
+                    if (!existingPerson.resident_address && bestResidentAddress) updates.resident_address = bestResidentAddress;
+                    if (Object.keys(updates).length > 0) {
+                        await client.from('users').update(updates).eq('id', userId);
+                    }
+                    duplicateCount++;
+                    logger.debug(
+                        `[Pre-Register ${jobId}] Reused existing user ${userId} for ${firstRow.name} (다물건자)`
+                    );
+                }
+
                 // 그룹 내 각 물건지별 PNU 중복 체크 → 통과한 것만 저장
                 const validMembers: MatchedMember[] = [];
 
-                for (const member of group) {
-                    const normalizedDong = this.normalizeDong(member.row.dong);
-                    const normalizedHo = this.normalizeHo(member.row.ho);
-
-                    if (member.pnu) {
-                        const duplicateResult = await this.checkDuplicatePnu(
-                            client,
-                            request.unionId,
-                            member.pnu,
-                            normalizedDong,
-                            normalizedHo,
-                            member.row.name
-                        );
-
-                        if (duplicateResult.isDuplicate && duplicateResult.existingUserId) {
-                            // BUG-012: 이름 또는 전화번호가 같으면 동일인으로 판단
-                            const nameMatch = duplicateResult.existingUserName?.trim() === member.row.name.trim();
-                            const phoneMatch = duplicateResult.existingPhoneNumber &&
-                                member.row.phoneNumber &&
-                                duplicateResult.existingPhoneNumber.replace(/-/g, '') === member.row.phoneNumber.replace(/-/g, '');
-                            const isSamePersonAsExisting = nameMatch || phoneMatch;
-
-                            if (isSamePersonAsExisting) {
-                                // 기존 DB 사용자와 동일인 → 기존 정보 업데이트
-                                const { error: updateError } = await client
-                                    .from('users')
-                                    .update({
-                                        name: member.row.name,
-                                        phone_number: bestPhone,
-                                        birth_date: bestBirthDate,
-                                        resident_address: bestResidentAddress,
-                                        notes: bestNotes,
-                                    })
-                                    .eq('id', duplicateResult.existingUserId);
-
-                                if (updateError) {
-                                    errors.push(`${member.row.name}: 업데이트 실패 - ${updateError.message}`);
-                                } else {
-                                    if (duplicateResult.existingPropertyUnitId) {
-                                        await client
-                                            .from('user_property_units')
-                                            .update({
-                                                property_address_jibun: member.row.propertyAddress || null,
-                                                property_address_road: member.row.propertyAddressRoad || null,
-                                                building_name: member.row.buildingName || null,
-                                                dong: normalizedDong,
-                                                ho: normalizedHo,
-                                                land_area: this.sanitizeNumeric(member.row.landArea),
-                                                land_ownership_ratio: this.sanitizeNumeric(member.row.landOwnershipRatio),
-                                                building_area: this.sanitizeNumeric(member.row.buildingArea),
-                                                building_ownership_ratio: this.sanitizeNumeric(
-                                                    member.row.buildingOwnershipRatio
-                                                ),
-                                            })
-                                            .eq('id', duplicateResult.existingPropertyUnitId);
-                                    }
-                                    updatedCount++;
-                                    duplicateCount++;
-                                }
-                                continue;
-                            }
-                            // 공동 소유자는 별도 레코드로 진행
+                if (!isReusedUser) {
+                    // 새 user 경로는 PNU 중복 체크 불필요 (다른 user 의 PNU 와 충돌 가능성 낮음)
+                    validMembers.push(...group);
+                } else {
+                    // 재사용 user 경로: 같은 user 의 동일 PNU+동/호 중복 회피
+                    for (const member of group) {
+                        if (!member.pnu) {
+                            validMembers.push(member);
+                            continue;
+                        }
+                        const normalizedDong = this.normalizeDong(member.row.dong);
+                        const normalizedHo = this.normalizeHo(member.row.ho);
+                        const { data: existingUpu } = await client
+                            .from('user_property_units')
+                            .select('id')
+                            .eq('user_id', userId)
+                            .eq('pnu', member.pnu)
+                            .or(`dong.eq.${normalizedDong || ''},dong.is.null`)
+                            .or(`ho.eq.${normalizedHo || ''},ho.is.null`)
+                            .maybeSingle();
+                        if (existingUpu) {
+                            // 이미 같은 user 가 이 호수 보유 → 정보만 업데이트
+                            await client
+                                .from('user_property_units')
+                                .update({
+                                    property_address_jibun: member.row.propertyAddress || null,
+                                    property_address_road: member.row.propertyAddressRoad || null,
+                                    building_name: member.row.buildingName || null,
+                                    land_area: this.sanitizeNumeric(member.row.landArea),
+                                    land_ownership_ratio: this.sanitizeNumeric(member.row.landOwnershipRatio),
+                                    building_area: this.sanitizeNumeric(member.row.buildingArea),
+                                    building_ownership_ratio: this.sanitizeNumeric(member.row.buildingOwnershipRatio),
+                                })
+                                .eq('id', existingUpu.id);
+                            updatedCount++;
+                        } else {
+                            validMembers.push(member);
                         }
                     }
-                    validMembers.push(member);
                 }
 
                 processedRowCount += group.length;
@@ -493,34 +561,48 @@ class MemberQueueService {
                     continue;
                 }
 
-                // 1 user 생성
-                const userId = uuidv4();
+                // 신규 user 생성 (재사용 아닌 경우만)
+                if (!isReusedUser) {
+                    userId = uuidv4();
 
-                const { error: userError } = await client.from('users').insert({
-                    id: userId,
-                    name: firstRow.name,
-                    phone_number: bestPhone,
-                    birth_date: bestBirthDate,
-                    email: null,
-                    role: 'USER',
-                    union_id: request.unionId,
-                    user_status: 'PRE_REGISTERED',
-                    resident_address: bestResidentAddress,
-                    notes: bestNotes,
-                });
+                    const { error: userError } = await client.from('users').insert({
+                        id: userId,
+                        name: firstRow.name,
+                        phone_number: bestPhone,
+                        birth_date: bestBirthDate,
+                        email: null,
+                        role: 'USER',
+                        union_id: request.unionId,
+                        user_status: 'PRE_REGISTERED',
+                        resident_address: bestResidentAddress,
+                        notes: bestNotes,
+                    });
 
-                if (userError) {
-                    errors.push(`${firstRow.name}: ${userError.message}`);
-                    // 진행률 업데이트
-                    const progress = Math.round((processedRowCount / totalCount) * 100);
-                    this.updateJobStatus(jobId, { processedCount: processedRowCount });
-                    if (progress % 5 === 0 || processedRowCount === totalCount) {
-                        await supabaseService.updateSyncJobStatus(jobId, 'PROCESSING', progress, undefined, {
-                            job_type: 'PRE_REGISTER', phase: 'SAVING',
-                            matchedCount, unmatchedCount, savedCount, updatedCount, duplicateCount, totalCount,
-                        });
+                    if (userError) {
+                        errors.push(`${firstRow.name}: ${userError.message}`);
+                        const progress = Math.round((processedRowCount / totalCount) * 100);
+                        this.updateJobStatus(jobId, { processedCount: processedRowCount });
+                        if (progress % 5 === 0 || processedRowCount === totalCount) {
+                            await supabaseService.updateSyncJobStatus(jobId, 'PROCESSING', progress, undefined, {
+                                job_type: 'PRE_REGISTER', phase: 'SAVING',
+                                matchedCount, unmatchedCount, savedCount, updatedCount, duplicateCount, totalCount,
+                            });
+                        }
+                        continue;
                     }
-                    continue;
+
+                    // 캐시에 추가 → 같은 배치 내 후속 그룹이 동일인이면 재사용됨
+                    const newUser: ExistingUser = {
+                        id: userId,
+                        name: firstRow.name,
+                        phone_number: bestPhone,
+                        birth_date: bestBirthDate,
+                        resident_address: bestResidentAddress,
+                    };
+                    existingUsers.push(newUser);
+                    const k = normalizeName(firstRow.name);
+                    if (!byName.has(k)) byName.set(k, []);
+                    byName.get(k)!.push(newUser);
                 }
 
                 // N property_units 생성 (첫 번째만 is_primary)
