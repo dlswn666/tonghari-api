@@ -17,6 +17,36 @@ import { createLogger } from '../utils/logger';
 const logger = createLogger('MEMBER-QUEUE');
 
 /**
+ * 법인 / 국가기관 의심 이름 패턴.
+ * 같은 이름이면 한 entity 로 간주 — 전화/거주지/생년월일이 없어도 매칭.
+ * 도시정비법상 같은 토지등소유자(법인 또는 지자체)는 부동산 수만큼 별도 user 로
+ * 등록되면 안 되므로, 업로드 시 dedup 룰을 자연인보다 느슨하게 적용한다.
+ *
+ * 향후 PreRegisterData 에 businessRegistrationNo 가 추가되면 사업자번호를
+ * 우선 키로 사용하도록 확장.
+ */
+const LEGAL_GOV_PATTERNS: RegExp[] = [
+    /주식회사/,
+    /\(주\)/,
+    /유한회사/,
+    /합자회사/,
+    /^(강북구|성북구|도봉구|노원구|중랑구|동대문구|성동구|광진구|용산구|중구|종로구|서대문구|마포구|은평구|강서구|양천구|구로구|영등포구|동작구|관악구|서초구|강남구|송파구|강동구|금천구)$/,
+    /^(서울특별시|부산광역시|대구광역시|인천광역시|광주광역시|대전광역시|울산광역시|세종특별자치시)$/,
+    /^(서울주택도시공사|한국토지주택공사|대한주택공사|국가|대한민국)$/,
+    /구청$/,
+    /시청$/,
+    /도청$/,
+    /국토교통부$/,
+    /기획재정부$/,
+];
+
+function isLegalOrGovEntity(name: string): boolean {
+    const trimmed = (name || '').trim();
+    if (!trimmed) return false;
+    return LEGAL_GOV_PATTERNS.some((re) => re.test(trimmed));
+}
+
+/**
  * 조합원 대량 처리 큐 서비스
  *
  * - MEMBER_INVITE_SYNC: 조합원 초대 동기화 (member_invites 테이블)
@@ -446,6 +476,12 @@ class MemberQueueService {
             if (!candidates || candidates.length === 0) return null;
             const nAddr = normalizeAddr(addr);
             const nPhone = normalizePhone(phone);
+            // 법인/국가기관: 같은 이름이면 동일 entity 로 매칭 (전화/거주지 없어도 OK).
+            // 부동산 수만큼 user 가 중복 생성되는 것을 방지.
+            // (향후 사업자번호 컬럼이 추가되면 그것을 우선 키로 사용)
+            if (isLegalOrGovEntity(name)) {
+                return candidates[0];
+            }
             for (const u of candidates) {
                 const cAddr = normalizeAddr(u.resident_address);
                 const cPhone = normalizePhone(u.phone_number);
