@@ -270,11 +270,11 @@ router.get('/jobs/:unionId', async (req, res) => {
 });
 
 /**
- * 소유지 동기화 요청 (users -> user_property_units 연결)
+ * 소유지 동기화 요청 (property_units -> building_units 연결)
  * POST /member/sync-properties
  *
- * GIS 데이터(land_lots, buildings, building_units)와 조합원 데이터(users)를 매칭하여
- * user_property_units 테이블에 연결 레코드를 생성합니다.
+ * GIS 데이터(land_lots, buildings, building_units)와 정식 물건지를 매칭하여
+ * property_units.building_unit_id를 보강합니다.
  *
  * Request Body:
  * {

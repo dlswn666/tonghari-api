@@ -1068,61 +1068,6 @@ class SupabaseService {
             .filter((pnu: string | null): pnu is string => Boolean(pnu));
     }
 
-    private async linkUserPropertyUnitsToBuildingUnits(
-        pnus: string[],
-        units: BuildingUnitMatchRow[]
-    ): Promise<{ linkedCount: number; skippedCount: number }> {
-        if (pnus.length === 0 || units.length === 0) {
-            return { linkedCount: 0, skippedCount: 0 };
-        }
-
-        const { data, error } = await this.client
-            .from('user_property_units')
-            .select('id, dong, ho, building_unit_id, building_name')
-            .in('pnu', pnus)
-            .eq('is_active', true);
-
-        if (error) {
-            logger.warn(`user_property_units lookup failed for official price linking: ${error.message}`);
-            return { linkedCount: 0, skippedCount: 0 };
-        }
-
-        let linkedCount = 0;
-        let skippedCount = 0;
-
-        for (const row of (data ?? []) as PropertyUnitMatchCandidate[]) {
-            const matchedUnit = this.findMatchingBuildingUnit(row, units);
-            if (!matchedUnit) {
-                skippedCount++;
-                continue;
-            }
-
-            const updateData: Record<string, unknown> = {};
-            if (row.building_unit_id !== matchedUnit.id) updateData.building_unit_id = matchedUnit.id;
-            if (matchedUnit.dong !== null && row.dong !== matchedUnit.dong) updateData.dong = matchedUnit.dong;
-            if (matchedUnit.ho !== null && row.ho !== matchedUnit.ho) updateData.ho = matchedUnit.ho;
-
-            if (Object.keys(updateData).length === 0) continue;
-
-            updateData.updated_at = new Date().toISOString();
-
-            const { error: updateError } = await this.client
-                .from('user_property_units')
-                .update(updateData)
-                .eq('id', row.id);
-
-            if (updateError) {
-                logger.warn(`user_property_units official price link failed (${row.id}): ${updateError.message}`);
-                skippedCount++;
-                continue;
-            }
-
-            linkedCount++;
-        }
-
-        return { linkedCount, skippedCount };
-    }
-
     private async linkPropertyUnitsToBuildingUnits(
         pnus: string[],
         units: BuildingUnitMatchRow[]
@@ -1222,15 +1167,14 @@ class SupabaseService {
         const linkPnus = Array.from(new Set([requestedPnu, ...buildingPnus, ...pricePnus].filter(Boolean)));
 
         const normalizedUnits = ((units ?? []) as BuildingUnitMatchRow[]).filter((unit) => this.cleanText(unit.ho));
-        const userLinkResult = await this.linkUserPropertyUnitsToBuildingUnits(linkPnus, normalizedUnits);
         const propertyLinkResult = await this.linkPropertyUnitsToBuildingUnits(linkPnus, normalizedUnits);
 
         return {
             upsertedCount,
             skippedCount,
-            linkedUserPropertyCount: userLinkResult.linkedCount,
+            linkedUserPropertyCount: 0,
             linkedPropertyUnitCount: propertyLinkResult.linkedCount,
-            linkSkippedCount: userLinkResult.skippedCount + propertyLinkResult.skippedCount,
+            linkSkippedCount: propertyLinkResult.skippedCount,
         };
     }
 
@@ -1522,7 +1466,7 @@ class SupabaseService {
 
     /**
      * 개별주택 building에 대한 후속 link 처리 — building_units가 단독주택(unit 1건+dong/ho null)이면
-     * 단독주택 fallback 매칭으로 user_property_units / property_units 의 building_unit_id 채움.
+     * 단독주택 fallback 매칭으로 property_units 의 building_unit_id 채움.
      */
     async linkPropertyUnitsForIndividualHousing(
         buildingId: string,
@@ -1547,10 +1491,9 @@ class SupabaseService {
 
         const units = ((unitRows ?? []) as BuildingUnitMatchRow[]);
 
-        const userResult = await this.linkUserPropertyUnitsToBuildingUnits(pnus, units);
         const propertyResult = await this.linkPropertyUnitsToBuildingUnits(pnus, units);
         return {
-            linkedUserCount: userResult.linkedCount,
+            linkedUserCount: 0,
             linkedPropertyCount: propertyResult.linkedCount,
         };
     }

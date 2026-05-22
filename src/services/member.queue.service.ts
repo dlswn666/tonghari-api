@@ -167,18 +167,19 @@ class MemberQueueService {
 
     /**
      * 소유지 동기화 작업 추가
-     * user_property_units 테이블의 pnu, dong, ho를 기반으로
+     * property_units 테이블의 pnu, dong, ho를 기반으로
      * building_units와 매칭하여 building_unit_id를 연결합니다.
      */
     async addSyncPropertiesJob(request: SyncPropertiesRequest): Promise<MemberJobInfo> {
         const jobId = uuidv4();
 
-        // pnu가 있고 building_unit_id가 없는 user_property_units 수를 조회
+        // pnu가 있고 building_unit_id가 없는 property_units 수를 조회
         const client = supabaseService.getClient();
         const { count, error: countError } = await client
-            .from('user_property_units')
-            .select('*, users!inner(id)', { count: 'exact', head: true })
-            .eq('users.union_id', request.unionId)
+            .from('property_units')
+            .select('id', { count: 'exact', head: true })
+            .eq('union_id', request.unionId)
+            .eq('is_deleted', false)
             .not('pnu', 'is', null)
             .is('building_unit_id', null);
 
@@ -305,7 +306,7 @@ class MemberQueueService {
     /**
      * 사전 등록 처리 (GIS 매칭 + 저장 통합)
      * 1단계: GIS 매칭 (0-50%) - 면적/공시지가가 있으면 생략
-     * 2단계: DB 저장 (50-100%) - users + user_property_units
+     * 2단계: DB 저장 (50-100%) - users + property_units/property_ownerships
      */
     private async processPreRegisterJob(jobId: string, request: PreRegisterRequest): Promise<void> {
         const job = this.jobs.get(jobId);
@@ -426,7 +427,7 @@ class MemberQueueService {
         //   2) 같은 union 의 기존 active user 와 글로벌 매칭:
         //      - 자연인: (이름+거주지) OR (이름+전화) 일치
         //      - 법인:   (이름+거주지) 일치 (사업자번호 컬럼 추가 시 우선)
-        //      - 매칭 시 user 재사용, user_property_units 만 추가 → 1 user = N property
+        //      - 매칭 시 user 재사용, property_ownerships 만 추가 → 1 user = N property
         //      - 미매칭 시 새 user 생성
         // ========================================
         logger.info(`[Pre-Register ${jobId}] Phase 2: Grouping + DB Insert`);
@@ -553,28 +554,57 @@ class MemberQueueService {
                         }
                         const normalizedDong = this.normalizeDong(member.row.dong);
                         const normalizedHo = this.normalizeHo(member.row.ho);
-                        const { data: existingUpu } = await client
-                            .from('user_property_units')
-                            .select('id')
+                        let existingOwnershipQuery = client
+                            .from('property_ownerships')
+                            .select('id, property_unit_id, property_units!inner(id, pnu, dong, ho)')
                             .eq('user_id', userId)
-                            .eq('pnu', member.pnu)
-                            .or(`dong.eq.${normalizedDong || ''},dong.is.null`)
-                            .or(`ho.eq.${normalizedHo || ''},ho.is.null`)
+                            .eq('union_id', request.unionId)
+                            .eq('is_active', true)
+                            .eq('property_units.pnu', member.pnu)
+                            .eq('property_units.is_deleted', false);
+
+                        existingOwnershipQuery = normalizedDong
+                            ? existingOwnershipQuery.eq('property_units.dong', normalizedDong)
+                            : existingOwnershipQuery.is('property_units.dong', null);
+                        existingOwnershipQuery = normalizedHo
+                            ? existingOwnershipQuery.eq('property_units.ho', normalizedHo)
+                            : existingOwnershipQuery.is('property_units.ho', null);
+
+                        const { data: existingOwnership } = await existingOwnershipQuery
+                            .limit(1)
                             .maybeSingle();
-                        if (existingUpu) {
+                        if (existingOwnership) {
                             // 이미 같은 user 가 이 호수 보유 → 정보만 업데이트
-                            await client
-                                .from('user_property_units')
+                            const landOwnershipRatio = this.sanitizeNumeric(member.row.landOwnershipRatio);
+                            const buildingOwnershipRatio = this.sanitizeNumeric(member.row.buildingOwnershipRatio);
+                            const effectiveRatio = landOwnershipRatio || buildingOwnershipRatio || 100;
+                            const { error: propertyUpdateError } = await client
+                                .from('property_units')
                                 .update({
                                     property_address_jibun: member.row.propertyAddress || null,
                                     property_address_road: member.row.propertyAddressRoad || null,
                                     building_name: member.row.buildingName || null,
                                     land_area: this.sanitizeNumeric(member.row.landArea),
-                                    land_ownership_ratio: this.sanitizeNumeric(member.row.landOwnershipRatio),
                                     building_area: this.sanitizeNumeric(member.row.buildingArea),
-                                    building_ownership_ratio: this.sanitizeNumeric(member.row.buildingOwnershipRatio),
+                                    updated_at: new Date().toISOString(),
                                 })
-                                .eq('id', existingUpu.id);
+                                .eq('id', existingOwnership.property_unit_id);
+                            if (propertyUpdateError) {
+                                logger.warn(
+                                    `[Pre-Register ${jobId}] property_units update failed for ${member.row.name}: ${propertyUpdateError.message}`
+                                );
+                            }
+
+                            await client
+                                .from('property_ownerships')
+                                .update({
+                                    land_ownership_ratio: this.sanitizeNumeric(member.row.landOwnershipRatio),
+                                    building_ownership_ratio: this.sanitizeNumeric(member.row.buildingOwnershipRatio),
+                                    ownership_ratio: effectiveRatio,
+                                    ownership_type: member.row.ownershipType || (effectiveRatio < 100 ? 'CO_OWNER' : 'OWNER'),
+                                    updated_at: new Date().toISOString(),
+                                })
+                                .eq('id', existingOwnership.id);
                             updatedCount++;
                         } else {
                             validMembers.push(member);
@@ -685,37 +715,50 @@ class MemberQueueService {
                             }
                         }
 
-                        const { error: propUnitError } = await client.from('user_property_units').insert({
+                        const propertyUnitId = await this.findOrCreatePropertyUnit(
+                            client,
+                            request.unionId,
+                            {
+                                pnu: finalPnu,
+                                previousPnu,
+                                buildingUnitId,
+                                propertyAddressJibun: member.row.propertyAddress || null,
+                                propertyAddressRoad: member.row.propertyAddressRoad || null,
+                                buildingName: member.row.buildingName || null,
+                                dong: normalizedDong,
+                                ho: normalizedHo,
+                                landArea,
+                                buildingArea,
+                                officialPrice: this.sanitizeNumeric(member.row.officialPrice),
+                            }
+                        );
+
+                        const { error: ownershipError } = await client.from('property_ownerships').insert({
                             id: uuidv4(),
+                            property_unit_id: propertyUnitId,
                             user_id: userId,
-                            building_unit_id: buildingUnitId,
-                            pnu: finalPnu,
-                            previous_pnu: previousPnu,
-                            property_address_jibun: member.row.propertyAddress || null,
-                            property_address_road: member.row.propertyAddressRoad || null,
-                            building_name: member.row.buildingName || null,
-                            dong: normalizedDong,
-                            ho: normalizedHo,
+                            union_id: request.unionId,
                             ownership_type: ownershipType,
-                            is_primary: pi === 0,
-                            land_area: landArea,
+                            ownership_ratio: effectiveRatio,
                             land_ownership_ratio: landOwnershipRatio,
-                            building_area: buildingArea,
                             building_ownership_ratio: buildingOwnershipRatio,
+                            is_primary: pi === 0,
+                            is_active: true,
+                            notes: 'member.queue.service: 사전등록 업로드',
                         });
 
-                        if (propUnitError) {
+                        if (ownershipError) {
                             logger.warn(
-                                `[Pre-Register ${jobId}] user_property_units insert failed for ${member.row.name}: ${propUnitError.message}`
+                                `[Pre-Register ${jobId}] property_ownerships insert failed for ${member.row.name}: ${ownershipError.message}`
                             );
                         } else {
                             logger.debug(
-                                `[Pre-Register ${jobId}] user_property_units created for ${member.row.name} (pnu=${member.pnu}, dong=${normalizedDong}, ho=${normalizedHo})`
+                                `[Pre-Register ${jobId}] property_ownerships created for ${member.row.name} (pnu=${member.pnu}, dong=${normalizedDong}, ho=${normalizedHo})`
                             );
                         }
                     } catch (propErr: any) {
                         logger.warn(
-                            `[Pre-Register ${jobId}] user_property_units creation failed for ${member.row.name}: ${propErr.message}`
+                            `[Pre-Register ${jobId}] property ownership creation failed for ${member.row.name}: ${propErr.message}`
                         );
                     }
                 }
@@ -885,6 +928,89 @@ class MemberQueueService {
         return { resolvedPnu: pnu, merged: false };
     }
 
+    private async findOrCreatePropertyUnit(
+        client: ReturnType<typeof supabaseService.getClient>,
+        unionId: string,
+        input: {
+            pnu: string | null;
+            previousPnu: string | null;
+            buildingUnitId: string | null;
+            propertyAddressJibun: string | null;
+            propertyAddressRoad: string | null;
+            buildingName: string | null;
+            dong: string | null;
+            ho: string | null;
+            landArea: number | null;
+            buildingArea: number | null;
+            officialPrice: number | null;
+        }
+    ): Promise<string> {
+        let query = client
+            .from('property_units')
+            .select('id')
+            .eq('union_id', unionId)
+            .eq('is_deleted', false);
+
+        query = input.pnu ? query.eq('pnu', input.pnu) : query.is('pnu', null);
+        query = input.buildingUnitId
+            ? query.eq('building_unit_id', input.buildingUnitId)
+            : query.is('building_unit_id', null);
+        query = input.dong ? query.eq('dong', input.dong) : query.is('dong', null);
+        query = input.ho ? query.eq('ho', input.ho) : query.is('ho', null);
+
+        const { data: existingUnit, error: existingError } = await query.limit(1).maybeSingle();
+        if (existingError) {
+            throw new Error(`property_units lookup failed: ${existingError.message}`);
+        }
+        if (existingUnit?.id) {
+            const updateData: Record<string, unknown> = { updated_at: new Date().toISOString() };
+            if (input.previousPnu) updateData.previous_pnu = input.previousPnu;
+            if (input.propertyAddressJibun) updateData.property_address_jibun = input.propertyAddressJibun;
+            if (input.propertyAddressRoad) updateData.property_address_road = input.propertyAddressRoad;
+            if (input.buildingName) updateData.building_name = input.buildingName;
+            if (input.landArea !== null) updateData.land_area = input.landArea;
+            if (input.buildingArea !== null) updateData.building_area = input.buildingArea;
+            if (input.officialPrice !== null) updateData.official_price = input.officialPrice;
+
+            if (Object.keys(updateData).length > 1) {
+                const { error: updateError } = await client
+                    .from('property_units')
+                    .update(updateData)
+                    .eq('id', existingUnit.id);
+                if (updateError) {
+                    throw new Error(`property_units update failed: ${updateError.message}`);
+                }
+            }
+
+            return existingUnit.id;
+        }
+
+        const newUnitId = uuidv4();
+        const { error: insertError } = await client.from('property_units').insert({
+            id: newUnitId,
+            union_id: unionId,
+            pnu: input.pnu,
+            previous_pnu: input.previousPnu,
+            building_unit_id: input.buildingUnitId,
+            property_address_jibun: input.propertyAddressJibun,
+            property_address_road: input.propertyAddressRoad,
+            building_name: input.buildingName,
+            dong: input.dong,
+            ho: input.ho,
+            land_area: input.landArea,
+            building_area: input.buildingArea,
+            official_price: input.officialPrice,
+            is_deleted: false,
+            notes: 'member.queue.service: 사전등록 업로드',
+        });
+
+        if (insertError) {
+            throw new Error(`property_units insert failed: ${insertError.message}`);
+        }
+
+        return newUnitId;
+    }
+
     /**
      * 동 정규화 (프론트엔드 dong-ho-utils.ts와 동일한 로직)
      * - "제" 접두사 제거 (제1호 → 1호)
@@ -941,7 +1067,7 @@ class MemberQueueService {
     /**
      * PNU 중복 체크
      * 중복인 경우 기존 사용자 ID와 property_unit ID를 반환하여 업데이트에 사용
-     * user_property_units 테이블에서 pnu, dong, ho로 직접 체크
+     * property_ownerships/property_units 기준으로 pnu, dong, ho를 체크
      */
     private async checkDuplicatePnu(
         client: any,
@@ -958,29 +1084,34 @@ class MemberQueueService {
         existingPropertyUnitId?: string;
     }> {
         try {
-            // user_property_units에서 pnu, dong, ho로 직접 조회
-            let query = client.from('user_property_units').select('id, user_id').eq('pnu', pnu);
+            let query = client
+                .from('property_ownerships')
+                .select('id, user_id, property_unit_id, property_units!inner(pnu, dong, ho)')
+                .eq('union_id', unionId)
+                .eq('is_active', true)
+                .eq('property_units.pnu', pnu)
+                .eq('property_units.is_deleted', false);
 
             if (dong) {
-                query = query.eq('dong', dong);
+                query = query.eq('property_units.dong', dong);
             } else {
-                query = query.is('dong', null);
+                query = query.is('property_units.dong', null);
             }
 
             if (ho) {
-                query = query.eq('ho', ho);
+                query = query.eq('property_units.ho', ho);
             } else {
-                query = query.is('ho', null);
+                query = query.is('property_units.ho', null);
             }
 
-            const { data: propertyUnits } = await query;
+            const { data: ownerships } = await query;
 
-            if (!propertyUnits || propertyUnits.length === 0) {
+            if (!ownerships || ownerships.length === 0) {
                 return { isDuplicate: false };
             }
 
             // 연결된 사용자 중 해당 조합의 사용자 찾기
-            const userIds = propertyUnits.map((pu: any) => pu.user_id);
+            const userIds = ownerships.map((ownership: any) => ownership.user_id);
             const { data: users } = await client
                 .from('users')
                 .select('id, name, phone_number')  // BUG-012: 전화번호 추가
@@ -990,13 +1121,13 @@ class MemberQueueService {
 
             if (users && users.length > 0) {
                 // 해당 사용자의 property_unit 찾기
-                const matchingPropertyUnit = propertyUnits.find((pu: any) => pu.user_id === users[0].id);
+                const matchingOwnership = ownerships.find((ownership: any) => ownership.user_id === users[0].id);
                 return {
                     isDuplicate: true,
                     existingUserId: users[0].id,
                     existingUserName: users[0].name,
                     existingPhoneNumber: users[0].phone_number,  // BUG-012: 전화번호 추가
-                    existingPropertyUnitId: matchingPropertyUnit?.id,
+                    existingPropertyUnitId: matchingOwnership?.property_unit_id,
                 };
             }
 
@@ -1164,7 +1295,7 @@ class MemberQueueService {
 
     /**
      * 소유지 동기화 처리
-     * user_property_units 테이블의 pnu, dong, ho를 기반으로
+     * property_units 테이블의 pnu, dong, ho를 기반으로
      * building_units와 매칭하여 building_unit_id를 연결합니다.
      */
     private async processSyncPropertiesJob(jobId: string, unionId: string): Promise<void> {
@@ -1181,17 +1312,17 @@ class MemberQueueService {
         let failedCount = 0;
 
         try {
-            // 해당 조합의 pnu가 있고 building_unit_id가 없는 user_property_units 조회
+            // 해당 조합의 pnu가 있고 building_unit_id가 없는 property_units 조회
             const { data: propertyUnits, error: propUnitsError } = await client
-                .from('user_property_units')
+                .from('property_units')
                 .select(
                     `
-                    id, user_id, pnu, dong, ho, building_name,
-                    land_area, land_ownership_ratio, building_area, building_ownership_ratio,
-                    users!inner(id, name, union_id)
+                    id, pnu, dong, ho, building_name, property_address_jibun,
+                    land_area, building_area
                 `
                 )
-                .eq('users.union_id', unionId)
+                .eq('union_id', unionId)
+                .eq('is_deleted', false)
                 .not('pnu', 'is', null)
                 .is('building_unit_id', null);
 
@@ -1207,7 +1338,7 @@ class MemberQueueService {
             for (let i = 0; i < (propertyUnits || []).length; i++) {
                 const propUnit = propertyUnits![i];
                 const currentIndex = i + 1;
-                const userName = (propUnit.users as any)?.name || 'Unknown';
+                const label = propUnit.property_address_jibun || propUnit.pnu || propUnit.id;
 
                 try {
                     // building_unit 조회 또는 생성
@@ -1223,27 +1354,27 @@ class MemberQueueService {
 
                     if (!buildingUnitId) {
                         failedCount++;
-                        errors.push(`${userName}: GIS 데이터가 없어 매칭 불가 (PNU: ${propUnit.pnu})`);
+                        errors.push(`${label}: GIS 데이터가 없어 매칭 불가 (PNU: ${propUnit.pnu})`);
                         continue;
                     }
 
-                    // user_property_units에 building_unit_id 연결
+                    // property_units에 building_unit_id 연결
                     const { error: updateError } = await client
-                        .from('user_property_units')
+                        .from('property_units')
                         .update({ building_unit_id: buildingUnitId })
                         .eq('id', propUnit.id);
 
                     if (updateError) {
                         failedCount++;
-                        errors.push(`${userName}: 연결 저장 실패 - ${updateError.message}`);
+                        errors.push(`${label}: 연결 저장 실패 - ${updateError.message}`);
                         continue;
                     }
 
                     syncedCount++;
-                    logger.debug(`[Sync Properties ${jobId}] Synced ${userName} to building_unit ${buildingUnitId}`);
+                    logger.debug(`[Sync Properties ${jobId}] Synced ${label} to building_unit ${buildingUnitId}`);
                 } catch (err: any) {
                     failedCount++;
-                    errors.push(`${userName}: ${err.message || 'Unknown error'}`);
+                    errors.push(`${label}: ${err.message || 'Unknown error'}`);
                 }
 
                 // 진행률 업데이트
