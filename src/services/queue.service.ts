@@ -127,7 +127,7 @@ class QueueService {
                     template_name: result.templateName || request.templateCode,
                     title: result.templateName || request.templateCode,
                     notice_id: request.noticeId,
-                    sender_channel_name: '조합온',
+                    sender_channel_name: env.DEFAULT_CHANNEL_NAME,
                     total_count: result.totalRecipients,
                     kakao_success_count: result.kakaoSuccessCount,
                     sms_success_count: result.smsSuccessCount,

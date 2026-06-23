@@ -1,7 +1,7 @@
 {
-  "name": "alimtalk-proxy-server",
+  "name": "tonghari-api",
   "version": "1.0.0",
-  "description": "알림톡 프록시 서버 - 고정 IP로 알리고 API 연동",
+  "description": "통하리 API 서버 - 고정 IP로 외부 API 연동",
   "main": "dist/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",

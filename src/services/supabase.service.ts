@@ -97,23 +97,28 @@ class SupabaseService {
     }
 
     /**
-     * 기본 Sender Key 조회 (조합온)
+     * 기본 Sender Key 조회 (통하리)
      */
     async getDefaultSenderKey(): Promise<string> {
         try {
+            // 신규 키(TONGHARI) 우선 조회, 없으면 레거시 키(JOHAPON) 폴백
+            const senderKeyNames = ['TONGHARI_DEFAULT_SENDER_KEY', 'JOHAPON_DEFAULT_SENDER_KEY'];
             const { data, error } = await this.client
                 .from('decrypted_secrets')
-                .select('decrypted_secret')
-                .eq('name', 'JOHAPON_DEFAULT_SENDER_KEY')
-                .single();
+                .select('name, decrypted_secret')
+                .in('name', senderKeyNames);
 
-            if (error || !data) {
+            const secret =
+                data?.find((row) => row.name === 'TONGHARI_DEFAULT_SENDER_KEY')
+                ?? data?.find((row) => row.name === 'JOHAPON_DEFAULT_SENDER_KEY');
+
+            if (error || !secret) {
                 // Vault에서 조회 실패 시 환경 변수 사용
                 logger.warn('Failed to fetch default Sender Key from Vault, using environment variable');
                 return env.DEFAULT_SENDER_KEY;
             }
 
-            return data.decrypted_secret;
+            return secret.decrypted_secret;
         } catch (error) {
             logger.error('Error fetching default Sender Key', error);
             return env.DEFAULT_SENDER_KEY;

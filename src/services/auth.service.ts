@@ -5,8 +5,8 @@ import { JwtPayload, TokenVerifyResult } from '../types/auth.types';
 /**
  * JWT 인증 서비스 (Shared Secret 방식)
  * 
- * 조합온 홈페이지에서 생성한 JWT 토큰을 검증합니다.
- * 토큰 발급은 조합온 서버에서 수행하며, 이 서버는 검증만 담당합니다.
+ * 통하리 홈페이지에서 생성한 JWT 토큰을 검증합니다.
+ * 토큰 발급은 통하리 서버에서 수행하며, 이 서버는 검증만 담당합니다.
  */
 class AuthService {
     private readonly jwtSecret: string;

@@ -70,7 +70,7 @@ class AligoService {
 
     /**
      * Sender Key 조회 (Vault)
-     * 조합별 키가 없으면 기본 키(조합온) 사용
+     * 조합별 키가 없으면 기본 키(통하리) 사용
      */
     async getSenderKey(unionId: string): Promise<SenderKeyInfo> {
         // 조합별 Sender Key 조회 시도

@@ -4,7 +4,7 @@ import { authService } from '../services/auth.service';
 /**
  * JWT Bearer 토큰 인증 미들웨어 (Shared Secret 방식)
  * 
- * 조합온 홈페이지에서 생성한 JWT 토큰을 검증합니다.
+ * 통하리 홈페이지에서 생성한 JWT 토큰을 검증합니다.
  * 검증 성공 시 req.user에 인증 정보를 추가합니다.
  */
 export const authMiddleware = (

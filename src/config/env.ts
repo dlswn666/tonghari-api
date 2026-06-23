@@ -35,7 +35,7 @@ export const env = {
 
     // 기본 Sender Key
     DEFAULT_SENDER_KEY: getEnvVar('DEFAULT_SENDER_KEY'),
-    DEFAULT_CHANNEL_NAME: process.env.DEFAULT_CHANNEL_NAME || '조합온',
+    DEFAULT_CHANNEL_NAME: process.env.DEFAULT_CHANNEL_NAME || '통하리',
 
     // Supabase
     SUPABASE_URL: getEnvVar('SUPABASE_URL'),
@@ -52,7 +52,7 @@ export const env = {
 
     // GIS & Public Data API
     VWORLD_API_KEY: process.env.VWORLD_API_KEY || '',
-    VWORLD_API_DOMAIN: process.env.VWORLD_API_DOMAIN || process.env.VWORLD_DOMAIN || 'www.johapon.kr',
+    VWORLD_API_DOMAIN: process.env.VWORLD_API_DOMAIN || process.env.VWORLD_DOMAIN || 'www.tonghari.kr',
     VWORLD_ATTR_REQUEST_INTERVAL_MS: getEnvNumber('VWORLD_ATTR_REQUEST_INTERVAL_MS', 300),
     DATA_PORTAL_API_KEY: process.env.DATA_PORTAL_API_KEY || '',
 
