@@ -131,7 +131,7 @@ vim .env
 NODE_ENV=production
 PORT=3100
 
-# JWT 인증 (조합온 서버와 동일한 값)
+# JWT 인증 (통하리 서버와 동일한 값)
 JWT_SECRET=your-jwt-secret-key-here
 
 # 알리고 API
@@ -141,7 +141,7 @@ ALIGO_SENDER_PHONE=01012345678
 
 # Sender Key
 DEFAULT_SENDER_KEY=your-default-sender-key
-DEFAULT_CHANNEL_NAME=조합온
+DEFAULT_CHANNEL_NAME=통하리
 
 # Supabase
 SUPABASE_URL=https://your-project.supabase.co
@@ -279,6 +279,6 @@ netstat -tlnp | grep 3100
 -   [ ] `/etc/fstab`에 Swap 설정 추가됨
 -   [ ] Docker 설치 및 실행 중
 -   [ ] `.env` 파일 생성 및 환경 변수 설정
--   [ ] `JWT_SECRET`이 조합온 서버와 동일
+-   [ ] `JWT_SECRET`이 통하리 서버와 동일
 -   [ ] 보안 그룹에서 포트 3100 열림
 -   [ ] 컨테이너 실행 및 헬스체크 통과

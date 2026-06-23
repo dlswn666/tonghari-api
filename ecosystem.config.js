@@ -1,7 +1,12 @@
 module.exports = {
     apps: [
         {
-            name: 'alimtalk-proxy',
+            // 통하리 리네이밍: 기존 PM2 프로세스명은 'alimtalk-proxy' 였음.
+            // 배포 시 1회 마이그레이션 필요:
+            //   pm2 stop alimtalk-proxy || true
+            //   pm2 delete alimtalk-proxy || true
+            //   pm2 start ecosystem.config.js && pm2 save
+            name: 'tonghari-api',
             script: 'dist/index.js',
             
             // 1GB RAM 환경에서 fork 모드 권장
