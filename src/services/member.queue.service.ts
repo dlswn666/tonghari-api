@@ -7,12 +7,13 @@ import {
     MemberInviteSyncRequest,
     MemberInviteSyncResult,
     PreRegisterRequest,
-    PreRegisterResult,
     PreRegisterData,
     SyncPropertiesRequest,
     SyncPropertiesResult,
 } from '../types/member.types';
 import { createLogger } from '../utils/logger';
+import { getAutoOwnershipRatio as calculateAutoOwnershipRatio } from './member.pre-register-ownership';
+import { buildPreRegisterCompletion } from './member.pre-register-result';
 
 const logger = createLogger('MEMBER-QUEUE');
 
@@ -323,6 +324,9 @@ class MemberQueueService {
         let unmatchedCount = 0;
         let duplicateCount = 0;
         let apiSkippedCount = 0;
+        let propertyLinkCreatedCount = 0;
+        let propertyLinkUpdatedCount = 0;
+        let propertyLinkFailedCount = 0;
 
         const totalCount = request.members.length;
 
@@ -435,6 +439,35 @@ class MemberQueueService {
         // 동일인 그룹핑 (배치 내부)
         const personGroups = this.groupByPerson(matchedMembers);
         logger.info(`[Pre-Register ${jobId}] Grouped ${matchedMembers.length} rows into ${personGroups.length} persons`);
+
+        const getPropertyKey = (member: MatchedMember): string => {
+            const normalizedDong = this.normalizeDong(member.row.dong);
+            const normalizedHo = this.normalizeHo(member.row.ho);
+            return [
+                member.pnu || member.row.propertyAddress || '',
+                normalizedDong || '',
+                normalizedHo || '',
+            ].join('|');
+        };
+
+        const propertyOwnerCountByKey = new Map<string, number>();
+        for (const group of personGroups) {
+            const groupPropertyKeys = new Set<string>();
+            for (const member of group) {
+                groupPropertyKeys.add(getPropertyKey(member));
+            }
+            for (const propertyKey of groupPropertyKeys) {
+                propertyOwnerCountByKey.set(propertyKey, (propertyOwnerCountByKey.get(propertyKey) || 0) + 1);
+            }
+        }
+
+        const getBatchOwnerCount = (member: MatchedMember): number => {
+            return propertyOwnerCountByKey.get(getPropertyKey(member)) || 1;
+        };
+
+        const getAutoOwnershipRatio = (member: MatchedMember): number => {
+            return calculateAutoOwnershipRatio(getBatchOwnerCount(member));
+        };
 
         // 글로벌 매칭용: union 의 기존 active user 캐시 로드
         const { data: existingUsersData } = await client
@@ -577,34 +610,69 @@ class MemberQueueService {
                             // 이미 같은 user 가 이 호수 보유 → 정보만 업데이트
                             const landOwnershipRatio = this.sanitizeNumeric(member.row.landOwnershipRatio);
                             const buildingOwnershipRatio = this.sanitizeNumeric(member.row.buildingOwnershipRatio);
-                            const effectiveRatio = landOwnershipRatio || buildingOwnershipRatio || 100;
-                            const { error: propertyUpdateError } = await client
-                                .from('property_units')
-                                .update({
-                                    property_address_jibun: member.row.propertyAddress || null,
-                                    property_address_road: member.row.propertyAddressRoad || null,
-                                    building_name: member.row.buildingName || null,
-                                    land_area: this.sanitizeNumeric(member.row.landArea),
-                                    building_area: this.sanitizeNumeric(member.row.buildingArea),
-                                    updated_at: new Date().toISOString(),
-                                })
-                                .eq('id', existingOwnership.property_unit_id);
-                            if (propertyUpdateError) {
-                                logger.warn(
-                                    `[Pre-Register ${jobId}] property_units update failed for ${member.row.name}: ${propertyUpdateError.message}`
-                                );
+                            const batchOwnerCount = getBatchOwnerCount(member);
+                            const effectiveRatio =
+                                landOwnershipRatio || buildingOwnershipRatio || getAutoOwnershipRatio(member);
+                            const effectiveLandRatio = landOwnershipRatio || effectiveRatio;
+                            const effectiveBuildingRatio = buildingOwnershipRatio || effectiveRatio;
+
+                            const propertyUnitUpdates: Record<string, unknown> = {
+                                updated_at: new Date().toISOString(),
+                            };
+                            if (member.row.propertyAddress) {
+                                propertyUnitUpdates.property_address_jibun = member.row.propertyAddress;
+                            }
+                            if (member.row.propertyAddressRoad) {
+                                propertyUnitUpdates.property_address_road = member.row.propertyAddressRoad;
+                            }
+                            if (member.row.buildingName) {
+                                propertyUnitUpdates.building_name = member.row.buildingName;
+                            }
+                            const landArea = this.sanitizeNumeric(member.row.landArea);
+                            const buildingArea = this.sanitizeNumeric(member.row.buildingArea);
+                            if (landArea !== null) propertyUnitUpdates.land_area = landArea;
+                            if (buildingArea !== null) propertyUnitUpdates.building_area = buildingArea;
+
+                            if (Object.keys(propertyUnitUpdates).length > 1) {
+                                const { error: propertyUpdateError } = await client
+                                    .from('property_units')
+                                    .update(propertyUnitUpdates)
+                                    .eq('id', existingOwnership.property_unit_id);
+                                if (propertyUpdateError) {
+                                    propertyLinkFailedCount++;
+                                    errors.push(
+                                        `${member.row.name}: property_units update failed (${member.row.propertyAddress || member.pnu || '주소 없음'}) - ${propertyUpdateError.message}`
+                                    );
+                                    logger.warn(
+                                        `[Pre-Register ${jobId}] property_units update failed for ${member.row.name}: ${propertyUpdateError.message}`
+                                    );
+                                    continue;
+                                }
                             }
 
-                            await client
+                            const { error: ownershipUpdateError } = await client
                                 .from('property_ownerships')
                                 .update({
-                                    land_ownership_ratio: this.sanitizeNumeric(member.row.landOwnershipRatio),
-                                    building_ownership_ratio: this.sanitizeNumeric(member.row.buildingOwnershipRatio),
+                                    land_ownership_ratio: effectiveLandRatio,
+                                    building_ownership_ratio: effectiveBuildingRatio,
                                     ownership_ratio: effectiveRatio,
-                                    ownership_type: member.row.ownershipType || (effectiveRatio < 100 ? 'CO_OWNER' : 'OWNER'),
+                                    ownership_type:
+                                        member.row.ownershipType ||
+                                        (batchOwnerCount > 1 || effectiveRatio < 100 ? 'CO_OWNER' : 'OWNER'),
                                     updated_at: new Date().toISOString(),
                                 })
                                 .eq('id', existingOwnership.id);
+                            if (ownershipUpdateError) {
+                                propertyLinkFailedCount++;
+                                errors.push(
+                                    `${member.row.name}: property_ownerships update failed (${member.row.propertyAddress || member.pnu || '주소 없음'}) - ${ownershipUpdateError.message}`
+                                );
+                                logger.warn(
+                                    `[Pre-Register ${jobId}] property_ownerships update failed for ${member.row.name}: ${ownershipUpdateError.message}`
+                                );
+                                continue;
+                            }
+                            propertyLinkUpdatedCount++;
                             updatedCount++;
                         } else {
                             validMembers.push(member);
@@ -622,6 +690,9 @@ class MemberQueueService {
                         await supabaseService.updateSyncJobStatus(jobId, 'PROCESSING', progress, undefined, {
                             job_type: 'PRE_REGISTER', phase: 'SAVING',
                             matchedCount, unmatchedCount, savedCount, updatedCount, duplicateCount, totalCount,
+                            propertyLinkCreatedCount,
+                            propertyLinkUpdatedCount,
+                            propertyLinkFailedCount,
                         });
                     }
                     continue;
@@ -652,6 +723,9 @@ class MemberQueueService {
                             await supabaseService.updateSyncJobStatus(jobId, 'PROCESSING', progress, undefined, {
                                 job_type: 'PRE_REGISTER', phase: 'SAVING',
                                 matchedCount, unmatchedCount, savedCount, updatedCount, duplicateCount, totalCount,
+                                propertyLinkCreatedCount,
+                                propertyLinkUpdatedCount,
+                                propertyLinkFailedCount,
                             });
                         }
                         continue;
@@ -672,8 +746,24 @@ class MemberQueueService {
                 }
 
                 // N property_units 생성 (첫 번째만 is_primary)
-                for (let pi = 0; pi < validMembers.length; pi++) {
-                    const member = validMembers[pi];
+                // 같은 업로드 행이 중복되어도 동일 user-property 연결은 한 번만 만든다.
+                const uniqueMembers: MatchedMember[] = [];
+                const seenMemberProperties = new Set<string>();
+                for (const member of validMembers) {
+                    const normalizedDong = this.normalizeDong(member.row.dong);
+                    const normalizedHo = this.normalizeHo(member.row.ho);
+                    const propertyKey = [
+                        member.pnu || member.row.propertyAddress || '',
+                        normalizedDong || '',
+                        normalizedHo || '',
+                    ].join('|');
+                    if (seenMemberProperties.has(propertyKey)) continue;
+                    seenMemberProperties.add(propertyKey);
+                    uniqueMembers.push(member);
+                }
+
+                for (let pi = 0; pi < uniqueMembers.length; pi++) {
+                    const member = uniqueMembers[pi];
                     try {
                         const normalizedDong = this.normalizeDong(member.row.dong);
                         const normalizedHo = this.normalizeHo(member.row.ho);
@@ -696,11 +786,14 @@ class MemberQueueService {
                         const buildingArea = this.sanitizeNumeric(member.row.buildingArea);
                         const buildingOwnershipRatio = this.sanitizeNumeric(member.row.buildingOwnershipRatio);
 
-                        const effectiveRatio = landOwnershipRatio || buildingOwnershipRatio || 100;
+                        const batchOwnerCount = getBatchOwnerCount(member);
+                        const effectiveRatio = landOwnershipRatio || buildingOwnershipRatio || getAutoOwnershipRatio(member);
+                        const effectiveLandRatio = landOwnershipRatio || effectiveRatio;
+                        const effectiveBuildingRatio = buildingOwnershipRatio || effectiveRatio;
                         let ownershipType: 'OWNER' | 'CO_OWNER' | 'FAMILY' = 'OWNER';
                         if (member.row.ownershipType) {
                             ownershipType = member.row.ownershipType;
-                        } else if (effectiveRatio < 100) {
+                        } else if (batchOwnerCount > 1 || effectiveRatio < 100) {
                             ownershipType = 'CO_OWNER';
                         }
 
@@ -740,23 +833,32 @@ class MemberQueueService {
                             union_id: request.unionId,
                             ownership_type: ownershipType,
                             ownership_ratio: effectiveRatio,
-                            land_ownership_ratio: landOwnershipRatio,
-                            building_ownership_ratio: buildingOwnershipRatio,
+                            land_ownership_ratio: effectiveLandRatio,
+                            building_ownership_ratio: effectiveBuildingRatio,
                             is_primary: pi === 0,
                             is_active: true,
                             notes: 'member.queue.service: 사전등록 업로드',
                         });
 
                         if (ownershipError) {
+                            propertyLinkFailedCount++;
+                            errors.push(
+                                `${member.row.name}: property_ownerships insert failed (${member.row.propertyAddress || member.pnu || '주소 없음'}) - ${ownershipError.message}`
+                            );
                             logger.warn(
                                 `[Pre-Register ${jobId}] property_ownerships insert failed for ${member.row.name}: ${ownershipError.message}`
                             );
                         } else {
+                            propertyLinkCreatedCount++;
                             logger.debug(
                                 `[Pre-Register ${jobId}] property_ownerships created for ${member.row.name} (pnu=${member.pnu}, dong=${normalizedDong}, ho=${normalizedHo})`
                             );
                         }
                     } catch (propErr: any) {
+                        propertyLinkFailedCount++;
+                        errors.push(
+                            `${member.row.name}: property relation failed (${member.row.propertyAddress || member.pnu || '주소 없음'}) - ${propErr.message || 'Unknown error'}`
+                        );
                         logger.warn(
                             `[Pre-Register ${jobId}] property ownership creation failed for ${member.row.name}: ${propErr.message}`
                         );
@@ -785,25 +887,28 @@ class MemberQueueService {
                     savedCount,
                     updatedCount,
                     duplicateCount,
+                    propertyLinkCreatedCount,
+                    propertyLinkUpdatedCount,
+                    propertyLinkFailedCount,
                     totalCount,
                 };
                 await supabaseService.updateSyncJobStatus(jobId, 'PROCESSING', progress, undefined, previewData);
             }
         }
 
-        // 완료 처리 - 신규 저장 또는 업데이트가 있으면 성공으로 처리
-        const hasSuccessfulOperations = savedCount > 0 || updatedCount > 0;
-        const finalStatus = !hasSuccessfulOperations && errors.length > 0 ? 'failed' : 'completed';
-        const result: PreRegisterResult = {
-            success: errors.length === 0,
+        const completion = buildPreRegisterCompletion({
             totalCount,
             matchedCount,
             unmatchedCount,
             savedCount,
             updatedCount,
             duplicateCount,
-            errors: errors.slice(0, 100), // 최대 100개만 저장
-        };
+            propertyLinkCreatedCount,
+            propertyLinkUpdatedCount,
+            propertyLinkFailedCount,
+            errors,
+        });
+        const { finalStatus, result } = completion;
 
         this.updateJobStatus(jobId, {
             status: finalStatus,
@@ -817,18 +922,18 @@ class MemberQueueService {
             ...result,
         };
 
-        const errorLog = errors.length > 0 ? JSON.stringify({ errors: errors.slice(0, 100) }) : undefined;
+        const errorLog = result.errors.length > 0 ? JSON.stringify({ errors: result.errors }) : undefined;
 
         await supabaseService.updateSyncJobStatus(
             jobId,
-            finalStatus === 'completed' ? 'COMPLETED' : 'FAILED',
+            completion.persistedStatus,
             100,
             errorLog,
             previewData
         );
 
         logger.info(
-            `[Pre-Register ${jobId}] Completed - Matched: ${matchedCount}, Saved: ${savedCount}, Updated: ${updatedCount}, Duplicates: ${duplicateCount}, Errors: ${errors.length}, Total: ${totalCount}`
+            `[Pre-Register ${jobId}] Completed - Matched: ${matchedCount}, Saved: ${savedCount}, Updated: ${updatedCount}, Duplicates: ${duplicateCount}, PropertyLinks: ${propertyLinkCreatedCount + propertyLinkUpdatedCount}, PropertyLinkFailed: ${propertyLinkFailedCount}, Errors: ${errors.length}, Total: ${totalCount}`
         );
     }
 
