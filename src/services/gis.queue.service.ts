@@ -19,6 +19,7 @@ import {
     LandPriceSyncTarget,
 } from '../types/gis.types';
 import { createLogger } from '../utils/logger';
+import { resolveGisAddressData } from './gis-address-resolution';
 
 const logger = createLogger('GIS-QUEUE');
 
@@ -333,9 +334,13 @@ class GisQueueService {
             try {
                 logger.debug(`[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Processing address: ${address}`);
 
-                // Step 1: Geocoding (Address -> PNU + 좌표)
-                const geocodeData = await gisService.getPNUFromAddress(address);
-                if (!geocodeData) {
+                // Step 1: Address -> PNU + 좌표.
+                // VWorld geocoder가 지번 주소를 못 찾더라도 법정동+지번 파싱으로 PNU를 생성해 수집을 계속한다.
+                const addressData = await resolveGisAddressData(address, {
+                    getPNUFromAddress: (targetAddress) => gisService.getPNUFromAddress(targetAddress),
+                    generatePNUFromAddress: (targetAddress) => gisService.generatePNUFromAddress(targetAddress),
+                });
+                if (!addressData) {
                     logger.warn(`[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Geocoding failed: ${address}`);
                     failedAddresses.push({
                         address,
@@ -345,24 +350,13 @@ class GisQueueService {
                     continue;
                 }
 
-                const { pnu, x, y } = geocodeData;
-
-                // Step 2: PNU가 없으면 실패 처리
-                if (!pnu) {
-                    logger.warn(`[GIS ${jobId}] (${currentIndex}/${job.totalCount}) PNU not found for: ${address}`);
-                    failedAddresses.push({
-                        address,
-                        reason: 'PNU not found - 필지 번호를 조회할 수 없습니다',
-                        index: currentIndex,
-                    });
-                    continue;
-                }
+                const { pnu, x, y } = addressData;
 
                 // Step 2.5 (NEW): 필지 경계(Polygon) 데이터 조회
                 let boundary: GeoJSON.Geometry | null = null;
                 try {
                     // 먼저 좌표 기반으로 경계 조회 시도 (더 정확)
-                    const boundaryData = await gisService.getParcelBoundaryFromCoordinates(x, y);
+                    const boundaryData = x && y ? await gisService.getParcelBoundaryFromCoordinates(x, y) : null;
                     if (boundaryData) {
                         boundary = boundaryData.boundary;
                     } else {
