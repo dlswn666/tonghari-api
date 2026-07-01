@@ -650,17 +650,22 @@ class MemberQueueService {
                                 }
                             }
 
+                            const ownershipUpdates: Record<string, unknown> = {
+                                land_ownership_ratio: effectiveLandRatio,
+                                building_ownership_ratio: effectiveBuildingRatio,
+                                ownership_ratio: effectiveRatio,
+                                ownership_type:
+                                    member.row.ownershipType ||
+                                    (batchOwnerCount > 1 || effectiveRatio < 100 ? 'CO_OWNER' : 'OWNER'),
+                                updated_at: new Date().toISOString(),
+                            };
+                            if (member.row.notes) {
+                                ownershipUpdates.notes = member.row.notes;
+                            }
+
                             const { error: ownershipUpdateError } = await client
                                 .from('property_ownerships')
-                                .update({
-                                    land_ownership_ratio: effectiveLandRatio,
-                                    building_ownership_ratio: effectiveBuildingRatio,
-                                    ownership_ratio: effectiveRatio,
-                                    ownership_type:
-                                        member.row.ownershipType ||
-                                        (batchOwnerCount > 1 || effectiveRatio < 100 ? 'CO_OWNER' : 'OWNER'),
-                                    updated_at: new Date().toISOString(),
-                                })
+                                .update(ownershipUpdates)
                                 .eq('id', existingOwnership.id);
                             if (ownershipUpdateError) {
                                 propertyLinkFailedCount++;
@@ -823,6 +828,7 @@ class MemberQueueService {
                                 landArea,
                                 buildingArea,
                                 officialPrice: this.sanitizeNumeric(member.row.officialPrice),
+                                notes: member.row.notes || null,
                             }
                         );
 
@@ -837,7 +843,7 @@ class MemberQueueService {
                             building_ownership_ratio: effectiveBuildingRatio,
                             is_primary: pi === 0,
                             is_active: true,
-                            notes: 'member.queue.service: 사전등록 업로드',
+                            notes: member.row.notes || 'member.queue.service: 사전등록 업로드',
                         });
 
                         if (ownershipError) {
@@ -1048,6 +1054,7 @@ class MemberQueueService {
             landArea: number | null;
             buildingArea: number | null;
             officialPrice: number | null;
+            notes: string | null;
         }
     ): Promise<string> {
         let query = client
@@ -1076,6 +1083,7 @@ class MemberQueueService {
             if (input.landArea !== null) updateData.land_area = input.landArea;
             if (input.buildingArea !== null) updateData.building_area = input.buildingArea;
             if (input.officialPrice !== null) updateData.official_price = input.officialPrice;
+            if (input.notes) updateData.notes = input.notes;
 
             if (Object.keys(updateData).length > 1) {
                 const { error: updateError } = await client
@@ -1106,7 +1114,7 @@ class MemberQueueService {
             building_area: input.buildingArea,
             official_price: input.officialPrice,
             is_deleted: false,
-            notes: 'member.queue.service: 사전등록 업로드',
+            notes: input.notes || 'member.queue.service: 사전등록 업로드',
         });
 
         if (insertError) {

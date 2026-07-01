@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { queueService } from '../services/queue.service';
+import { createBuildInfo } from '../utils/build-info';
 
 const router = Router();
 
@@ -17,11 +18,12 @@ function formatMemoryUsage(bytes: number): number {
 router.get('/', (req: Request, res: Response) => {
     const memoryUsage = process.memoryUsage();
     const queueStatus = queueService.getQueueStatus();
+    const buildInfo = createBuildInfo();
 
     res.json({
         status: 'ok',
         timestamp: new Date().toISOString(),
-        version: '1.0.0',
+        ...buildInfo,
         uptime: process.uptime(),
         memory: {
             heapUsed: formatMemoryUsage(memoryUsage.heapUsed),
@@ -48,11 +50,12 @@ router.get('/detailed', async (req: Request, res: Response) => {
     const memoryUsage = process.memoryUsage();
     const queueStatus = queueService.getQueueStatus();
     const cpuUsage = process.cpuUsage();
+    const buildInfo = createBuildInfo();
 
     res.json({
         status: 'ok',
         timestamp: new Date().toISOString(),
-        version: '1.0.0',
+        ...buildInfo,
         node: {
             version: process.version,
             platform: process.platform,

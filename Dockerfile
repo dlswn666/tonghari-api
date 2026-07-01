@@ -22,6 +22,10 @@ RUN npm prune --production
 # 프로덕션 이미지
 FROM node:20-alpine AS production
 
+ARG GIT_SHA=unknown
+ARG BUILD_TIME=unknown
+ARG IMAGE_TAG=local
+
 # 작업 디렉토리 설정
 WORKDIR /app
 
@@ -42,6 +46,9 @@ USER nodejs
 # 환경 변수 설정
 ENV NODE_ENV=production
 ENV PORT=3100
+ENV GIT_SHA=${GIT_SHA}
+ENV BUILD_TIME=${BUILD_TIME}
+ENV IMAGE_TAG=${IMAGE_TAG}
 
 # 포트 노출
 EXPOSE 3100
@@ -52,4 +59,3 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 
 # 애플리케이션 시작
 CMD ["node", "dist/index.js"]
-

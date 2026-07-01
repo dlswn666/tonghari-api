@@ -42,6 +42,26 @@ import { buildPreRegisterCompletion } from '../src/services/member.pre-register-
     assert.equal(completion.result.propertyLinkCreatedCount, 2);
 }
 
+{
+    const completion = buildPreRegisterCompletion({
+        totalCount: 2,
+        matchedCount: 2,
+        unmatchedCount: 0,
+        savedCount: 1,
+        updatedCount: 0,
+        duplicateCount: 0,
+        propertyLinkCreatedCount: 0,
+        propertyLinkUpdatedCount: 0,
+        propertyLinkFailedCount: 0,
+        errors: [],
+    });
+
+    assert.equal(completion.finalStatus, 'failed');
+    assert.equal(completion.persistedStatus, 'FAILED');
+    assert.equal(completion.result.success, false);
+    assert.match(completion.result.errors[0], /property_units\/property_ownerships/);
+}
+
 assert.equal(getAutoOwnershipRatio(1), 100);
 assert.equal(getAutoOwnershipRatio(8), 12.5);
 assert.equal(getAutoOwnershipRatio(7), 14.2857);

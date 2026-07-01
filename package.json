@@ -11,7 +11,7 @@
     "pm2:stop": "pm2 stop tonghari-api",
     "pm2:restart": "pm2 restart tonghari-api",
     "pm2:logs": "pm2 logs tonghari-api",
-    "docker:build": "docker build -t alimtalk-proxy .",
+    "docker:build": "docker build --build-arg GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo unknown) --build-arg BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) --build-arg IMAGE_TAG=alimtalk-proxy:local -t alimtalk-proxy .",
     "docker:run": "docker run -d -p 3100:3100 --env-file .env --name alimtalk-proxy alimtalk-proxy",
     "docker:stop": "docker stop alimtalk-proxy && docker rm alimtalk-proxy",
     "docker:logs": "docker logs -f alimtalk-proxy",

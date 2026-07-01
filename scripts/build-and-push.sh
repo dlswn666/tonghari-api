@@ -11,6 +11,9 @@ IMAGE_NAME="alimtalk-proxy"
 DOCKER_REGISTRY="${DOCKER_REGISTRY:-docker.io}"  # docker.io 또는 AWS ECR URL
 DOCKER_USERNAME="${DOCKER_USERNAME:-}"
 TAG="${1:-latest}"
+GIT_SHA="${GIT_SHA:-$(git rev-parse --short HEAD 2>/dev/null || echo unknown)}"
+BUILD_TIME="${BUILD_TIME:-$(date -u +"%Y-%m-%dT%H:%M:%SZ")}"
+IMAGE_TAG="${IMAGE_TAG:-${IMAGE_NAME}:${TAG}}"
 
 echo "=========================================="
 echo "Docker 이미지 빌드 및 Push"
@@ -18,6 +21,8 @@ echo "=========================================="
 echo "이미지: ${IMAGE_NAME}"
 echo "태그: ${TAG}"
 echo "레지스트리: ${DOCKER_REGISTRY}"
+echo "Git SHA: ${GIT_SHA}"
+echo "Build time: ${BUILD_TIME}"
 echo ""
 
 # Docker 로그인 확인
@@ -31,7 +36,11 @@ fi
 echo "=========================================="
 echo "1. Docker 이미지 빌드 중..."
 echo "=========================================="
-docker build -t ${IMAGE_NAME}:${TAG} .
+docker build \
+    --build-arg GIT_SHA="${GIT_SHA}" \
+    --build-arg BUILD_TIME="${BUILD_TIME}" \
+    --build-arg IMAGE_TAG="${IMAGE_TAG}" \
+    -t ${IMAGE_NAME}:${TAG} .
 
 # 이미지 태깅 (Docker Hub용)
 if [ -n "$DOCKER_USERNAME" ]; then
@@ -75,4 +84,3 @@ echo "=========================================="
 echo "로컬 이미지 목록:"
 echo "=========================================="
 docker images | grep ${IMAGE_NAME}
-

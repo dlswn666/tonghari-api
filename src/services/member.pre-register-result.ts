@@ -20,10 +20,24 @@ export interface PreRegisterCompletion {
 }
 
 export function buildPreRegisterCompletion(input: PreRegisterCompletionInput): PreRegisterCompletion {
+    const propertyLinkCount = input.propertyLinkCreatedCount + input.propertyLinkUpdatedCount;
+    const hasSuccessfulUserWrite = input.savedCount > 0 || input.updatedCount > 0;
+    const missingPropertyLinks =
+        input.matchedCount > 0 &&
+        hasSuccessfulUserWrite &&
+        propertyLinkCount === 0 &&
+        input.propertyLinkFailedCount === 0;
+    const errors = input.errors.slice(0, 100);
+    if (missingPropertyLinks) {
+        errors.unshift(
+            'property_units/property_ownerships link count is zero after PRE_REGISTER user writes. Check deployed API version and ownership linking path.'
+        );
+    }
+
     const hasFailures =
         input.unmatchedCount > 0 ||
         input.propertyLinkFailedCount > 0 ||
-        input.errors.length > 0;
+        errors.length > 0;
 
     const result: PreRegisterResult = {
         success: !hasFailures,
@@ -36,7 +50,7 @@ export function buildPreRegisterCompletion(input: PreRegisterCompletionInput): P
         propertyLinkCreatedCount: input.propertyLinkCreatedCount,
         propertyLinkUpdatedCount: input.propertyLinkUpdatedCount,
         propertyLinkFailedCount: input.propertyLinkFailedCount,
-        errors: input.errors.slice(0, 100),
+        errors,
     };
 
     return {
