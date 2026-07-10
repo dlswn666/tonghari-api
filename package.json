@@ -19,27 +19,27 @@
     "docker:compose:down": "docker-compose down"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.39.0",
-    "axios": "^1.6.0",
+    "@supabase/supabase-js": "^2.110.1",
+    "axios": "^1.18.1",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
-    "express": "^4.18.2",
+    "express": "^4.22.2",
     "iconv-lite": "^0.7.1",
     "jsonwebtoken": "^9.0.2",
     "p-queue": "^8.0.1",
-    "uuid": "^9.0.0"
+    "uuid": "^11.1.1"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
     "@types/geojson": "^7946.0.16",
     "@types/jsonwebtoken": "^9.0.5",
-    "@types/node": "^20.10.0",
+    "@types/node": "^22.20.1",
     "@types/uuid": "^9.0.0",
     "tsx": "^4.6.0",
     "typescript": "^5.3.0"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   }
 }

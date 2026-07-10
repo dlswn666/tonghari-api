@@ -1,5 +1,5 @@
-# Node.js 20 Alpine 기반 경량 이미지
-FROM node:20-alpine AS builder
+# Node.js 22 Alpine 기반 경량 이미지
+FROM node:22-alpine AS builder
 
 # 작업 디렉토리 설정
 WORKDIR /app
@@ -17,10 +17,10 @@ COPY . .
 RUN npm run build
 
 # 불필요한 devDependencies 제거 (이미지 크기 최적화)
-RUN npm prune --production
+RUN npm prune --omit=dev
 
 # 프로덕션 이미지
-FROM node:20-alpine AS production
+FROM node:22-alpine AS production
 
 ARG GIT_SHA=unknown
 ARG BUILD_TIME=unknown
