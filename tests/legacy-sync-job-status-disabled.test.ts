@@ -22,5 +22,6 @@ test('조합원 초대 작업의 DB column type과 preview subtype 계약을 고
     const producer = source.slice(start, end);
 
     assert.ok(producer.includes("job_type: 'MEMBER_INVITE'"));
-    assert.ok(producer.includes("preview_data: { job_type: 'MEMBER_INVITE_SYNC' }"));
+    assert.ok(producer.includes("job_type: 'MEMBER_INVITE_SYNC'"));
+    assert.ok(producer.includes('totalCount: request.members.length'));
 });

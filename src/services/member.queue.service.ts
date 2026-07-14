@@ -96,7 +96,10 @@ class MemberQueueService {
                     job_type: 'MEMBER_INVITE', // GIS 페이지와 구분하기 위해 명시적으로 설정
                     status: 'PROCESSING',
                     progress: 0,
-                    preview_data: { job_type: 'MEMBER_INVITE_SYNC' },
+                    preview_data: {
+                        job_type: 'MEMBER_INVITE_SYNC',
+                        totalCount: request.members.length,
+                    },
                 })
                 .select('id, union_id')
                 .single()
