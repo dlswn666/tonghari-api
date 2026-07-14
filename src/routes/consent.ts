@@ -1,16 +1,22 @@
-import { Router } from 'express';
+import { Request, Response, Router } from 'express';
 import { consentQueueService } from '../services/consent.queue.service';
-import { supabaseService } from '../services/supabase.service';
 import {
     ConsentBulkUpdateRequest,
     ConsentUploadRequest,
-    ConsentJobStatusResponse,
 } from '../types/consent.types';
 import { createLogger } from '../utils/logger';
 import { toSyncJobRouteFailure } from '../services/sync-job-admission';
 
 const router = Router();
 const logger = createLogger('CONSENT-ROUTE');
+
+function legacyJobReadDisabled(_req: Request, res: Response) {
+    return res.status(410).json({
+        success: false,
+        code: 'LEGACY_SYNC_JOB_STATUS_DISABLED',
+        error: '작업 상태는 인증된 Web 서버 경계에서 조회해야 합니다.',
+    });
+}
 
 /**
  * 일괄 동의 처리 요청
@@ -136,140 +142,9 @@ router.post('/upload-queue', async (req, res) => {
     }
 });
 
-/**
- * 작업 상태 조회 (인메모리)
- * GET /consent/job/:jobId
- */
-router.get('/job/:jobId', (req, res) => {
-    const { jobId } = req.params;
-
-    const jobStatus = consentQueueService.getJobStatus(jobId);
-
-    if (!jobStatus) {
-        return res.status(404).json({
-            success: false,
-            error: 'Job not found in memory. Check sync_jobs table for persisted status.',
-        });
-    }
-
-    const response: ConsentJobStatusResponse = {
-        jobId: jobStatus.jobId,
-        jobType: jobStatus.jobType,
-        status: jobStatus.status,
-        progress: jobStatus.totalCount > 0 ? Math.round((jobStatus.processedCount / jobStatus.totalCount) * 100) : 0,
-        totalCount: jobStatus.totalCount,
-        processedCount: jobStatus.processedCount,
-        result: jobStatus.result,
-        error: jobStatus.error,
-        createdAt: jobStatus.createdAt.toISOString(),
-        startedAt: jobStatus.startedAt?.toISOString(),
-        completedAt: jobStatus.completedAt?.toISOString(),
-    };
-
-    res.json({
-        success: true,
-        data: response,
-    });
-});
-
-/**
- * 작업 상태 조회 (DB 기반 - 서버 재시작 후에도 조회 가능)
- * GET /consent/job/:jobId/db
- */
-router.get('/job/:jobId/db', async (req, res) => {
-    const { jobId } = req.params;
-
-    try {
-        const { data, error } = await supabaseService
-            .getClient()
-            .from('sync_jobs')
-            .select('*')
-            .eq('id', jobId)
-            .single();
-
-        if (error || !data) {
-            return res.status(404).json({
-                success: false,
-                error: 'Job not found in database.',
-            });
-        }
-
-        res.json({
-            success: true,
-            data: {
-                jobId: data.id,
-                jobType: data.preview_data?.job_type || 'UNKNOWN',
-                status: data.status.toLowerCase(),
-                progress: data.progress,
-                unionId: data.union_id,
-                result: data.preview_data,
-                error: data.error_log,
-                createdAt: data.created_at,
-                updatedAt: data.updated_at,
-            },
-        });
-    } catch (error: any) {
-        logger.error('Job status DB lookup failed:', error);
-        res.status(500).json({
-            success: false,
-            error: error.message || 'Internal server error.',
-        });
-    }
-});
-
-/**
- * 조합의 동의 처리 작업 목록 조회
- * GET /consent/jobs/:unionId
- */
-router.get('/jobs/:unionId', async (req, res) => {
-    const { unionId } = req.params;
-    const { status } = req.query; // 선택적 상태 필터
-
-    try {
-        let query = supabaseService
-            .getClient()
-            .from('sync_jobs')
-            .select('*')
-            .eq('union_id', unionId)
-            .order('created_at', { ascending: false })
-            .limit(20);
-
-        if (status) {
-            query = query.eq('status', (status as string).toUpperCase());
-        }
-
-        const { data, error } = await query;
-
-        if (error) {
-            throw error;
-        }
-
-        // 동의 처리 관련 작업만 필터링
-        const consentJobs = (data || []).filter((job: any) => {
-            const jobType = job.preview_data?.job_type;
-            return jobType === 'CONSENT_BULK_UPDATE' || jobType === 'CONSENT_BULK_UPLOAD';
-        });
-
-        res.json({
-            success: true,
-            data: consentJobs.map((job: any) => ({
-                jobId: job.id,
-                jobType: job.preview_data?.job_type || 'UNKNOWN',
-                status: job.status.toLowerCase(),
-                progress: job.progress,
-                result: job.preview_data,
-                error: job.error_log,
-                createdAt: job.created_at,
-                updatedAt: job.updated_at,
-            })),
-        });
-    } catch (error: any) {
-        logger.error('Consent jobs list lookup failed:', error);
-        res.status(500).json({
-            success: false,
-            error: error.message || 'Internal server error.',
-        });
-    }
-});
+// 구 status/list endpoint는 union/job scope를 증명하지 못하므로 공개 데이터를 반환하지 않는다.
+router.get('/job/:jobId', legacyJobReadDisabled);
+router.get('/job/:jobId/db', legacyJobReadDisabled);
+router.get('/jobs/:unionId', legacyJobReadDisabled);
 
 export default router;
