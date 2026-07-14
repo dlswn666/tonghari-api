@@ -6,6 +6,12 @@ export interface JwtPayload {
     unionId: string;
     /** 사용자 ID */
     userId: string;
+    /** 프록시에서 재검증할 시스템 역할 */
+    role?: 'SYSTEM_ADMIN' | 'ADMIN' | 'USER';
+    /** 토큰 발급 시점 차단 상태 */
+    isBlocked?: boolean;
+    /** 감사 로그용 내부 users.id. 권한 판정에는 사용하지 않음 */
+    actorUserId?: string;
     /** 발급 시간 (issued at) */
     iat: number;
     /** 만료 시간 (expiration) */
@@ -32,6 +38,9 @@ export interface TokenVerifyResult {
 export interface AuthenticatedUser {
     unionId: string;
     userId: string;
+    role?: 'SYSTEM_ADMIN' | 'ADMIN' | 'USER';
+    isBlocked?: boolean;
+    actorUserId?: string;
 }
 
 /**
@@ -44,4 +53,3 @@ declare global {
         }
     }
 }
-

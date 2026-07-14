@@ -9,11 +9,11 @@ import {
     PreRegisterRequest,
     PreRegisterData,
     SyncPropertiesRequest,
-    SyncPropertiesResult,
 } from '../types/member.types';
 import { createLogger } from '../utils/logger';
 import { getAutoOwnershipRatio as calculateAutoOwnershipRatio } from './member.pre-register-ownership';
 import { buildPreRegisterCompletion } from './member.pre-register-result';
+import { persistSyncJobOrThrow } from './sync-job-admission';
 
 const logger = createLogger('MEMBER-QUEUE');
 
@@ -85,11 +85,9 @@ class MemberQueueService {
             createdAt: new Date(),
         };
 
-        this.jobs.set(jobId, jobInfo);
-
-        // Supabase sync_jobs 테이블에 초기 등록
-        try {
-            await supabaseService
+        // 영속 원장 생성에 실패하면 메모리 map과 queue에 넣지 않는다.
+        await persistSyncJobOrThrow(jobId, request.unionId, () =>
+            supabaseService
                 .getClient()
                 .from('sync_jobs')
                 .insert({
@@ -99,11 +97,12 @@ class MemberQueueService {
                     status: 'PROCESSING',
                     progress: 0,
                     preview_data: { job_type: 'MEMBER_INVITE_SYNC' },
-                });
-            logger.info(`Member invite sync job added: ${jobId} (members: ${request.members.length})`);
-        } catch (error) {
-            logger.error(`sync_jobs registration failed (${jobId})`, error);
-        }
+                })
+                .select('id, union_id')
+                .single()
+        );
+        this.jobs.set(jobId, jobInfo);
+        logger.info(`Member invite sync job added: ${jobId} (members: ${request.members.length})`);
 
         this.queue
             .add(async () => {
@@ -133,25 +132,27 @@ class MemberQueueService {
             createdAt: new Date(),
         };
 
-        this.jobs.set(jobId, jobInfo);
-
-        // Supabase sync_jobs 테이블에 초기 등록
-        try {
-            await supabaseService
+        // PRE_REGISTER는 DB enum의 MEMBER_UPLOAD와 preview subtype으로 기록한다.
+        await persistSyncJobOrThrow(jobId, request.unionId, () =>
+            supabaseService
                 .getClient()
                 .from('sync_jobs')
                 .insert({
                     id: jobId,
                     union_id: request.unionId,
-                    job_type: 'PRE_REGISTER', // GIS 페이지와 구분하기 위해 명시적으로 설정
+                    job_type: 'MEMBER_UPLOAD',
                     status: 'PROCESSING',
                     progress: 0,
-                    preview_data: { job_type: 'PRE_REGISTER' },
-                });
-            logger.info(`Pre-register job added: ${jobId} (members: ${request.members.length})`);
-        } catch (error) {
-            logger.error(`sync_jobs registration failed (${jobId})`, error);
-        }
+                    preview_data: {
+                        job_type: 'PRE_REGISTER',
+                        memberOperation: 'PRE_REGISTER',
+                    },
+                })
+                .select('id, union_id')
+                .single()
+        );
+        this.jobs.set(jobId, jobInfo);
+        logger.info(`Pre-register job added: ${jobId} (members: ${request.members.length})`);
 
         this.queue
             .add(async () => {
@@ -167,67 +168,13 @@ class MemberQueueService {
     }
 
     /**
-     * 소유지 동기화 작업 추가
-     * property_units 테이블의 pnu, dong, ho를 기반으로
-     * building_units와 매칭하여 building_unit_id를 연결합니다.
+     * Phase F 승인 전에는 property↔building 자동 연결 작업을 영속화하거나 queue에 넣지 않는다.
      */
     async addSyncPropertiesJob(request: SyncPropertiesRequest): Promise<MemberJobInfo> {
-        const jobId = uuidv4();
-
-        // pnu가 있고 building_unit_id가 없는 property_units 수를 조회
-        const client = supabaseService.getClient();
-        const { count, error: countError } = await client
-            .from('property_units')
-            .select('id', { count: 'exact', head: true })
-            .eq('union_id', request.unionId)
-            .eq('is_deleted', false)
-            .not('pnu', 'is', null)
-            .is('building_unit_id', null);
-
-        if (countError) {
-            logger.error(`Failed to count property units for sync: ${countError.message}`);
-        }
-
-        const totalCount = count || 0;
-
-        const jobInfo: MemberJobInfo = {
-            jobId,
-            jobType: 'SYNC_PROPERTIES',
-            unionId: request.unionId,
-            totalCount,
-            processedCount: 0,
-            status: 'pending',
-            createdAt: new Date(),
-        };
-
-        this.jobs.set(jobId, jobInfo);
-
-        // Supabase sync_jobs 테이블에 초기 등록
-        try {
-            await client.from('sync_jobs').insert({
-                id: jobId,
-                union_id: request.unionId,
-                job_type: 'SYNC_PROPERTIES', // GIS 페이지와 구분하기 위해 명시적으로 설정
-                status: 'PROCESSING',
-                progress: 0,
-                preview_data: { job_type: 'SYNC_PROPERTIES', totalCount },
-            });
-            logger.info(`Sync properties job added: ${jobId} (property units to sync: ${totalCount})`);
-        } catch (error) {
-            logger.error(`sync_jobs registration failed (${jobId})`, error);
-        }
-
-        this.queue
-            .add(async () => {
-                await this.processSyncPropertiesJob(jobId, request.unionId);
-            })
-            .catch((err) => {
-                logger.error(`Sync properties job ${jobId} fatal error`, err);
-                this.updateJobStatus(jobId, { status: 'failed', error: err.message });
-                supabaseService.updateSyncJobStatus(jobId, 'FAILED', 0, err.message);
-            });
-
-        return jobInfo;
+        void request;
+        throw Object.assign(new Error('호실 자동 연결은 Phase F 승인 전까지 사용할 수 없습니다.'), {
+            code: 'FEATURE_DISABLED_PHASE_F',
+        });
     }
 
     /**
@@ -693,7 +640,9 @@ class MemberQueueService {
                     this.updateJobStatus(jobId, { processedCount: processedRowCount });
                     if (progress % 5 === 0 || processedRowCount === totalCount) {
                         await supabaseService.updateSyncJobStatus(jobId, 'PROCESSING', progress, undefined, {
-                            job_type: 'PRE_REGISTER', phase: 'SAVING',
+                            job_type: 'PRE_REGISTER',
+                            memberOperation: 'PRE_REGISTER',
+                            phase: 'SAVING',
                             matchedCount, unmatchedCount, savedCount, updatedCount, duplicateCount, totalCount,
                             propertyLinkCreatedCount,
                             propertyLinkUpdatedCount,
@@ -726,7 +675,9 @@ class MemberQueueService {
                         this.updateJobStatus(jobId, { processedCount: processedRowCount });
                         if (progress % 5 === 0 || processedRowCount === totalCount) {
                             await supabaseService.updateSyncJobStatus(jobId, 'PROCESSING', progress, undefined, {
-                                job_type: 'PRE_REGISTER', phase: 'SAVING',
+                                job_type: 'PRE_REGISTER',
+                                memberOperation: 'PRE_REGISTER',
+                                phase: 'SAVING',
                                 matchedCount, unmatchedCount, savedCount, updatedCount, duplicateCount, totalCount,
                                 propertyLinkCreatedCount,
                                 propertyLinkUpdatedCount,
@@ -773,19 +724,6 @@ class MemberQueueService {
                         const normalizedDong = this.normalizeDong(member.row.dong);
                         const normalizedHo = this.normalizeHo(member.row.ho);
 
-                        let buildingUnitId: string | null = null;
-                        if (member.pnu) {
-                            buildingUnitId = await this.findOrCreateBuildingUnit(
-                                client,
-                                member.pnu,
-                                member.row.buildingName || null,
-                                normalizedDong,
-                                normalizedHo,
-                                this.sanitizeNumeric(member.row.landArea || member.row.area),
-                                this.sanitizeNumeric(member.row.officialPrice)
-                            );
-                        }
-
                         const landArea = this.sanitizeNumeric(member.row.landArea);
                         const landOwnershipRatio = this.sanitizeNumeric(member.row.landOwnershipRatio);
                         const buildingArea = this.sanitizeNumeric(member.row.buildingArea);
@@ -819,7 +757,6 @@ class MemberQueueService {
                             {
                                 pnu: finalPnu,
                                 previousPnu,
-                                buildingUnitId,
                                 propertyAddressJibun: member.row.propertyAddress || null,
                                 propertyAddressRoad: member.row.propertyAddressRoad || null,
                                 buildingName: member.row.buildingName || null,
@@ -887,6 +824,7 @@ class MemberQueueService {
             if (progress % 5 === 0 || processedRowCount === totalCount) {
                 const previewData = {
                     job_type: 'PRE_REGISTER',
+                    memberOperation: 'PRE_REGISTER',
                     phase: 'SAVING',
                     matchedCount,
                     unmatchedCount,
@@ -924,6 +862,7 @@ class MemberQueueService {
 
         const previewData = {
             job_type: 'PRE_REGISTER',
+            memberOperation: 'PRE_REGISTER',
             phase: 'COMPLETED',
             ...result,
         };
@@ -1045,7 +984,6 @@ class MemberQueueService {
         input: {
             pnu: string | null;
             previousPnu: string | null;
-            buildingUnitId: string | null;
             propertyAddressJibun: string | null;
             propertyAddressRoad: string | null;
             buildingName: string | null;
@@ -1064,9 +1002,6 @@ class MemberQueueService {
             .eq('is_deleted', false);
 
         query = input.pnu ? query.eq('pnu', input.pnu) : query.is('pnu', null);
-        query = input.buildingUnitId
-            ? query.eq('building_unit_id', input.buildingUnitId)
-            : query.is('building_unit_id', null);
         query = input.dong ? query.eq('dong', input.dong) : query.is('dong', null);
         query = input.ho ? query.eq('ho', input.ho) : query.is('ho', null);
 
@@ -1104,7 +1039,6 @@ class MemberQueueService {
             union_id: unionId,
             pnu: input.pnu,
             previous_pnu: input.previousPnu,
-            building_unit_id: input.buildingUnitId,
             property_address_jibun: input.propertyAddressJibun,
             property_address_road: input.propertyAddressRoad,
             building_name: input.buildingName,
@@ -1252,143 +1186,6 @@ class MemberQueueService {
     }
 
     /**
-     * Building Unit 조회 또는 생성
-     * 1. PNU로 land_lot 존재 확인 (GIS 초기화 필요)
-     * 2. building_land_lots로 building 조회, 없으면 생성 + 매핑 추가
-     * 3. building에서 동/호수로 building_unit 조회, 없으면 생성
-     * 4. 면적/공시지가 업데이트 (엑셀에서 제공된 경우)
-     */
-    private async findOrCreateBuildingUnit(
-        client: any,
-        pnu: string,
-        buildingName: string | null,
-        dong: string | null,
-        ho: string | null,
-        area: number | null,
-        officialPrice: number | null
-    ): Promise<string | null> {
-        try {
-            // 1. PNU로 land_lot 존재 확인 (FK 제약으로 인해 land_lots에 먼저 존재해야 함)
-            const { data: landLot, error: landLotError } = await client
-                .from('land_lots')
-                .select('pnu')
-                .eq('pnu', pnu)
-                .single();
-
-            if (landLotError && landLotError.code !== 'PGRST116') {
-                logger.warn(`land_lot lookup error for PNU ${pnu}: ${landLotError.message}`);
-                return null;
-            }
-
-            // land_lot이 없으면 생성하지 않음 (GIS 초기화에서 생성되어야 함)
-            if (!landLot) {
-                logger.debug(`No land_lot found for PNU ${pnu}, skipping building_unit creation`);
-                return null;
-            }
-
-            // 2. building_land_lots에서 PNU로 building 조회
-            let { data: mapping, error: mappingError } = await client
-                .from('building_land_lots')
-                .select('building_id')
-                .eq('pnu', pnu)
-                .single();
-
-            if (mappingError && mappingError.code !== 'PGRST116') {
-                logger.warn(`building_land_lots lookup error for PNU ${pnu}: ${mappingError.message}`);
-            }
-
-            let buildingId: string | null = mapping?.building_id || null;
-
-            // building이 없으면 생성 + building_land_lots에 매핑 추가
-            if (!buildingId) {
-                const newBuildingId = uuidv4();
-                const { error: createBuildingError } = await client.from('buildings').insert({
-                    id: newBuildingId,
-                    building_name: buildingName,
-                    building_type: 'NONE', // 기본값
-                });
-
-                if (createBuildingError) {
-                    logger.warn(`building creation failed for PNU ${pnu}: ${createBuildingError.message}`);
-                    return null;
-                }
-
-                buildingId = newBuildingId;
-
-                // building_land_lots에 매핑 추가
-                const { error: mappingInsertError } = await client.from('building_land_lots').insert({
-                    pnu: pnu,
-                    building_id: buildingId,
-                });
-
-                if (mappingInsertError) {
-                    logger.warn(`building_land_lots mapping failed for PNU ${pnu}: ${mappingInsertError.message}`);
-                    // building은 생성되었으므로 계속 진행
-                }
-
-                logger.debug(`Created new building ${buildingId} with mapping for PNU ${pnu}`);
-            }
-
-            // 3. building_id + dong + ho로 building_unit 조회
-            let query = client.from('building_units').select('id').eq('building_id', buildingId);
-
-            if (dong) {
-                query = query.eq('dong', dong);
-            } else {
-                query = query.is('dong', null);
-            }
-
-            if (ho) {
-                query = query.eq('ho', ho);
-            } else {
-                query = query.is('ho', null);
-            }
-
-            const { data: existingUnit, error: unitLookupError } = await query.limit(1).single();
-
-            if (unitLookupError && unitLookupError.code !== 'PGRST116') {
-                logger.warn(`building_unit lookup error: ${unitLookupError.message}`);
-            }
-
-            if (existingUnit) {
-                // 기존 unit이 있고, 면적/공시지가가 제공되면 업데이트
-                if (area !== null || officialPrice !== null) {
-                    const updateData: Record<string, any> = {};
-                    if (area !== null) updateData.area = area;
-                    if (officialPrice !== null) updateData.official_price = officialPrice;
-
-                    await client.from('building_units').update(updateData).eq('id', existingUnit.id);
-
-                    logger.debug(`Updated building_unit ${existingUnit.id} with area=${area}, price=${officialPrice}`);
-                }
-                return existingUnit.id;
-            }
-
-            // 4. building_unit이 없으면 생성
-            const newUnitId = uuidv4();
-            const { error: createUnitError } = await client.from('building_units').insert({
-                id: newUnitId,
-                building_id: buildingId,
-                dong: dong,
-                ho: ho,
-                area: area,
-                official_price: officialPrice,
-            });
-
-            if (createUnitError) {
-                logger.warn(`building_unit creation failed: ${createUnitError.message}`);
-                return null;
-            }
-
-            logger.debug(`Created new building_unit ${newUnitId} for building ${buildingId} (dong=${dong}, ho=${ho})`);
-            return newUnitId;
-        } catch (error: any) {
-            logger.error(`findOrCreateBuildingUnit error: ${error.message}`);
-            return null;
-        }
-    }
-
-    /**
      * 작업 상태 업데이트
      */
     private updateJobStatus(jobId: string, update: Partial<MemberJobInfo>): void {
@@ -1404,146 +1201,6 @@ class MemberQueueService {
      */
     getJobStatus(jobId: string): MemberJobInfo | undefined {
         return this.jobs.get(jobId);
-    }
-
-    /**
-     * 소유지 동기화 처리
-     * property_units 테이블의 pnu, dong, ho를 기반으로
-     * building_units와 매칭하여 building_unit_id를 연결합니다.
-     */
-    private async processSyncPropertiesJob(jobId: string, unionId: string): Promise<void> {
-        const job = this.jobs.get(jobId);
-        if (!job) return;
-
-        logger.info(`[Sync Properties ${jobId}] Processing started for union ${unionId}`);
-        this.updateJobStatus(jobId, { status: 'processing', startedAt: new Date() });
-
-        const client = supabaseService.getClient();
-        const errors: string[] = [];
-        let syncedCount = 0;
-        let skippedCount = 0;
-        let failedCount = 0;
-
-        try {
-            // 해당 조합의 pnu가 있고 building_unit_id가 없는 property_units 조회
-            const { data: propertyUnits, error: propUnitsError } = await client
-                .from('property_units')
-                .select(
-                    `
-                    id, pnu, dong, ho, building_name, property_address_jibun,
-                    land_area, building_area
-                `
-                )
-                .eq('union_id', unionId)
-                .eq('is_deleted', false)
-                .not('pnu', 'is', null)
-                .is('building_unit_id', null);
-
-            if (propUnitsError) {
-                throw new Error(`Failed to fetch property units: ${propUnitsError.message}`);
-            }
-
-            const totalCount = propertyUnits?.length || 0;
-            this.updateJobStatus(jobId, { totalCount });
-
-            logger.info(`[Sync Properties ${jobId}] Found ${totalCount} property units to sync`);
-
-            for (let i = 0; i < (propertyUnits || []).length; i++) {
-                const propUnit = propertyUnits![i];
-                const currentIndex = i + 1;
-                const label = propUnit.property_address_jibun || propUnit.pnu || propUnit.id;
-
-                try {
-                    // building_unit 조회 또는 생성
-                    const buildingUnitId = await this.findOrCreateBuildingUnit(
-                        client,
-                        propUnit.pnu!,
-                        propUnit.building_name,
-                        propUnit.dong,
-                        propUnit.ho,
-                        propUnit.land_area,
-                        null // officialPrice
-                    );
-
-                    if (!buildingUnitId) {
-                        failedCount++;
-                        errors.push(`${label}: GIS 데이터가 없어 매칭 불가 (PNU: ${propUnit.pnu})`);
-                        continue;
-                    }
-
-                    // property_units에 building_unit_id 연결
-                    const { error: updateError } = await client
-                        .from('property_units')
-                        .update({ building_unit_id: buildingUnitId })
-                        .eq('id', propUnit.id);
-
-                    if (updateError) {
-                        failedCount++;
-                        errors.push(`${label}: 연결 저장 실패 - ${updateError.message}`);
-                        continue;
-                    }
-
-                    syncedCount++;
-                    logger.debug(`[Sync Properties ${jobId}] Synced ${label} to building_unit ${buildingUnitId}`);
-                } catch (err: any) {
-                    failedCount++;
-                    errors.push(`${label}: ${err.message || 'Unknown error'}`);
-                }
-
-                // 진행률 업데이트
-                const progress = Math.round((currentIndex / totalCount) * 100);
-
-                // 5% 단위로 DB 업데이트
-                if (progress % 5 === 0 || currentIndex === totalCount) {
-                    const previewData = {
-                        job_type: 'SYNC_PROPERTIES',
-                        totalCount,
-                        syncedCount,
-                        skippedCount,
-                        failedCount,
-                    };
-                    await supabaseService.updateSyncJobStatus(jobId, 'PROCESSING', progress, undefined, previewData);
-                }
-            }
-
-            // 완료 처리
-            const result: SyncPropertiesResult = {
-                success: failedCount === 0,
-                totalCount,
-                syncedCount,
-                skippedCount,
-                failedCount,
-                errors: errors.slice(0, 100),
-            };
-
-            this.updateJobStatus(jobId, {
-                status: 'completed',
-                completedAt: new Date(),
-                result,
-            });
-
-            const previewData = {
-                job_type: 'SYNC_PROPERTIES',
-                ...result,
-            };
-
-            await supabaseService.updateSyncJobStatus(
-                jobId,
-                'COMPLETED',
-                100,
-                errors.length > 0 ? JSON.stringify({ errors: errors.slice(0, 100) }) : undefined,
-                previewData
-            );
-
-            logger.info(
-                `[Sync Properties ${jobId}] Completed - Synced: ${syncedCount}, Skipped: ${skippedCount}, Failed: ${failedCount}`
-            );
-        } catch (error: any) {
-            const errorMessage = error.message || 'Unknown error';
-            logger.error(`[Sync Properties ${jobId}] Failed`, error);
-            this.updateJobStatus(jobId, { status: 'failed', error: errorMessage, completedAt: new Date() });
-            await supabaseService.updateSyncJobStatus(jobId, 'FAILED', 0, errorMessage);
-        }
     }
 
     /**

@@ -7,6 +7,7 @@ import {
     ConsentJobStatusResponse,
 } from '../types/consent.types';
 import { createLogger } from '../utils/logger';
+import { toSyncJobRouteFailure } from '../services/sync-job-admission';
 
 const router = Router();
 const logger = createLogger('CONSENT-ROUTE');
@@ -64,9 +65,11 @@ router.post('/queue', async (req, res) => {
         });
     } catch (error: any) {
         logger.error('Consent bulk update request failed:', error);
-        res.status(500).json({
+        const failure = toSyncJobRouteFailure(error, 'CONSENT_BULK_JOB_START_FAILED');
+        res.status(failure.status).json({
             success: false,
-            error: error.message || 'Internal server error.',
+            code: failure.code,
+            error: failure.message,
         });
     }
 });
@@ -124,9 +127,11 @@ router.post('/upload-queue', async (req, res) => {
         });
     } catch (error: any) {
         logger.error('Consent upload request failed:', error);
-        res.status(500).json({
+        const failure = toSyncJobRouteFailure(error, 'CONSENT_UPLOAD_JOB_START_FAILED');
+        res.status(failure.status).json({
             success: false,
-            error: error.message || 'Internal server error.',
+            code: failure.code,
+            error: failure.message,
         });
     }
 });

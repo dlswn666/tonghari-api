@@ -1,8 +1,9 @@
 import { Router } from 'express';
 import { memberQueueService } from '../services/member.queue.service';
 import { supabaseService } from '../services/supabase.service';
-import { MemberInviteSyncRequest, PreRegisterRequest, MemberJobStatusResponse, SyncPropertiesRequest } from '../types/member.types';
+import { MemberInviteSyncRequest, PreRegisterRequest, MemberJobStatusResponse } from '../types/member.types';
 import { createLogger } from '../utils/logger';
+import { toSyncJobRouteFailure } from '../services/sync-job-admission';
 
 const router = Router();
 const logger = createLogger('MEMBER-ROUTE');
@@ -61,9 +62,11 @@ router.post('/invite-sync', async (req, res) => {
         });
     } catch (error: any) {
         logger.error('Member invite sync request failed:', error);
-        res.status(500).json({
+        const failure = toSyncJobRouteFailure(error, 'MEMBER_INVITE_JOB_START_FAILED');
+        res.status(failure.status).json({
             success: false,
-            error: error.message || 'Internal server error.',
+            code: failure.code,
+            error: failure.message,
         });
     }
 });
@@ -126,9 +129,11 @@ router.post('/pre-register', async (req, res) => {
         });
     } catch (error: any) {
         logger.error('Pre-register request failed:', error);
-        res.status(500).json({
+        const failure = toSyncJobRouteFailure(error, 'PRE_REGISTER_JOB_START_FAILED');
+        res.status(failure.status).json({
             success: false,
-            error: error.message || 'Internal server error.',
+            code: failure.code,
+            error: failure.message,
         });
     }
 });
@@ -270,11 +275,10 @@ router.get('/jobs/:unionId', async (req, res) => {
 });
 
 /**
- * 소유지 동기화 요청 (property_units -> building_units 연결)
+ * 소유지 자동 연결 요청
  * POST /member/sync-properties
  *
- * GIS 데이터(land_lots, buildings, building_units)와 정식 물건지를 매칭하여
- * property_units.building_unit_id를 보강합니다.
+ * Phase F 별도 승인 전까지 서버에서 명시적으로 차단한다.
  *
  * Request Body:
  * {
@@ -291,30 +295,12 @@ router.post('/sync-properties', async (req, res) => {
         });
     }
 
-    try {
-        logger.info(`Sync properties request: unionId=${unionId}`);
-
-        const request: SyncPropertiesRequest = {
-            jobType: 'SYNC_PROPERTIES',
-            unionId,
-        };
-
-        const jobInfo = await memberQueueService.addSyncPropertiesJob(request);
-
-        res.json({
-            success: true,
-            jobId: jobInfo.jobId,
-            jobType: jobInfo.jobType,
-            status: jobInfo.status,
-            totalCount: jobInfo.totalCount,
-        });
-    } catch (error: any) {
-        logger.error('Sync properties request failed:', error);
-        res.status(500).json({
-            success: false,
-            error: error.message || 'Internal server error.',
-        });
-    }
+    logger.warn(`Sync properties blocked before Phase F approval: unionId=${unionId}`);
+    return res.status(409).json({
+        success: false,
+        code: 'FEATURE_DISABLED_PHASE_F',
+        error: '호실 자동 연결은 Phase F 승인 전까지 사용할 수 없습니다.',
+    });
 });
 
 export default router;

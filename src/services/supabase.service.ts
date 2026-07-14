@@ -42,21 +42,6 @@ interface IndividualHousingOfficialPriceInput {
     metadata: Record<string, unknown>;
 }
 
-interface BuildingUnitMatchRow {
-    id: string;
-    dong: string | null;
-    ho: string | null;
-    official_price?: number | null;
-}
-
-interface PropertyUnitMatchCandidate {
-    id: string;
-    dong: string | null;
-    ho: string | null;
-    building_unit_id: string | null;
-    building_name?: string | null;
-}
-
 /**
  * Supabase 서비스
  * - Vault에서 Sender Key 조회
@@ -713,50 +698,6 @@ class SupabaseService {
         return candidate.endsWith(unit) || unit.endsWith(candidate);
     }
 
-    private findMatchingBuildingUnit(
-        candidate: PropertyUnitMatchCandidate,
-        units: BuildingUnitMatchRow[]
-    ): BuildingUnitMatchRow | null {
-        const candidateHo = this.normalizeHoForMatch(candidate.ho);
-
-        // 단독주택 fallback: candidate.ho가 없고, 후보 풀의 unit이 단 1건이며
-        // 그 unit도 dong/ho 둘 다 비어있으면 1:1 매칭으로 본다.
-        if (!candidateHo) {
-            const candidateDongNorm = this.normalizeDongForMatch(candidate.dong, candidate.building_name);
-            if (units.length === 1) {
-                const sole = units[0];
-                const soleDongNorm = this.normalizeDongForMatch(sole.dong);
-                const soleHoNorm = this.normalizeHoForMatch(sole.ho);
-                if (!soleHoNorm && (!candidateDongNorm || !soleDongNorm || candidateDongNorm === soleDongNorm)) {
-                    return sole;
-                }
-            }
-            return null;
-        }
-
-        const hoMatches = units.filter((unit) => this.isHoMatch(candidate.ho, unit.ho, unit.dong));
-        if (hoMatches.length === 0) return null;
-
-        const dongMatches = hoMatches.filter((unit) =>
-            this.isDongMatch(candidate.dong, unit.dong, candidate.building_name)
-        );
-        if (dongMatches.length === 1) return dongMatches[0];
-
-        const candidateDong = this.normalizeDongForMatch(candidate.dong, candidate.building_name);
-        const incompleteDongMatches = hoMatches.filter((unit) => {
-            const unitDong = this.normalizeDongForMatch(unit.dong);
-            return !candidateDong || !unitDong;
-        });
-
-        // 동 값이 한쪽에 없고 같은 호수가 건물 안에서 유일하면 연결한다.
-        if (incompleteDongMatches.length === 1) return incompleteDongMatches[0];
-
-        const pricedIncompleteMatches = incompleteDongMatches.filter((unit) => unit.official_price !== null && unit.official_price !== undefined);
-        if (pricedIncompleteMatches.length === 1) return pricedIncompleteMatches[0];
-
-        return null;
-    }
-
     private buildOfficialPriceMetadata(
         existingMetadata: Record<string, unknown> | null | undefined,
         price: ApartmentOfficialPriceUnitInput,
@@ -1057,77 +998,6 @@ class SupabaseService {
         return data.id;
     }
 
-    private async listBuildingPnus(buildingId: string): Promise<string[]> {
-        const { data, error } = await this.client
-            .from('building_land_lots')
-            .select('pnu')
-            .eq('building_id', buildingId);
-
-        if (error) {
-            logger.warn(`building_land_lots lookup failed for building ${buildingId}: ${error.message}`);
-            return [];
-        }
-
-        return (data ?? [])
-            .map((row: { pnu: string | null }) => row.pnu)
-            .filter((pnu: string | null): pnu is string => Boolean(pnu));
-    }
-
-    private async linkPropertyUnitsToBuildingUnits(
-        pnus: string[],
-        units: BuildingUnitMatchRow[]
-    ): Promise<{ linkedCount: number; skippedCount: number }> {
-        if (pnus.length === 0 || units.length === 0) {
-            return { linkedCount: 0, skippedCount: 0 };
-        }
-
-        const { data, error } = await this.client
-            .from('property_units')
-            .select('id, dong, ho, building_unit_id, building_name')
-            .in('pnu', pnus)
-            .eq('is_deleted', false);
-
-        if (error) {
-            logger.warn(`property_units lookup failed for official price linking: ${error.message}`);
-            return { linkedCount: 0, skippedCount: 0 };
-        }
-
-        let linkedCount = 0;
-        let skippedCount = 0;
-
-        for (const row of (data ?? []) as PropertyUnitMatchCandidate[]) {
-            const matchedUnit = this.findMatchingBuildingUnit(row, units);
-            if (!matchedUnit) {
-                skippedCount++;
-                continue;
-            }
-
-            const updateData: Record<string, unknown> = {};
-            if (row.building_unit_id !== matchedUnit.id) updateData.building_unit_id = matchedUnit.id;
-            if (matchedUnit.dong !== null && row.dong !== matchedUnit.dong) updateData.dong = matchedUnit.dong;
-            if (matchedUnit.ho !== null && row.ho !== matchedUnit.ho) updateData.ho = matchedUnit.ho;
-
-            if (Object.keys(updateData).length === 0) continue;
-
-            updateData.updated_at = new Date().toISOString();
-
-            const { error: updateError } = await this.client
-                .from('property_units')
-                .update(updateData)
-                .eq('id', row.id);
-
-            if (updateError) {
-                logger.warn(`property_units official price link failed (${row.id}): ${updateError.message}`);
-                skippedCount++;
-                continue;
-            }
-
-            linkedCount++;
-        }
-
-        return { linkedCount, skippedCount };
-    }
-
     async upsertApartmentOfficialPriceUnits(
         buildingId: string,
         requestedPnu: string,
@@ -1151,35 +1021,12 @@ class SupabaseService {
             }
         }
 
-        const { data: units, error: unitsError } = await this.client
-            .from('building_units')
-            .select('id, dong, ho, official_price')
-            .eq('building_id', buildingId);
-
-        if (unitsError) {
-            logger.warn(`building_units lookup failed after official price upsert (${buildingId}): ${unitsError.message}`);
-            return {
-                upsertedCount,
-                skippedCount,
-                linkedUserPropertyCount: 0,
-                linkedPropertyUnitCount: 0,
-                linkSkippedCount: 0,
-            };
-        }
-
-        const buildingPnus = await this.listBuildingPnus(buildingId);
-        const pricePnus = prices.map((price) => price.sourcePnu).filter((pnu): pnu is string => Boolean(pnu));
-        const linkPnus = Array.from(new Set([requestedPnu, ...buildingPnus, ...pricePnus].filter(Boolean)));
-
-        const normalizedUnits = ((units ?? []) as BuildingUnitMatchRow[]).filter((unit) => this.cleanText(unit.ho));
-        const propertyLinkResult = await this.linkPropertyUnitsToBuildingUnits(linkPnus, normalizedUnits);
-
         return {
             upsertedCount,
             skippedCount,
             linkedUserPropertyCount: 0,
-            linkedPropertyUnitCount: propertyLinkResult.linkedCount,
-            linkSkippedCount: propertyLinkResult.skippedCount,
+            linkedPropertyUnitCount: 0,
+            linkSkippedCount: 0,
         };
     }
 
@@ -1470,40 +1317,6 @@ class SupabaseService {
     }
 
     /**
-     * 개별주택 building에 대한 후속 link 처리 — building_units가 단독주택(unit 1건+dong/ho null)이면
-     * 단독주택 fallback 매칭으로 property_units 의 building_unit_id 채움.
-     */
-    async linkPropertyUnitsForIndividualHousing(
-        buildingId: string,
-        updatedUnitIds: string[]
-    ): Promise<{ linkedUserCount: number; linkedPropertyCount: number }> {
-        if (updatedUnitIds.length === 0) {
-            return { linkedUserCount: 0, linkedPropertyCount: 0 };
-        }
-
-        const pnus = await this.listBuildingPnus(buildingId);
-        if (pnus.length === 0) return { linkedUserCount: 0, linkedPropertyCount: 0 };
-
-        const { data: unitRows, error: unitError } = await this.client
-            .from('building_units')
-            .select('id, dong, ho, official_price')
-            .in('id', updatedUnitIds);
-
-        if (unitError) {
-            logger.warn(`building_units fetch for individual housing link failed: ${unitError.message}`);
-            return { linkedUserCount: 0, linkedPropertyCount: 0 };
-        }
-
-        const units = ((unitRows ?? []) as BuildingUnitMatchRow[]);
-
-        const propertyResult = await this.linkPropertyUnitsToBuildingUnits(pnus, units);
-        return {
-            linkedUserCount: 0,
-            linkedPropertyCount: propertyResult.linkedCount,
-        };
-    }
-
-    /**
      * 토지 공시지가 재동기화 대상 조회 (2026-04)
      * 해당 조합의 land_lots 전체 PNU 목록을 반환 (전체 무조건 재조회)
      */
@@ -1569,7 +1382,22 @@ class SupabaseService {
             }
 
             if (previewData !== undefined) {
-                updateData.preview_data = previewData;
+                const { data: currentJob, error: currentJobError } = await this.client
+                    .from('sync_jobs')
+                    .select('preview_data')
+                    .eq('id', jobId)
+                    .maybeSingle();
+
+                if (currentJobError) {
+                    logger.error(`sync_jobs preview lookup failed (${jobId}): ${JSON.stringify(currentJobError)}`);
+                    return false;
+                }
+
+                const currentPreview =
+                    currentJob?.preview_data && typeof currentJob.preview_data === 'object'
+                        ? currentJob.preview_data
+                        : {};
+                updateData.preview_data = { ...currentPreview, ...previewData };
             }
 
             const { error, count } = await this.client

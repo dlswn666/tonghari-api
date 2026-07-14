@@ -42,6 +42,9 @@ export const authMiddleware = (
     req.user = {
         unionId: verifyResult.payload.unionId,
         userId: verifyResult.payload.userId,
+        role: verifyResult.payload.role,
+        isBlocked: verifyResult.payload.isBlocked,
+        actorUserId: verifyResult.payload.actorUserId,
     };
 
     next();

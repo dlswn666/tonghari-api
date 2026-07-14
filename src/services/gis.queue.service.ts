@@ -19,6 +19,7 @@ import {
     LandPriceSyncTarget,
 } from '../types/gis.types';
 import { createLogger } from '../utils/logger';
+import { persistSyncJobOrThrow } from './sync-job-admission';
 
 const logger = createLogger('GIS-QUEUE');
 
@@ -281,25 +282,22 @@ class GisQueueService {
             createdAt: new Date(),
         };
 
-        this.jobs.set(jobId, jobInfo);
-
-        // Supabase sync_jobs 테이블에 초기 등록
-        try {
-            const { error } = await supabaseService.getClient().from('sync_jobs').insert({
+        await persistSyncJobOrThrow(jobId, request.unionId, () =>
+            supabaseService.getClient().from('sync_jobs').insert({
                 id: jobId,
                 union_id: request.unionId,
                 job_type: 'GIS_MAP',
                 status: 'PROCESSING',
                 progress: 0,
-            });
-            if (error) {
-                logger.error(`sync_jobs insert error (${jobId}): ${JSON.stringify(error)}`);
-            } else {
-                logger.info(`GIS job added: ${jobId} (parcels: ${request.addresses.length})`);
-            }
-        } catch (error) {
-            logger.error(`sync_jobs registration failed (${jobId})`, error);
-        }
+                preview_data: {
+                    actorUserId: request.actorUserId,
+                    source: 'GIS_MAP',
+                    totalCount: request.addresses.length,
+                },
+            }).select('id, union_id').single()
+        );
+        this.jobs.set(jobId, jobInfo);
+        logger.info(`GIS job added: ${jobId} (parcels: ${request.addresses.length})`);
 
         this.queue
             .add(async () => {
@@ -755,25 +753,22 @@ class GisQueueService {
             status: 'pending',
             createdAt: new Date(),
         };
-        this.jobs.set(jobId, jobInfo);
-
-        // 2. sync_jobs 테이블 등록
-        try {
-            const { error } = await supabaseService.getClient().from('sync_jobs').insert({
+        await persistSyncJobOrThrow(jobId, request.unionId, () =>
+            supabaseService.getClient().from('sync_jobs').insert({
                 id: jobId,
                 union_id: request.unionId,
                 job_type: 'APARTMENT_PRICE_SYNC',
                 status: 'PROCESSING',
                 progress: 0,
-            });
-            if (error) {
-                logger.error(`sync_jobs insert error (${jobId}): ${JSON.stringify(error)}`);
-            } else {
-                logger.info(`Apartment price sync job added: ${jobId} (targets: ${totalPnu})`);
-            }
-        } catch (error) {
-            logger.error(`sync_jobs registration failed (${jobId})`, error);
-        }
+                preview_data: {
+                    actorUserId: request.actorUserId,
+                    source: 'APARTMENT_PRICE_SYNC',
+                    totalCount: totalPnu,
+                },
+            }).select('id, union_id').single()
+        );
+        this.jobs.set(jobId, jobInfo);
+        logger.info(`Apartment price sync job added: ${jobId} (targets: ${totalPnu})`);
 
         // 3. 대상 없으면 바로 완료 처리
         if (totalPnu === 0) {
@@ -968,24 +963,22 @@ class GisQueueService {
             status: 'pending',
             createdAt: new Date(),
         };
-        this.jobs.set(jobId, jobInfo);
-
-        try {
-            const { error } = await supabaseService.getClient().from('sync_jobs').insert({
+        await persistSyncJobOrThrow(jobId, request.unionId, () =>
+            supabaseService.getClient().from('sync_jobs').insert({
                 id: jobId,
                 union_id: request.unionId,
                 job_type: 'INDIVIDUAL_HOUSING_PRICE_SYNC',
                 status: 'PROCESSING',
                 progress: 0,
-            });
-            if (error) {
-                logger.error(`sync_jobs insert error (${jobId}): ${JSON.stringify(error)}`);
-            } else {
-                logger.info(`Individual housing price sync job added: ${jobId} (targets: ${totalPnu})`);
-            }
-        } catch (error) {
-            logger.error(`sync_jobs registration failed (${jobId})`, error);
-        }
+                preview_data: {
+                    actorUserId: request.actorUserId,
+                    source: 'INDIVIDUAL_HOUSING_PRICE_SYNC',
+                    totalCount: totalPnu,
+                },
+            }).select('id, union_id').single()
+        );
+        this.jobs.set(jobId, jobInfo);
+        logger.info(`Individual housing price sync job added: ${jobId} (targets: ${totalPnu})`);
 
         if (totalPnu === 0) {
             this.updateJobStatus(jobId, { status: 'completed', completedAt: new Date() });
@@ -1114,7 +1107,7 @@ class GisQueueService {
                             }))
                         );
 
-                        const { updatedCount, updatedUnitIds } =
+                        const { updatedCount } =
                             await supabaseService.updateBuildingUnitsOfficialPriceByBuildingId(
                                 target.buildingId,
                                 price,
@@ -1127,17 +1120,6 @@ class GisQueueService {
                             logger.debug(
                                 `[INDVD-HOUSE-PRICE ${jobId}] (${currentIndex}/${targets.length}) Updated building ${target.buildingId}: ${price.officialPrice} (${updatedCount} units)`
                             );
-
-                            // 단독주택 후속 link — property_units → building_unit_id 채움
-                            const linkResult = await supabaseService.linkPropertyUnitsForIndividualHousing(
-                                target.buildingId,
-                                updatedUnitIds
-                            );
-                            if (linkResult.linkedUserCount > 0 || linkResult.linkedPropertyCount > 0) {
-                                logger.debug(
-                                    `[INDVD-HOUSE-PRICE ${jobId}] (${currentIndex}/${targets.length}) Linked building ${target.buildingId}: pu=${linkResult.linkedPropertyCount}`
-                                );
-                            }
                         } else {
                             diagnosticBuildingIds.add(target.buildingId);
                             failedEntries.push({
@@ -1239,25 +1221,22 @@ class GisQueueService {
             status: 'pending',
             createdAt: new Date(),
         };
-        this.jobs.set(jobId, jobInfo);
-
-        // 2. sync_jobs 테이블 등록
-        try {
-            const { error } = await supabaseService.getClient().from('sync_jobs').insert({
+        await persistSyncJobOrThrow(jobId, request.unionId, () =>
+            supabaseService.getClient().from('sync_jobs').insert({
                 id: jobId,
                 union_id: request.unionId,
                 job_type: 'LAND_PRICE_SYNC',
                 status: 'PROCESSING',
                 progress: 0,
-            });
-            if (error) {
-                logger.error(`sync_jobs insert error (${jobId}): ${JSON.stringify(error)}`);
-            } else {
-                logger.info(`Land price sync job added: ${jobId} (targets: ${totalPnu})`);
-            }
-        } catch (error) {
-            logger.error(`sync_jobs registration failed (${jobId})`, error);
-        }
+                preview_data: {
+                    actorUserId: request.actorUserId,
+                    source: 'LAND_PRICE_SYNC',
+                    totalCount: totalPnu,
+                },
+            }).select('id, union_id').single()
+        );
+        this.jobs.set(jobId, jobInfo);
+        logger.info(`Land price sync job added: ${jobId} (targets: ${totalPnu})`);
 
         // 3. 대상 없으면 바로 완료 처리
         if (totalPnu === 0) {

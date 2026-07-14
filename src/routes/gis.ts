@@ -1,17 +1,25 @@
-import { Router } from 'express';
+import { Response, Router } from 'express';
 import { gisQueueService } from '../services/gis.queue.service';
 import { gisService } from '../services/gis.service';
 import { supabaseService } from '../services/supabase.service';
 import { authMiddleware } from '../middleware/auth';
+import { gisSystemAdminMiddleware } from '../middleware/gis-system-admin';
+import { gisAddressReadRateLimitMiddleware } from '../middleware/gis-address-rate-limit';
+import { toSyncJobRouteFailure } from '../services/sync-job-admission';
 import { createLogger } from '../utils/logger';
 
 const router = Router();
 const logger = createLogger('GIS-ROUTE');
 
+function sendGisQueueError(res: Response, error: unknown) {
+    const failure = toSyncJobRouteFailure(error, 'GIS_JOB_START_FAILED');
+    return res.status(failure.status).json({ success: false, code: failure.code, error: failure.message });
+}
+
 /**
  * GIS 데이터 동기화 요청
  */
-router.post('/sync', async (req, res) => {
+router.post('/sync', authMiddleware, gisSystemAdminMiddleware, async (req, res) => {
     const { unionId, addresses } = req.body;
 
     if (!unionId || !Array.isArray(addresses)) {
@@ -19,11 +27,15 @@ router.post('/sync', async (req, res) => {
     }
 
     try {
-        const jobInfo = await gisQueueService.addSyncJob({ unionId, addresses });
+        const jobInfo = await gisQueueService.addSyncJob({
+            unionId,
+            addresses,
+            actorUserId: req.user!.actorUserId!,
+        });
         res.json(jobInfo);
     } catch (error) {
-        console.error('GIS sync request failed:', error);
-        res.status(500).json({ error: 'Internal server error.' });
+        logger.error('GIS sync request failed', error);
+        return sendGisQueueError(res, error);
     }
 });
 
@@ -32,7 +44,7 @@ router.post('/sync', async (req, res) => {
  * 해당 조합의 공동주택 세대의 building_units.official_price를 VWorld API로 재갱신
  * body: { unionId: string }
  */
-router.post('/sync-apartment-prices', authMiddleware, async (req, res) => {
+router.post('/sync-apartment-prices', authMiddleware, gisSystemAdminMiddleware, async (req, res) => {
     const { unionId } = req.body;
 
     if (!unionId || typeof unionId !== 'string') {
@@ -45,7 +57,10 @@ router.post('/sync-apartment-prices', authMiddleware, async (req, res) => {
     }
 
     try {
-        const result = await gisQueueService.addApartmentPriceSyncJob({ unionId });
+        const result = await gisQueueService.addApartmentPriceSyncJob({
+            unionId,
+            actorUserId: req.user!.actorUserId!,
+        });
         return res.json({
             jobId: result.jobId,
             totalPnu: result.totalPnu,
@@ -53,7 +68,7 @@ router.post('/sync-apartment-prices', authMiddleware, async (req, res) => {
         });
     } catch (error: any) {
         logger.error(`Apartment price sync request failed (unionId: ${unionId})`, error);
-        return res.status(500).json({ error: error?.message || 'Internal server error.' });
+        return sendGisQueueError(res, error);
     }
 });
 
@@ -62,7 +77,7 @@ router.post('/sync-apartment-prices', authMiddleware, async (req, res) => {
  * 해당 조합의 단독주택 building_units.official_price를 VWorld API로 재갱신
  * body: { unionId: string }
  */
-router.post('/sync-individual-housing-prices', authMiddleware, async (req, res) => {
+router.post('/sync-individual-housing-prices', authMiddleware, gisSystemAdminMiddleware, async (req, res) => {
     const { unionId } = req.body;
 
     if (!unionId || typeof unionId !== 'string') {
@@ -74,7 +89,10 @@ router.post('/sync-individual-housing-prices', authMiddleware, async (req, res) 
     }
 
     try {
-        const result = await gisQueueService.addIndividualHousingPriceSyncJob({ unionId });
+        const result = await gisQueueService.addIndividualHousingPriceSyncJob({
+            unionId,
+            actorUserId: req.user!.actorUserId!,
+        });
         return res.json({
             jobId: result.jobId,
             totalPnu: result.totalPnu,
@@ -82,7 +100,7 @@ router.post('/sync-individual-housing-prices', authMiddleware, async (req, res) 
         });
     } catch (error: any) {
         logger.error(`Individual housing price sync request failed (unionId: ${unionId})`, error);
-        return res.status(500).json({ error: error?.message || 'Internal server error.' });
+        return sendGisQueueError(res, error);
     }
 });
 
@@ -91,7 +109,7 @@ router.post('/sync-individual-housing-prices', authMiddleware, async (req, res) 
  * 해당 조합의 land_lots 전체 PNU 의 official_price 를 VWorld API 로 재갱신
  * body: { unionId: string }
  */
-router.post('/sync-land-prices', authMiddleware, async (req, res) => {
+router.post('/sync-land-prices', authMiddleware, gisSystemAdminMiddleware, async (req, res) => {
     const { unionId } = req.body;
 
     if (!unionId || typeof unionId !== 'string') {
@@ -103,7 +121,10 @@ router.post('/sync-land-prices', authMiddleware, async (req, res) => {
     }
 
     try {
-        const result = await gisQueueService.addLandPriceSyncJob({ unionId });
+        const result = await gisQueueService.addLandPriceSyncJob({
+            unionId,
+            actorUserId: req.user!.actorUserId!,
+        });
         return res.json({
             jobId: result.jobId,
             totalPnu: result.totalPnu,
@@ -111,7 +132,7 @@ router.post('/sync-land-prices', authMiddleware, async (req, res) => {
         });
     } catch (error: any) {
         logger.error(`Land price sync request failed (unionId: ${unionId})`, error);
-        return res.status(500).json({ error: error?.message || 'Internal server error.' });
+        return sendGisQueueError(res, error);
     }
 });
 
@@ -119,7 +140,7 @@ router.post('/sync-land-prices', authMiddleware, async (req, res) => {
  * 전체 공시가격 동기화 (토지 + 공동주택 + 개별주택) — 세 개의 독립 sync_jobs 로 분리 등록
  * body: { unionId: string }
  */
-router.post('/sync-official-prices', authMiddleware, async (req, res) => {
+router.post('/sync-official-prices', authMiddleware, gisSystemAdminMiddleware, async (req, res) => {
     const { unionId } = req.body;
 
     if (!unionId || typeof unionId !== 'string') {
@@ -132,9 +153,9 @@ router.post('/sync-official-prices', authMiddleware, async (req, res) => {
 
     try {
         const [landResult, apartmentResult, individualHousingResult] = await Promise.all([
-            gisQueueService.addLandPriceSyncJob({ unionId }),
-            gisQueueService.addApartmentPriceSyncJob({ unionId }),
-            gisQueueService.addIndividualHousingPriceSyncJob({ unionId }),
+            gisQueueService.addLandPriceSyncJob({ unionId, actorUserId: req.user!.actorUserId! }),
+            gisQueueService.addApartmentPriceSyncJob({ unionId, actorUserId: req.user!.actorUserId! }),
+            gisQueueService.addIndividualHousingPriceSyncJob({ unionId, actorUserId: req.user!.actorUserId! }),
         ]);
 
         return res.json({
@@ -148,29 +169,74 @@ router.post('/sync-official-prices', authMiddleware, async (req, res) => {
         });
     } catch (error: any) {
         logger.error(`Official price sync request failed (unionId: ${unionId})`, error);
-        return res.status(500).json({ error: error?.message || 'Internal server error.' });
+        return sendGisQueueError(res, error);
     }
 });
 
 /**
  * 작업 상태 조회
  */
-router.get('/status/:jobId', (req, res) => {
+router.get('/status/:jobId', authMiddleware, gisSystemAdminMiddleware, async (req, res) => {
     const { jobId } = req.params;
     const jobStatus = gisQueueService.getJobStatus(jobId);
 
-    if (!jobStatus) {
-        return res.status(404).json({ error: 'Job not found.' });
+    if (jobStatus) {
+        return res.json(jobStatus);
     }
 
-    res.json(jobStatus);
+    const { data: persistedJob, error } = await supabaseService
+        .getClient()
+        .from('sync_jobs')
+        .select('id, union_id, status, progress, preview_data, created_at, updated_at, error_log')
+        .eq('id', jobId)
+        .in('job_type', [
+            'GIS_MAP',
+            'APARTMENT_PRICE_SYNC',
+            'INDIVIDUAL_HOUSING_PRICE_SYNC',
+            'LAND_PRICE_SYNC',
+        ])
+        .maybeSingle();
+
+    if (error) {
+        logger.error(`Persisted GIS job lookup failed (${jobId})`, error);
+        return res.status(503).json({
+            success: false,
+            code: 'JOB_STATUS_LOOKUP_FAILED',
+            error: '작업 상태를 조회할 수 없습니다.',
+        });
+    }
+
+    if (!persistedJob) {
+        return res.status(404).json({ success: false, code: 'JOB_NOT_FOUND', error: 'Job not found.' });
+    }
+
+    const preview =
+        persistedJob.preview_data && typeof persistedJob.preview_data === 'object'
+            ? (persistedJob.preview_data as Record<string, unknown>)
+            : {};
+    const totalCount = typeof preview.totalCount === 'number' ? preview.totalCount : 0;
+    const processedCount = totalCount > 0
+        ? Math.min(totalCount, Math.round((persistedJob.progress / 100) * totalCount))
+        : 0;
+
+    return res.json({
+        jobId: persistedJob.id,
+        unionId: persistedJob.union_id,
+        status: persistedJob.status.toLowerCase(),
+        totalCount,
+        processedCount,
+        createdAt: persistedJob.created_at,
+        updatedAt: persistedJob.updated_at,
+        error: persistedJob.error_log || undefined,
+        persisted: true,
+    });
 });
 
 /**
  * 주소 검색 (PNU 생성)
  * 법정동코드 + 지번 조합으로 PNU 생성 (API 호출 최소화)
  */
-router.post('/search-address', async (req, res) => {
+router.post('/search-address', authMiddleware, gisAddressReadRateLimitMiddleware, async (req, res) => {
     const { address } = req.body;
 
     if (!address || typeof address !== 'string') {
@@ -230,10 +296,14 @@ router.post('/search-address', async (req, res) => {
 
 /**
  * 공시가격 API 진단 (엔드포인트 검증용)
- * body: { pnu: string, type?: 'apartment' | 'individual' | 'both', stdrYear?: string | number }
+ * body: { unionId: string, pnu: string, type?: 'apartment' | 'individual' | 'both', stdrYear?: string | number }
  */
-router.post('/diagnose-price-api', async (req, res) => {
-    const { pnu, type = 'both', stdrYear } = req.body;
+router.post('/diagnose-price-api', authMiddleware, gisSystemAdminMiddleware, async (req, res) => {
+    const { unionId, pnu, type = 'both', stdrYear } = req.body;
+
+    if (!unionId || typeof unionId !== 'string') {
+        return res.status(400).json({ error: 'unionId is required.' });
+    }
 
     if (!pnu || typeof pnu !== 'string' || pnu.length < 19) {
         return res.status(400).json({ error: 'Valid 19-digit PNU required.' });
@@ -281,7 +351,7 @@ router.post('/diagnose-price-api', async (req, res) => {
 /**
  * 주소 추가 (전체 데이터 조회 후 DB 저장)
  */
-router.post('/add-address', async (req, res) => {
+router.post('/add-address', authMiddleware, gisSystemAdminMiddleware, async (req, res) => {
     const { unionId, address, pnu } = req.body;
 
     if (!unionId || !address || !pnu) {
@@ -292,7 +362,12 @@ router.post('/add-address', async (req, res) => {
     }
 
     try {
-        logger.info(`Manual address add request: unionId=${unionId}, pnu=${pnu}`);
+        logger.info('Manual address add request', {
+            actorUserId: req.user!.actorUserId,
+            unionId,
+            pnu,
+            source: 'GIS_ADD_ADDRESS',
+        });
 
         // 1. 전체 토지 정보 조회
         const landInfo = await gisService.getFullLandInfo(pnu, address);
@@ -404,7 +479,7 @@ router.post('/add-address', async (req, res) => {
  * 수동 입력 API
  * API에서 조회되지 않는 필지를 수동으로 입력하여 저장
  */
-router.post('/manual-add', async (req, res) => {
+router.post('/manual-add', authMiddleware, gisSystemAdminMiddleware, async (req, res) => {
     const { unionId, address, pnu, area, officialPrice, ownerCount, boundary } = req.body;
 
     // 필수 필드 검증
@@ -424,7 +499,12 @@ router.post('/manual-add', async (req, res) => {
     }
 
     try {
-        logger.info(`Manual input request: unionId=${unionId}, pnu=${pnu}, address="${address}"`);
+        logger.info('Manual input request', {
+            actorUserId: req.user!.actorUserId,
+            unionId,
+            pnu,
+            source: 'GIS_MANUAL_ADD',
+        });
 
         // boundary가 WKT 형식이면 GeoJSON으로 변환
         let boundaryGeojson: GeoJSON.Geometry | null = null;

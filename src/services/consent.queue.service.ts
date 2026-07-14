@@ -9,6 +9,7 @@ import {
     ConsentUploadRow,
 } from '../types/consent.types';
 import { createLogger } from '../utils/logger';
+import { verifyPersistedSyncJobOrThrow } from './sync-job-admission';
 
 const logger = createLogger('CONSENT-QUEUE');
 
@@ -33,21 +34,33 @@ function parseConsentStatus(statusStr: string): 'AGREED' | 'DISAGREED' {
  * - CONSENT_BULK_UPDATE: 일괄 동의 처리 (조합원 ID 목록으로 직접 처리)
  * - CONSENT_BULK_UPLOAD: 엑셀 업로드 동의 처리 (이름/주소로 매칭 후 처리)
  */
-class ConsentQueueService {
-    private queue: PQueue;
-    private jobs: Map<string, ConsentJobInfo>;
+type VerifyPersistedSyncJob = typeof verifyPersistedSyncJobOrThrow;
 
-    constructor() {
-        this.queue = new PQueue({
-            concurrency: 2, // DB 부하 조절을 위해 낮게 설정
-            timeout: 600000, // 10분
+interface ConsentQueueServiceOptions {
+    queue?: Pick<PQueue, 'add'>;
+    verifyPersistedSyncJob?: VerifyPersistedSyncJob;
+    scheduleCleanup?: boolean;
+}
+
+export class ConsentQueueService {
+    private queue: Pick<PQueue, 'add'>;
+    private jobs: Map<string, ConsentJobInfo>;
+    private readonly verifyPersistedSyncJob: VerifyPersistedSyncJob;
+
+    constructor(options: ConsentQueueServiceOptions = {}) {
+        this.queue = options.queue ?? new PQueue({
+            concurrency: 2,
+            timeout: 600000,
         });
         this.jobs = new Map();
+        this.verifyPersistedSyncJob = options.verifyPersistedSyncJob ?? verifyPersistedSyncJobOrThrow;
 
-        // 주기적으로 완료된 작업 정리 (30분마다)
-        setInterval(() => {
-            this.cleanupOldJobs();
-        }, 30 * 60 * 1000);
+        if (options.scheduleCleanup !== false) {
+            const cleanupTimer = setInterval(() => {
+                this.cleanupOldJobs();
+            }, 30 * 60 * 1000);
+            cleanupTimer.unref();
+        }
     }
 
     /**
@@ -64,6 +77,16 @@ class ConsentQueueService {
             status: 'pending',
             createdAt: new Date(),
         };
+
+        await this.verifyPersistedSyncJob(request.jobId, request.unionId, () =>
+            supabaseService
+                .getClient()
+                .from('sync_jobs')
+                .select('id, union_id')
+                .eq('id', request.jobId)
+                .eq('union_id', request.unionId)
+                .maybeSingle()
+        );
 
         this.jobs.set(request.jobId, jobInfo);
 
@@ -96,6 +119,16 @@ class ConsentQueueService {
             status: 'pending',
             createdAt: new Date(),
         };
+
+        await this.verifyPersistedSyncJob(request.jobId, request.unionId, () =>
+            supabaseService
+                .getClient()
+                .from('sync_jobs')
+                .select('id, union_id')
+                .eq('id', request.jobId)
+                .eq('union_id', request.unionId)
+                .maybeSingle()
+        );
 
         this.jobs.set(request.jobId, jobInfo);
 

@@ -1,6 +1,7 @@
 export interface GisSyncRequest {
     unionId: string;
     addresses: string[];
+    actorUserId: string;
 }
 
 export interface GisJobInfo {
@@ -21,6 +22,7 @@ export interface GisJobInfo {
  */
 export interface ApartmentPriceSyncRequest {
     unionId: string;
+    actorUserId: string;
 }
 
 /**
@@ -39,6 +41,7 @@ export interface ApartmentPriceSyncTarget {
  */
 export interface IndividualHousingPriceSyncRequest {
     unionId: string;
+    actorUserId: string;
 }
 
 /**
@@ -57,6 +60,7 @@ export interface IndividualHousingPriceSyncTarget {
  */
 export interface LandPriceSyncRequest {
     unionId: string;
+    actorUserId: string;
 }
 
 /**
