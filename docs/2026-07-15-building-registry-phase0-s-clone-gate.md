@@ -49,6 +49,14 @@ fixture는 두 조합의 `land_lots`, `property_units`, `property_ownerships`를
 Phase F 승인 전까지 `NULL`이다. 검증을 모두 마친 뒤에는
 `scripts/phase0-s-development-fixture-cleanup.sql`로 고정 identity만 제거한다.
 
+2026-07-15 개발 DB 리허설에서는 외부 GIS 응답만 결정적인 합성값으로 대체하고 실제
+`GisQueueService.addSyncJob`과 실제 `tonghari_dev` DB write를 실행했다. A 조합의 토지·건물·2개 호실
+저장은 완료됐고, 전후 hash-only artifact의 A/B `propertyUnits`, `propertyOwnerships`,
+`canonicalMemberProperties`, `minorParcelResults`, `buildingLandLots`, `buildingOrphanSummary`는 모두
+byte-equivalent였다. 이 결과는 GIS orchestration·DB write 회귀 gate이며, VWorld·data.go.kr 실호출과
+인증된 HTTP route smoke test를 통과했다는 뜻은 아니다. 그 두 검증은 개발용 외부 API credential과
+합성 SYSTEM_ADMIN auth fixture가 준비된 뒤 별도로 수행한다.
+
 ```bash
 npm run phase0-s:gate -- capture \
   --label before-gis \
