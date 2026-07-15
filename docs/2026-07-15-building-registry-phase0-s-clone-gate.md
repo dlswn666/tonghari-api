@@ -53,9 +53,12 @@ Phase F 승인 전까지 `NULL`이다. 검증을 모두 마친 뒤에는
 `GisQueueService.addSyncJob`과 실제 `tonghari_dev` DB write를 실행했다. A 조합의 토지·건물·2개 호실
 저장은 완료됐고, 전후 hash-only artifact의 A/B `propertyUnits`, `propertyOwnerships`,
 `canonicalMemberProperties`, `minorParcelResults`, `buildingLandLots`, `buildingOrphanSummary`는 모두
-byte-equivalent였다. 이 결과는 GIS orchestration·DB write 회귀 gate이며, VWorld·data.go.kr 실호출과
-인증된 HTTP route smoke test를 통과했다는 뜻은 아니다. 그 두 검증은 개발용 외부 API credential과
-합성 SYSTEM_ADMIN auth fixture가 준비된 뒤 별도로 수행한다.
+byte-equivalent였다. 이어서 개발 Supabase Auth에 임시 합성 사용자를 만들고 `user_auth_links`로 합성
+SYSTEM_ADMIN 프로필에 연결한 뒤, 로컬 서명 JWT로 실제 `POST /api/gis/sync` HTTP route를 호출했다.
+현재 역할·차단·조합 scope 재검증, queue admission, GIS job과 DB persistence가 HTTP 200/COMPLETED로
+끝났고 A/B 여섯 dataset도 다시 byte-equivalent였다. 임시 Auth 사용자와 link는 종료 시 0건으로
+정리했다. 이 결과는 외부 응답을 결정적 합성값으로 대체했으므로 VWorld·data.go.kr 실호출을 통과했다는
+뜻은 아니다. 실호출 smoke test만 개발용 외부 API credential 준비 후 별도로 수행한다.
 
 같은 날 `PRE_REGISTER`는 합성 SYSTEM_ADMIN 프로필과 A 조합의 기존 합성 조합원·물건지로
 실제 queue/개발 DB 리허설을 수행했다. 최초 시도는 입력 지번과 fixture 지번 문자열이 달라 사전 승인에
