@@ -10,6 +10,7 @@ const UNION_B = '00000000-0000-4000-a000-000000000002';
 const PROPERTY_A = '00000000-0000-4000-a000-000000000101';
 const PROPERTY_B = '00000000-0000-4000-a000-000000000102';
 const SHARED_PNU = '1130510100107450062';
+const SYSTEM_ADMIN = 'phase0-s-fixture-system-admin';
 
 test('개발 fixture는 transaction과 합성 identity 충돌 guard를 가진다', () => {
     assert.match(fixtureSql, /^-- Phase 0-S[\s\S]*\nbegin;/);
@@ -18,6 +19,7 @@ test('개발 fixture는 transaction과 합성 identity 충돌 guard를 가진다
     assert.match(fixtureSql, /property identity가 기존 비-fixture 행과 충돌/);
     assert.match(fixtureSql, /ownership identity가 기존 비-fixture 행과 충돌/);
     assert.match(fixtureSql, /building-land-lot identity가 기존 비-fixture 행과 충돌/);
+    assert.match(fixtureSql, /building_id = '00000000-0000-4000-a000-000000000301'::uuid[\s\S]*note = '\[PHASE0_S_SYNTHETIC_FIXTURE\]'/);
     assert.match(fixtureSql, /commit;\s*$/);
     assert.doesNotMatch(fixtureSql, /supabase_migrations|schema_migrations/i);
 });
@@ -31,7 +33,13 @@ test('서로 다른 A/B 조합과 물건지가 같은 활성 PNU를 공유한다
     assert.match(fixtureSql, /count\(distinct union_id\)[\s\S]*shared_union_count/);
     assert.match(fixtureSql, /shared_union_count <> 2/);
     assert.ok(fixtureSql.match(/서울특별시 강북구 미아동 745-62/g)!.length >= 4);
+    assert.doesNotMatch(fixtureSql, /미아동 745-62 [AB]동/);
     assert.doesNotMatch(fixtureSql, /합성구 합성동/);
+    assert.ok(fixtureSql.includes(SYSTEM_ADMIN));
+    assert.ok(cleanupSql.includes(SYSTEM_ADMIN));
+    assert.match(fixtureSql, /system_admin_count <> 1/);
+    assert.match(fixtureSql, /'A',\n\s*'101'/);
+    assert.match(fixtureSql, /'B',\n\s*'202'/);
 });
 
 test('최초 fixture는 property building link를 만들지 않고 전 컬럼 불변 검증을 준비한다', () => {

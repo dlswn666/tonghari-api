@@ -26,7 +26,11 @@ begin
     if exists (
         select 1
           from public.users
-         where id in ('phase0-s-fixture-user-a', 'phase0-s-fixture-user-b')
+         where id in (
+             'phase0-s-fixture-user-a',
+             'phase0-s-fixture-user-b',
+             'phase0-s-fixture-system-admin'
+         )
            and notes is distinct from '[PHASE0_S_SYNTHETIC_FIXTURE]'
     ) then
         raise exception 'Phase 0-S fixture user identity가 기존 비-fixture 행과 충돌합니다.';
@@ -60,7 +64,14 @@ begin
         select 1
           from public.buildings
          where id = '00000000-0000-4000-a000-000000000301'::uuid
-           and building_name is distinct from 'Phase 0-S 합성빌라'
+           and not exists (
+               select 1
+                 from public.building_land_lots
+                where id = '00000000-0000-4000-a000-000000000401'::uuid
+                  and building_id = '00000000-0000-4000-a000-000000000301'::uuid
+                  and pnu = '1130510100107450062'
+                  and note = '[PHASE0_S_SYNTHETIC_FIXTURE]'
+           )
     ) then
         raise exception 'Phase 0-S fixture building identity가 기존 비-fixture 행과 충돌합니다.';
     end if;
@@ -116,7 +127,11 @@ delete from public.land_lots
      '00000000-0000-4000-a000-000000000002'::uuid
  );
 delete from public.users
- where id in ('phase0-s-fixture-user-a', 'phase0-s-fixture-user-b');
+ where id in (
+     'phase0-s-fixture-user-a',
+     'phase0-s-fixture-user-b',
+     'phase0-s-fixture-system-admin'
+ );
 delete from public.unions
  where id in (
      '00000000-0000-4000-a000-000000000001'::uuid,
@@ -163,6 +178,7 @@ insert into public.users (
     union_id,
     user_status,
     birth_date,
+    resident_address,
     voting_weight,
     entity_type,
     notes
@@ -174,6 +190,7 @@ insert into public.users (
         '00000000-0000-4000-a000-000000000001'::uuid,
         'APPROVED',
         date '1990-01-01',
+        'Phase 0-S 합성 거주지 A',
         1,
         'INDIVIDUAL',
         '[PHASE0_S_SYNTHETIC_FIXTURE]'
@@ -185,6 +202,19 @@ insert into public.users (
         '00000000-0000-4000-a000-000000000002'::uuid,
         'APPROVED',
         date '1991-01-01',
+        'Phase 0-S 합성 거주지 B',
+        1,
+        'INDIVIDUAL',
+        '[PHASE0_S_SYNTHETIC_FIXTURE]'
+    ),
+    (
+        'phase0-s-fixture-system-admin',
+        'Phase 0-S 합성 시스템관리자',
+        'SYSTEM_ADMIN',
+        null,
+        'APPROVED',
+        date '1980-01-01',
+        'Phase 0-S 합성 관리자 주소',
         1,
         'INDIVIDUAL',
         '[PHASE0_S_SYNTHETIC_FIXTURE]'
@@ -232,10 +262,10 @@ insert into public.property_units (
         '1130510100107450062',
         null,
         null,
-        '서울특별시 강북구 미아동 745-62 A동 101호',
+        '서울특별시 강북구 미아동 745-62',
         null,
-        'A동',
-        '101호',
+        'A',
+        '101',
         'Phase 0-S 합성빌라',
         80,
         55,
@@ -247,10 +277,10 @@ insert into public.property_units (
         '1130510100107450062',
         null,
         null,
-        '서울특별시 강북구 미아동 745-62 B동 202호',
+        '서울특별시 강북구 미아동 745-62',
         null,
-        'B동',
-        '202호',
+        'B',
+        '202',
         'Phase 0-S 합성빌라',
         80,
         60,
@@ -328,6 +358,7 @@ declare
     union_count integer;
     property_count integer;
     ownership_count integer;
+    system_admin_count integer;
     shared_union_count integer;
     linked_property_count integer;
 begin
@@ -350,6 +381,11 @@ begin
          '00000000-0000-4000-a000-000000000201'::uuid,
          '00000000-0000-4000-a000-000000000202'::uuid
      );
+    select count(*) into system_admin_count
+      from public.users
+     where id = 'phase0-s-fixture-system-admin'
+       and role = 'SYSTEM_ADMIN'
+       and is_blocked = false;
     select count(distinct union_id) into shared_union_count
       from public.property_units
      where pnu = '1130510100107450062'
@@ -358,12 +394,14 @@ begin
     if union_count <> 2
        or property_count <> 2
        or ownership_count <> 2
+       or system_admin_count <> 1
        or shared_union_count <> 2
        or linked_property_count <> 0 then
-        raise exception 'Phase 0-S fixture 검증 실패: unions=%, properties=%, ownerships=%, shared_unions=%, linked_properties=%',
+        raise exception 'Phase 0-S fixture 검증 실패: unions=%, properties=%, ownerships=%, system_admins=%, shared_unions=%, linked_properties=%',
             union_count,
             property_count,
             ownership_count,
+            system_admin_count,
             shared_union_count,
             linked_property_count;
     end if;

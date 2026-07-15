@@ -13,6 +13,7 @@ import {
 import { createLogger } from '../utils/logger';
 import { getAutoOwnershipRatio as calculateAutoOwnershipRatio } from './member.pre-register-ownership';
 import { buildPreRegisterCompletion } from './member.pre-register-result';
+import { buildExistingPropertyImportPatches } from './member.pre-register-existing-property';
 import { persistSyncJobOrThrow } from './sync-job-admission';
 import {
     MemberQueueExecutionOperation,
@@ -579,7 +580,26 @@ class MemberQueueService {
                         const normalizedHo = this.normalizeHo(member.row.ho);
                         let existingOwnershipQuery = client
                             .from('property_ownerships')
-                            .select('id, property_unit_id, property_units!inner(id, pnu, dong, ho)')
+                            .select(`
+                                id,
+                                property_unit_id,
+                                land_ownership_ratio,
+                                building_ownership_ratio,
+                                ownership_ratio,
+                                ownership_type,
+                                notes,
+                                property_units!inner(
+                                    id,
+                                    pnu,
+                                    dong,
+                                    ho,
+                                    property_address_jibun,
+                                    property_address_road,
+                                    building_name,
+                                    land_area,
+                                    building_area
+                                )
+                            `)
                             .eq('user_id', userId)
                             .eq('union_id', request.unionId)
                             .eq('is_active', true)
@@ -606,27 +626,80 @@ class MemberQueueService {
                             const effectiveLandRatio = landOwnershipRatio || effectiveRatio;
                             const effectiveBuildingRatio = buildingOwnershipRatio || effectiveRatio;
 
-                            const propertyUnitUpdates: Record<string, unknown> = {
-                                updated_at: new Date().toISOString(),
-                            };
-                            if (member.row.propertyAddress) {
-                                propertyUnitUpdates.property_address_jibun = member.row.propertyAddress;
-                            }
-                            if (member.row.propertyAddressRoad) {
-                                propertyUnitUpdates.property_address_road = member.row.propertyAddressRoad;
-                            }
-                            if (member.row.buildingName) {
-                                propertyUnitUpdates.building_name = member.row.buildingName;
-                            }
                             const landArea = this.sanitizeNumeric(member.row.landArea);
                             const buildingArea = this.sanitizeNumeric(member.row.buildingArea);
-                            if (landArea !== null) propertyUnitUpdates.land_area = landArea;
-                            if (buildingArea !== null) propertyUnitUpdates.building_area = buildingArea;
+                            const nestedProperty = Array.isArray(existingOwnership.property_units)
+                                ? existingOwnership.property_units[0]
+                                : existingOwnership.property_units;
+                            if (!nestedProperty) {
+                                propertyLinkFailedCount++;
+                                errors.push(
+                                    `${member.row.name}: property_units lookup returned no nested row (${member.row.propertyAddress || member.pnu || '주소 없음'})`
+                                );
+                                continue;
+                            }
 
-                            if (Object.keys(propertyUnitUpdates).length > 1) {
+                            const {
+                                propertyUnitPatch: candidatePropertyUnitPatch,
+                                ownershipPatch,
+                            } = buildExistingPropertyImportPatches({
+                                existingProperty: {
+                                    propertyAddressJibun: nestedProperty.property_address_jibun,
+                                    propertyAddressRoad: nestedProperty.property_address_road,
+                                    buildingName: nestedProperty.building_name,
+                                    landArea: nestedProperty.land_area,
+                                    buildingArea: nestedProperty.building_area,
+                                },
+                                existingOwnership: {
+                                    landOwnershipRatio: existingOwnership.land_ownership_ratio,
+                                    buildingOwnershipRatio: existingOwnership.building_ownership_ratio,
+                                    ownershipRatio: existingOwnership.ownership_ratio,
+                                    ownershipType: existingOwnership.ownership_type,
+                                    notes: existingOwnership.notes,
+                                },
+                                incoming: {
+                                    propertyAddressJibun: member.row.propertyAddress,
+                                    propertyAddressRoad: member.row.propertyAddressRoad,
+                                    buildingName: member.row.buildingName,
+                                    landArea,
+                                    buildingArea,
+                                    landOwnershipRatio: effectiveLandRatio,
+                                    buildingOwnershipRatio: effectiveBuildingRatio,
+                                    ownershipRatio: effectiveRatio,
+                                    ownershipType:
+                                        member.row.ownershipType ||
+                                        (batchOwnerCount > 1 || effectiveRatio < 100 ? 'CO_OWNER' : 'OWNER'),
+                                    notes: member.row.notes,
+                                },
+                            });
+
+                            // 정적 writer inventory가 허용 컬럼을 완전히 검증할 수 있도록
+                            // helper 결과를 명시적인 property-owned 필드로만 복사한다.
+                            const propertyUnitPatch: Record<string, unknown> = {};
+                            if (Object.hasOwn(candidatePropertyUnitPatch, 'property_address_jibun')) {
+                                propertyUnitPatch.property_address_jibun =
+                                    candidatePropertyUnitPatch.property_address_jibun;
+                            }
+                            if (Object.hasOwn(candidatePropertyUnitPatch, 'property_address_road')) {
+                                propertyUnitPatch.property_address_road =
+                                    candidatePropertyUnitPatch.property_address_road;
+                            }
+                            if (Object.hasOwn(candidatePropertyUnitPatch, 'building_name')) {
+                                propertyUnitPatch.building_name = candidatePropertyUnitPatch.building_name;
+                            }
+                            if (Object.hasOwn(candidatePropertyUnitPatch, 'land_area')) {
+                                propertyUnitPatch.land_area = candidatePropertyUnitPatch.land_area;
+                            }
+                            if (Object.hasOwn(candidatePropertyUnitPatch, 'building_area')) {
+                                propertyUnitPatch.building_area = candidatePropertyUnitPatch.building_area;
+                            }
+
+                            let propertyChanged = false;
+                            if (Object.keys(propertyUnitPatch).length > 0) {
+                                propertyUnitPatch.updated_at = new Date().toISOString();
                                 const { error: propertyUpdateError } = await client
                                     .from('property_units')
-                                    .update(propertyUnitUpdates)
+                                    .update(propertyUnitPatch)
                                     .eq('id', existingOwnership.property_unit_id);
                                 if (propertyUpdateError) {
                                     propertyLinkFailedCount++;
@@ -638,37 +711,36 @@ class MemberQueueService {
                                     );
                                     continue;
                                 }
+                                propertyChanged = true;
                             }
 
-                            const ownershipUpdates: Record<string, unknown> = {
-                                land_ownership_ratio: effectiveLandRatio,
-                                building_ownership_ratio: effectiveBuildingRatio,
-                                ownership_ratio: effectiveRatio,
-                                ownership_type:
-                                    member.row.ownershipType ||
-                                    (batchOwnerCount > 1 || effectiveRatio < 100 ? 'CO_OWNER' : 'OWNER'),
-                                updated_at: new Date().toISOString(),
-                            };
-                            if (member.row.notes) {
-                                ownershipUpdates.notes = member.row.notes;
+                            let ownershipChanged = false;
+                            if (Object.keys(ownershipPatch).length > 0) {
+                                ownershipPatch.updated_at = new Date().toISOString();
+                                const { error: ownershipUpdateError } = await client
+                                    .from('property_ownerships')
+                                    .update(ownershipPatch)
+                                    .eq('id', existingOwnership.id);
+                                if (ownershipUpdateError) {
+                                    propertyLinkFailedCount++;
+                                    errors.push(
+                                        `${member.row.name}: property_ownerships update failed (${member.row.propertyAddress || member.pnu || '주소 없음'}) - ${ownershipUpdateError.message}`
+                                    );
+                                    logger.warn(
+                                        `[Pre-Register ${jobId}] property_ownerships update failed for ${member.row.name}: ${ownershipUpdateError.message}`
+                                    );
+                                    continue;
+                                }
+                                ownershipChanged = true;
                             }
-
-                            const { error: ownershipUpdateError } = await client
-                                .from('property_ownerships')
-                                .update(ownershipUpdates)
-                                .eq('id', existingOwnership.id);
-                            if (ownershipUpdateError) {
-                                propertyLinkFailedCount++;
-                                errors.push(
-                                    `${member.row.name}: property_ownerships update failed (${member.row.propertyAddress || member.pnu || '주소 없음'}) - ${ownershipUpdateError.message}`
+                            if (propertyChanged || ownershipChanged) {
+                                propertyLinkUpdatedCount++;
+                                updatedCount++;
+                            } else {
+                                logger.debug(
+                                    `[Pre-Register ${jobId}] Existing property unchanged for ${member.row.name}`
                                 );
-                                logger.warn(
-                                    `[Pre-Register ${jobId}] property_ownerships update failed for ${member.row.name}: ${ownershipUpdateError.message}`
-                                );
-                                continue;
                             }
-                            propertyLinkUpdatedCount++;
-                            updatedCount++;
                         } else {
                             validMembers.push(member);
                         }

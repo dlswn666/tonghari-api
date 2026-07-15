@@ -17,7 +17,11 @@ begin
     ) or exists (
         select 1
           from public.users
-         where id in ('phase0-s-fixture-user-a', 'phase0-s-fixture-user-b')
+         where id in (
+             'phase0-s-fixture-user-a',
+             'phase0-s-fixture-user-b',
+             'phase0-s-fixture-system-admin'
+         )
            and notes is distinct from '[PHASE0_S_SYNTHETIC_FIXTURE]'
     ) or exists (
         select 1
@@ -39,7 +43,14 @@ begin
         select 1
           from public.buildings
          where id = '00000000-0000-4000-a000-000000000301'::uuid
-           and building_name is distinct from 'Phase 0-S 합성빌라'
+           and not exists (
+               select 1
+                 from public.building_land_lots
+                where id = '00000000-0000-4000-a000-000000000401'::uuid
+                  and building_id = '00000000-0000-4000-a000-000000000301'::uuid
+                  and pnu = '1130510100107450062'
+                  and note = '[PHASE0_S_SYNTHETIC_FIXTURE]'
+           )
     ) or exists (
         select 1
           from public.building_land_lots
@@ -89,7 +100,11 @@ delete from public.land_lots
      '00000000-0000-4000-a000-000000000002'::uuid
  );
 delete from public.users
- where id in ('phase0-s-fixture-user-a', 'phase0-s-fixture-user-b')
+ where id in (
+     'phase0-s-fixture-user-a',
+     'phase0-s-fixture-user-b',
+     'phase0-s-fixture-system-admin'
+ )
    and notes = '[PHASE0_S_SYNTHETIC_FIXTURE]';
 delete from public.unions
  where id in (
@@ -99,6 +114,11 @@ delete from public.unions
    and description = '[PHASE0_S_SYNTHETIC_FIXTURE]';
 delete from public.buildings
  where id = '00000000-0000-4000-a000-000000000301'::uuid
-   and building_name = 'Phase 0-S 합성빌라';
+   and not exists (
+       select 1
+         from public.building_land_lots
+        where building_id = '00000000-0000-4000-a000-000000000301'::uuid
+          and note is distinct from '[PHASE0_S_SYNTHETIC_FIXTURE]'
+   );
 
 commit;

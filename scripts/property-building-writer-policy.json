@@ -3,12 +3,12 @@
   "policy": "property_units 및 building-family mutation과 RPC 호출은 occurrence, context SHA-256, 전체 source file SHA-256이 모두 일치해야 한다. property-building 자동 link writer는 Phase F 승인 전까지 0건이다.",
   "propertyUnitWriters": [
     {
-      "id": "ef944c9c58f608502505",
+      "id": "dbcb38359bf20b9958f3",
       "path": "src/services/member.queue.service.ts",
       "table": "property_units",
       "operation": "update",
-      "contextSha256": "b90826d1fe1afcb956e822004290549983061c4d31bc8a1979f8e3fbc005c37f",
-      "sourceFileSha256": "b2f4bc0209bd45fb79a4acc67a246d70ffc012e88b53356db6c5ebb9e2e0bdec",
+      "contextSha256": "9a961b70f76581a2d36a3979812d0bf15f2ec1cd73f21d8d26639053cf542aad",
+      "sourceFileSha256": "9bf5030dece8abf9b22ccb123d64f7eb554c044efca6ccd19efd51f536b95631",
       "fields": [
         "building_area",
         "building_name",
@@ -20,7 +20,7 @@
       "dongHoFields": [],
       "dongHoClassification": "NONE",
       "owner": "조합원 사전등록 기존 물건지 보완",
-      "rationale": "조합원 원본 업로드에서 주소와 면적의 비어 있지 않은 값만 보완하는 기존 update occurrence를 고정한다."
+      "rationale": "조합원 원본 업로드의 주소와 면적이 기존 값과 실제로 다를 때만 보완하는 update occurrence를 고정한다."
     },
     {
       "id": "d112ee3e070625bd8772",
@@ -28,7 +28,7 @@
       "table": "property_units",
       "operation": "update",
       "contextSha256": "a6482eb3b1f27b2d3f50ee71a45fca3217b7163b75f57b718bbce3dc1b762f21",
-      "sourceFileSha256": "b2f4bc0209bd45fb79a4acc67a246d70ffc012e88b53356db6c5ebb9e2e0bdec",
+      "sourceFileSha256": "9bf5030dece8abf9b22ccb123d64f7eb554c044efca6ccd19efd51f536b95631",
       "fields": [
         "building_area",
         "building_name",
@@ -51,7 +51,7 @@
       "table": "property_units",
       "operation": "insert",
       "contextSha256": "7577d2016261038492b3f38abdbfd208c2eed078d00bba8b2ba2bfad9dfcca5d",
-      "sourceFileSha256": "b2f4bc0209bd45fb79a4acc67a246d70ffc012e88b53356db6c5ebb9e2e0bdec",
+      "sourceFileSha256": "9bf5030dece8abf9b22ccb123d64f7eb554c044efca6ccd19efd51f536b95631",
       "fields": [
         "building_area",
         "building_name",
@@ -185,7 +185,7 @@
       "path": "src/services/member.queue.service.ts",
       "name": "sync_member_invites",
       "contextSha256": "d4ef824b8396dd3650fd2fe83112b6c3af96bce676277bdedb7789e7a7648510",
-      "sourceFileSha256": "b2f4bc0209bd45fb79a4acc67a246d70ffc012e88b53356db6c5ebb9e2e0bdec",
+      "sourceFileSha256": "9bf5030dece8abf9b22ccb123d64f7eb554c044efca6ccd19efd51f536b95631",
       "owner": "조합원 초대 동기화 큐",
       "rationale": "기존 조합원 초대 동기화 RPC occurrence만 허용하고 신규 자동 연결 RPC 추가를 검토 없이 허용하지 않는다."
     },
