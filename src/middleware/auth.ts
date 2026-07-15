@@ -45,6 +45,10 @@ export const authMiddleware = (
         role: verifyResult.payload.role,
         isBlocked: verifyResult.payload.isBlocked,
         actorUserId: verifyResult.payload.actorUserId,
+        purpose: verifyResult.payload.purpose,
+        operation: verifyResult.payload.operation,
+        issuer: verifyResult.payload.iss,
+        audience: verifyResult.payload.aud,
     };
 
     next();

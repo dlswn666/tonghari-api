@@ -7,6 +7,7 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "test": "node --import tsx --test tests/*.test.ts",
+    "phase0-s:gate": "tsx scripts/phase0-s-gate.ts",
     "start": "node dist/index.js",
     "pm2:start": "pm2 start ecosystem.config.js",
     "pm2:stop": "pm2 stop tonghari-api",

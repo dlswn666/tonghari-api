@@ -14,6 +14,10 @@ import { createLogger } from '../utils/logger';
 import { getAutoOwnershipRatio as calculateAutoOwnershipRatio } from './member.pre-register-ownership';
 import { buildPreRegisterCompletion } from './member.pre-register-result';
 import { persistSyncJobOrThrow } from './sync-job-admission';
+import {
+    MemberQueueExecutionOperation,
+    validateMemberQueueExecutionActor,
+} from '../security/member-queue-execution-policy';
 
 const logger = createLogger('MEMBER-QUEUE');
 
@@ -70,6 +74,28 @@ class MemberQueueService {
         }, 30 * 60 * 1000);
     }
 
+    /** Admission 뒤 queue 대기 중 role/block/union이 바뀌었는지 실행 직전에 다시 확인한다. */
+    private async assertActorAuthorizedAtExecution(
+        actorUserId: string,
+        unionId: string,
+        operation: MemberQueueExecutionOperation
+    ): Promise<void> {
+        const { data: actor, error } = await supabaseService
+            .getClient()
+            .from('users')
+            .select('id, role, is_blocked, union_id')
+            .eq('id', actorUserId)
+            .maybeSingle();
+        if (error) {
+            throw Object.assign(new Error('작업 실행자의 현재 권한을 확인할 수 없습니다.'), {
+                code: 'ACTOR_AUTHORIZATION_LOOKUP_FAILED',
+            });
+        }
+
+        const failure = validateMemberQueueExecutionActor(actor, unionId, operation);
+        if (failure) throw Object.assign(new Error(failure.message), { code: failure.code });
+    }
+
     /**
      * 조합원 초대 동기화 작업 추가
      */
@@ -99,6 +125,7 @@ class MemberQueueService {
                     preview_data: {
                         job_type: 'MEMBER_INVITE_SYNC',
                         totalCount: request.members.length,
+                        actorUserId: request.createdBy,
                     },
                 })
                 .select('id, union_id')
@@ -149,6 +176,7 @@ class MemberQueueService {
                     preview_data: {
                         job_type: 'PRE_REGISTER',
                         memberOperation: 'PRE_REGISTER',
+                        actorUserId: request.actorUserId,
                     },
                 })
                 .select('id, union_id')
@@ -186,6 +214,12 @@ class MemberQueueService {
     private async processMemberInviteSyncJob(jobId: string, request: MemberInviteSyncRequest): Promise<void> {
         const job = this.jobs.get(jobId);
         if (!job) return;
+
+        await this.assertActorAuthorizedAtExecution(
+            request.createdBy,
+            request.unionId,
+            'MEMBER_INVITE_SYNC'
+        );
 
         logger.info(`[Member Sync ${jobId}] Processing started`);
         this.updateJobStatus(jobId, { status: 'processing', startedAt: new Date() });
@@ -262,6 +296,12 @@ class MemberQueueService {
     private async processPreRegisterJob(jobId: string, request: PreRegisterRequest): Promise<void> {
         const job = this.jobs.get(jobId);
         if (!job) return;
+
+        await this.assertActorAuthorizedAtExecution(
+            request.actorUserId,
+            request.unionId,
+            'PRE_REGISTER'
+        );
 
         logger.info(`[Pre-Register ${jobId}] Processing started (${request.members.length} members)`);
         this.updateJobStatus(jobId, { status: 'processing', startedAt: new Date() });

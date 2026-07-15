@@ -32,7 +32,9 @@ class AuthService {
 
         try {
             // JWT 토큰 검증
-            const decoded = jwt.verify(token, this.jwtSecret) as JwtPayload;
+            const decoded = jwt.verify(token, this.jwtSecret, {
+                algorithms: ['HS256'],
+            }) as JwtPayload;
 
             // 필수 필드 확인
             if (!decoded.unionId || !decoded.userId) {
@@ -93,4 +95,3 @@ class AuthService {
 
 export const authService = new AuthService();
 export default authService;
-

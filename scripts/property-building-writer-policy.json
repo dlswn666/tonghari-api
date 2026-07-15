@@ -1,0 +1,220 @@
+{
+  "formatVersion": 1,
+  "policy": "property_units 및 building-family mutation과 RPC 호출은 occurrence, context SHA-256, 전체 source file SHA-256이 모두 일치해야 한다. property-building 자동 link writer는 Phase F 승인 전까지 0건이다.",
+  "propertyUnitWriters": [
+    {
+      "id": "ef944c9c58f608502505",
+      "path": "src/services/member.queue.service.ts",
+      "table": "property_units",
+      "operation": "update",
+      "contextSha256": "b90826d1fe1afcb956e822004290549983061c4d31bc8a1979f8e3fbc005c37f",
+      "sourceFileSha256": "b2f4bc0209bd45fb79a4acc67a246d70ffc012e88b53356db6c5ebb9e2e0bdec",
+      "fields": [
+        "building_area",
+        "building_name",
+        "land_area",
+        "property_address_jibun",
+        "property_address_road",
+        "updated_at"
+      ],
+      "dongHoFields": [],
+      "dongHoClassification": "NONE",
+      "owner": "조합원 사전등록 기존 물건지 보완",
+      "rationale": "조합원 원본 업로드에서 주소와 면적의 비어 있지 않은 값만 보완하는 기존 update occurrence를 고정한다."
+    },
+    {
+      "id": "d112ee3e070625bd8772",
+      "path": "src/services/member.queue.service.ts",
+      "table": "property_units",
+      "operation": "update",
+      "contextSha256": "a6482eb3b1f27b2d3f50ee71a45fca3217b7163b75f57b718bbce3dc1b762f21",
+      "sourceFileSha256": "b2f4bc0209bd45fb79a4acc67a246d70ffc012e88b53356db6c5ebb9e2e0bdec",
+      "fields": [
+        "building_area",
+        "building_name",
+        "land_area",
+        "notes",
+        "official_price",
+        "previous_pnu",
+        "property_address_jibun",
+        "property_address_road",
+        "updated_at"
+      ],
+      "dongHoFields": [],
+      "dongHoClassification": "NONE",
+      "owner": "조합원 사전등록 canonical 물건지 보완",
+      "rationale": "findOrCreatePropertyUnit이 조합원 업로드 소유정보를 기존 canonical property unit에 보완하는 occurrence를 고정한다."
+    },
+    {
+      "id": "6ae3fb1214eea6e0fb27",
+      "path": "src/services/member.queue.service.ts",
+      "table": "property_units",
+      "operation": "insert",
+      "contextSha256": "7577d2016261038492b3f38abdbfd208c2eed078d00bba8b2ba2bfad9dfcca5d",
+      "sourceFileSha256": "b2f4bc0209bd45fb79a4acc67a246d70ffc012e88b53356db6c5ebb9e2e0bdec",
+      "fields": [
+        "building_area",
+        "building_name",
+        "dong",
+        "ho",
+        "id",
+        "is_deleted",
+        "land_area",
+        "notes",
+        "official_price",
+        "pnu",
+        "previous_pnu",
+        "property_address_jibun",
+        "property_address_road",
+        "union_id"
+      ],
+      "dongHoFields": [
+        "dong",
+        "ho"
+      ],
+      "dongHoClassification": "PROPERTY_OWNED_INPUT",
+      "owner": "조합원 사전등록 canonical 물건지 생성",
+      "rationale": "조합원 원본 업로드의 PNU와 동호 입력으로 canonical property unit을 생성하며 건물대장 building_unit_id는 쓰지 않는다."
+    }
+  ],
+  "buildingWriters": [
+    {
+      "id": "8fbe85b830001c2ee992",
+      "path": "src/services/supabase.service.ts",
+      "table": "buildings",
+      "operation": "update",
+      "contextSha256": "22d0de1b53b7b1707489ea551a6772b9977f1eaba99ab8205512fbb0b37c2ad5",
+      "sourceFileSha256": "86cf424bfdd5754f17d0b3ffb696f16960c1164511f20df3b6b701e1a8c578d6",
+      "owner": "GIS 건물 기본정보 저장",
+      "rationale": "기존 PNU 매핑 건물의 기본정보 갱신 occurrence를 고정한다."
+    },
+    {
+      "id": "1cb27858bca61395a5c1",
+      "path": "src/services/supabase.service.ts",
+      "table": "buildings",
+      "operation": "insert",
+      "contextSha256": "fed80c3456c904519921fa1d18b0466772c183ce5b154b01126a048b53435136",
+      "sourceFileSha256": "86cf424bfdd5754f17d0b3ffb696f16960c1164511f20df3b6b701e1a8c578d6",
+      "owner": "GIS 건물 기본정보 저장",
+      "rationale": "기존 신규 물리 건물 생성 occurrence를 고정한다."
+    },
+    {
+      "id": "cc051cb57cd6d831191b",
+      "path": "src/services/supabase.service.ts",
+      "table": "building_land_lots",
+      "operation": "upsert",
+      "contextSha256": "250f8996e104fd984ce0410815215e21de88ae7dc9b766cd915f1300856c115b",
+      "sourceFileSha256": "86cf424bfdd5754f17d0b3ffb696f16960c1164511f20df3b6b701e1a8c578d6",
+      "owner": "GIS 건물-필지 매핑 저장",
+      "rationale": "기존 PNU와 물리 건물 매핑 upsert occurrence를 고정한다."
+    },
+    {
+      "id": "adc183abb6209c53cba2",
+      "path": "src/services/supabase.service.ts",
+      "table": "building_external_refs",
+      "operation": "upsert",
+      "contextSha256": "09506d9156e2fef8e3e64bc97393e926c1f5cb22956a8bf92363e3d5bced23f0",
+      "sourceFileSha256": "86cf424bfdd5754f17d0b3ffb696f16960c1164511f20df3b6b701e1a8c578d6",
+      "owner": "건축물대장 외부 식별자 저장",
+      "rationale": "기존 공공 API 외부 식별자 upsert occurrence를 고정한다."
+    },
+    {
+      "id": "ef2f64c8f4e4a1df7c70",
+      "path": "src/services/supabase.service.ts",
+      "table": "buildings",
+      "operation": "update",
+      "contextSha256": "722bc190c0ccb44c102894f4ec554e4fa6c1bafbf8d31e61264c0d1568f37b52",
+      "sourceFileSha256": "86cf424bfdd5754f17d0b3ffb696f16960c1164511f20df3b6b701e1a8c578d6",
+      "owner": "공시가격 공식 건물명 반영",
+      "rationale": "기존 안정된 공식 건물명 갱신 occurrence를 고정한다."
+    },
+    {
+      "id": "057b5d8b56b422b8c3f5",
+      "path": "src/services/supabase.service.ts",
+      "table": "building_units",
+      "operation": "update",
+      "contextSha256": "ce2c8a6f47d4d603be178df1a825e7b732d320b6f1a2815d3f25a6e137877473",
+      "sourceFileSha256": "86cf424bfdd5754f17d0b3ffb696f16960c1164511f20df3b6b701e1a8c578d6",
+      "owner": "공동주택 공시가격 세대 갱신",
+      "rationale": "기존 매칭 세대의 공시가격 필드 갱신 occurrence를 고정한다."
+    },
+    {
+      "id": "66d677ce4633f0d398c1",
+      "path": "src/services/supabase.service.ts",
+      "table": "building_units",
+      "operation": "insert",
+      "contextSha256": "a75e7a8eb6f92f943d5e280460c8f6b9ef2d0721ab9b5c0ac347cdb0c753c062",
+      "sourceFileSha256": "86cf424bfdd5754f17d0b3ffb696f16960c1164511f20df3b6b701e1a8c578d6",
+      "owner": "공동주택 공시가격 세대 생성",
+      "rationale": "기존 미매칭 공시가격 세대 생성 occurrence를 고정한다."
+    },
+    {
+      "id": "c397e3364c5528557596",
+      "path": "src/services/supabase.service.ts",
+      "table": "building_units",
+      "operation": "upsert",
+      "contextSha256": "6973d5b875640fcbf94ea28b7c9b064c67ef791acf5931341636d0a7508b0b21",
+      "sourceFileSha256": "86cf424bfdd5754f17d0b3ffb696f16960c1164511f20df3b6b701e1a8c578d6",
+      "owner": "GIS 건물 세대 저장",
+      "rationale": "기존 building_id와 동호 기준 세대 upsert occurrence를 고정한다."
+    },
+    {
+      "id": "8f6a4fdb1f01afa49e15",
+      "path": "src/services/supabase.service.ts",
+      "table": "building_units",
+      "operation": "update",
+      "contextSha256": "16843ccd05ea7bf7c8762eeb091cdb601b4b3c1a5e790520e65f302f277adf3b",
+      "sourceFileSha256": "86cf424bfdd5754f17d0b3ffb696f16960c1164511f20df3b6b701e1a8c578d6",
+      "owner": "공동주택 공시가격 단건 갱신",
+      "rationale": "기존 세대 공시가격 단건 갱신 occurrence를 고정한다."
+    },
+    {
+      "id": "22933ab1b2f92ae444fa",
+      "path": "src/services/supabase.service.ts",
+      "table": "building_units",
+      "operation": "update",
+      "contextSha256": "db42006314d0a62cdec78c5621bdfbb434a1d0006eb117f1fdba5afb671e5c51",
+      "sourceFileSha256": "86cf424bfdd5754f17d0b3ffb696f16960c1164511f20df3b6b701e1a8c578d6",
+      "owner": "개별주택 공시가격 세대 일괄 갱신",
+      "rationale": "기존 물리 건물 소속 세대의 개별주택 가격 갱신 occurrence를 고정한다."
+    }
+  ],
+  "rpcCalls": [
+    {
+      "id": "19776f84a876d4abff2b",
+      "path": "src/services/member.queue.service.ts",
+      "name": "sync_member_invites",
+      "contextSha256": "d4ef824b8396dd3650fd2fe83112b6c3af96bce676277bdedb7789e7a7648510",
+      "sourceFileSha256": "b2f4bc0209bd45fb79a4acc67a246d70ffc012e88b53356db6c5ebb9e2e0bdec",
+      "owner": "조합원 초대 동기화 큐",
+      "rationale": "기존 조합원 초대 동기화 RPC occurrence만 허용하고 신규 자동 연결 RPC 추가를 검토 없이 허용하지 않는다."
+    },
+    {
+      "id": "a0c5ac3e99f07c604f1a",
+      "path": "src/services/supabase.service.ts",
+      "name": "get_current_pricing",
+      "contextSha256": "1cb41ed1e8843828fa146a261cc51e2a0daaa47aacf8c41593bac05f3b5a88f9",
+      "sourceFileSha256": "86cf424bfdd5754f17d0b3ffb696f16960c1164511f20df3b6b701e1a8c578d6",
+      "owner": "현재 요금 조회",
+      "rationale": "기존 읽기 RPC occurrence를 고정한다."
+    },
+    {
+      "id": "7d36b73f4f059937b297",
+      "path": "src/services/supabase.service.ts",
+      "name": "get_official_price_building_targets",
+      "contextSha256": "5ff64980b8a5d375f8fde794f071d7a166bd783609c91c42afef5f3cb27405a4",
+      "sourceFileSha256": "86cf424bfdd5754f17d0b3ffb696f16960c1164511f20df3b6b701e1a8c578d6",
+      "owner": "공시가격 대상 건물 조회",
+      "rationale": "기존 읽기 RPC occurrence를 고정한다."
+    },
+    {
+      "id": "231d77cf014f1a7cb234",
+      "path": "src/verification/phase0-s-clone-reader.ts",
+      "name": "get_admin_member_list_rows_lite",
+      "contextSha256": "e4a03dcffaa037bdea7f27b904d8d5c289a8744e2c6f034b83a239c821396002",
+      "sourceFileSha256": "eb7917abcad041ea7570313043df03da8c0622cdbe79ec7ae182055f476ab88a",
+      "owner": "Phase 0-S clone 검증 조회",
+      "rationale": "A/B fixture의 조합원 목록을 읽는 검증 전용 RPC occurrence를 고정한다."
+    }
+  ]
+}

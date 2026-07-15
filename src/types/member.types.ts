@@ -104,6 +104,8 @@ export interface PreRegisterMatchingResult {
 export interface PreRegisterRequest {
     jobType: 'PRE_REGISTER';
     unionId: string;
+    /** JWT claim이 아니라 DB의 현재 SYSTEM_ADMIN users.id에서 파생한 실행자 */
+    actorUserId: string;
     members: PreRegisterData[]; // Raw 데이터 (매칭 전)
 }
 

@@ -1305,6 +1305,8 @@ canonicalWriteOutcome, scopePnus, lockPnus, evidenceHash
 5. 신규 shadow event 테이블이 배포되기 전에는 후보를 DB에 쓰지 않고 구조화 로그(`unionId`, source, property id, reason, deployment version)만 남긴다. W2 이후 같은 adapter가 append-only shadow event로 전환된다.
 6. 기존 destructive merge와 수동 property↔building link Server Action을 서버에서 차단한다. 일반 property-owned 동·호 입력은 유지하되 building unit에서 값을 복사하지 않는다.
 7. A·B 조합 공유 PNU fixture에서 가격/GIS 실행은 두 조합 `property_units` 전체 hash와 과소필지 결과가 불변인지 검증한다. member import는 대상 조합에서 승인된 입력 계약의 property-owned 예상 diff만 허용하고 `building_unit_id`와 building-unit-derived `dong/ho` diff는 0건이어야 하며, B조합 전체 hash는 불변이어야 한다.
+8. destructive `SECURITY DEFINER` RPC는 Web/API route 인증만으로 보호됐다고 간주하지 않는다. `sync_member_invites(uuid,varchar,integer,jsonb)`는 `PUBLIC/anon/authenticated` EXECUTE를 회수하고 `service_role`만 허용하며, anon/auth 직접 RPC 거부와 service-role queue 성공을 clone에서 함께 증명한다. 이 ACL-only 긴급 hotfix는 신규 relation/schema 구현이 아니므로 audited squash baseline을 기다리지 않되, 기존 migration을 수정하거나 운영 history를 repair하지 않고 CLI가 생성한 독립 timestamp migration과 운영 readback evidence로 보존한다.
+9. Web→API 조합원 queue Bearer는 `issuer=tonghari-web`, `audience=tonghari-api`, `purpose=MEMBER_QUEUE`, 단일 `operation`(`MEMBER_INVITE_SYNC` 또는 `PRE_REGISTER`), 인증 UUID와 정확한 actor profile을 함께 서명한다. API는 endpoint별 operation과 동일 actor의 현재 role/block/union을 admission 시점과 실제 queue 실행 직전에 모두 재검증한다. non-loopback endpoint는 HTTPS가 아니면 토큰 발급·전송 전에 fail-closed한다.
 
 Phase 0-S 실패는 baseline 분석을 막지는 않지만 어떤 relation/projection 개발 배포도 막는다.
 

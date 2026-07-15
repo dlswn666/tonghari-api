@@ -3,6 +3,11 @@ import { memberQueueService } from '../services/member.queue.service';
 import { MemberInviteSyncRequest, PreRegisterRequest } from '../types/member.types';
 import { createLogger } from '../utils/logger';
 import { toSyncJobRouteFailure } from '../services/sync-job-admission';
+import { authMiddleware } from '../middleware/auth';
+import {
+    memberAdminMiddleware,
+    memberSystemAdminMiddleware,
+} from '../middleware/member-admin';
 
 const router = Router();
 const logger = createLogger('MEMBER-ROUTE');
@@ -19,13 +24,13 @@ function legacyJobReadDisabled(_req: Request, res: Response) {
  * 조합원 초대 동기화 요청 (엑셀 업로드)
  * POST /member/invite-sync
  */
-router.post('/invite-sync', async (req, res) => {
-    const { unionId, createdBy, expiresHours, members } = req.body;
+router.post('/invite-sync', authMiddleware, memberAdminMiddleware, async (req, res) => {
+    const { unionId, expiresHours, members } = req.body;
 
-    if (!unionId || !createdBy || !Array.isArray(members)) {
+    if (!unionId || !Array.isArray(members)) {
         return res.status(400).json({
             success: false,
-            error: 'unionId, createdBy, members (array) are required.',
+            error: 'unionId, members (array) are required.',
         });
     }
 
@@ -33,6 +38,14 @@ router.post('/invite-sync', async (req, res) => {
         return res.status(400).json({
             success: false,
             error: 'members array cannot be empty.',
+        });
+    }
+
+    const normalizedExpiresHours = expiresHours === undefined ? 8760 : expiresHours;
+    if (!Number.isInteger(normalizedExpiresHours) || normalizedExpiresHours <= 0) {
+        return res.status(400).json({
+            success: false,
+            error: 'expiresHours must be a positive integer.',
         });
     }
 
@@ -53,8 +66,8 @@ router.post('/invite-sync', async (req, res) => {
         const request: MemberInviteSyncRequest = {
             jobType: 'MEMBER_INVITE_SYNC',
             unionId,
-            createdBy,
-            expiresHours: expiresHours || 8760, // 기본값: 1년
+            createdBy: req.user!.actorUserId!,
+            expiresHours: normalizedExpiresHours,
             members,
         };
 
@@ -88,7 +101,7 @@ router.post('/invite-sync', async (req, res) => {
  *   members: [{ name, phoneNumber?, propertyAddress, dong?, ho?, residentAddress? }]
  * }
  */
-router.post('/pre-register', async (req, res) => {
+router.post('/pre-register', authMiddleware, memberSystemAdminMiddleware, async (req, res) => {
     const { unionId, members } = req.body;
 
     if (!unionId || !Array.isArray(members)) {
@@ -122,6 +135,7 @@ router.post('/pre-register', async (req, res) => {
         const request: PreRegisterRequest = {
             jobType: 'PRE_REGISTER',
             unionId,
+            actorUserId: req.user!.actorUserId!,
             members,
         };
 
