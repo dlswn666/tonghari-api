@@ -52,7 +52,7 @@ export interface Phase0UnionArtifact {
 export interface Phase0SnapshotArtifact {
     schemaVersion: typeof PHASE0_S_ARTIFACT_VERSION;
     source: {
-        kind: 'FIXTURE' | 'DISPOSABLE_CLONE';
+        kind: 'FIXTURE' | 'DISPOSABLE_CLONE' | 'DEVELOPMENT_PROJECT';
         label: string;
         projectRefHash: string | null;
     };
@@ -563,15 +563,15 @@ export function parsePhase0SnapshotArtifact(value: unknown): Phase0SnapshotArtif
     if (!Array.isArray(value.unions)) throw new Error('artifact.unions must be an array');
     assertPlainObject(value.source, 'artifact.source');
     assertAllowedKeys(value.source, ['kind', 'label', 'projectRefHash'], 'artifact.source');
-    if (!['FIXTURE', 'DISPOSABLE_CLONE'].includes(String(value.source.kind))) {
+    if (!['FIXTURE', 'DISPOSABLE_CLONE', 'DEVELOPMENT_PROJECT'].includes(String(value.source.kind))) {
         throw new Error('artifact.source.kind is invalid');
     }
     if (typeof value.source.label !== 'string') throw new Error('artifact.source.label is invalid');
     if (value.source.projectRefHash !== null && !isSha256(value.source.projectRefHash)) {
         throw new Error('artifact.source.projectRefHash is invalid');
     }
-    if (value.source.kind === 'DISPOSABLE_CLONE' && value.source.projectRefHash === null) {
-        throw new Error('clone artifact.source.projectRefHash is required');
+    if (value.source.kind !== 'FIXTURE' && value.source.projectRefHash === null) {
+        throw new Error('non-production artifact.source.projectRefHash is required');
     }
     if (typeof value.capturedAt !== 'string') throw new Error('artifact.capturedAt is invalid');
 
@@ -679,20 +679,24 @@ export function parsePhase0SnapshotArtifact(value: unknown): Phase0SnapshotArtif
     return value as unknown as Phase0SnapshotArtifact;
 }
 
-/** 실제 gate CLI는 테스트 fixture가 아니라 동일 disposable clone의 전후 snapshot만 허용한다. */
+/** 실제 gate CLI는 테스트 fixture가 아니라 동일한 비운영 DB의 전후 snapshot만 허용한다. */
 export function assertDisposableCloneArtifactPair(
     before: Phase0SnapshotArtifact,
     after: Phase0SnapshotArtifact
 ): void {
-    if (before.source.kind !== 'DISPOSABLE_CLONE' || after.source.kind !== 'DISPOSABLE_CLONE') {
-        throw new Error('gate CLI requires DISPOSABLE_CLONE before/after artifacts');
+    const allowedKinds = new Set(['DISPOSABLE_CLONE', 'DEVELOPMENT_PROJECT']);
+    if (!allowedKinds.has(before.source.kind) || !allowedKinds.has(after.source.kind)) {
+        throw new Error('gate CLI requires non-production database before/after artifacts');
+    }
+    if (before.source.kind !== after.source.kind) {
+        throw new Error('gate CLI requires matching non-production database source kinds');
     }
     if (
         before.source.projectRefHash === null ||
         after.source.projectRefHash === null ||
         before.source.projectRefHash !== after.source.projectRefHash
     ) {
-        throw new Error('gate CLI requires matching non-null disposable clone projectRefHash values');
+        throw new Error('gate CLI requires matching non-null non-production projectRefHash values');
     }
 }
 

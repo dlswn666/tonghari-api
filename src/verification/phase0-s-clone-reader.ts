@@ -9,6 +9,9 @@ import {
 } from './phase0-s-artifact';
 
 export const PHASE0_S_CLONE_CONFIRMATION = 'DISPOSABLE_CLONE_READ_ONLY';
+export const PHASE0_S_DEVELOPMENT_CONFIRMATION = 'PERSISTENT_DEVELOPMENT_READ_ONLY';
+
+export type Phase0NonProductionSourceKind = 'DISPOSABLE_CLONE' | 'DEVELOPMENT_PROJECT';
 
 export interface DisposableCloneTargetInput {
     url: string;
@@ -47,10 +50,17 @@ function projectRefFromHostedUrl(url: URL): string | null {
 export function assertDisposableCloneTarget(input: DisposableCloneTargetInput): {
     normalizedUrl: string;
     projectRef: string;
+    sourceKind: Phase0NonProductionSourceKind;
 } {
-    if (input.confirmation !== PHASE0_S_CLONE_CONFIRMATION) {
+    const sourceKind = input.confirmation === PHASE0_S_CLONE_CONFIRMATION
+        ? 'DISPOSABLE_CLONE'
+        : input.confirmation === PHASE0_S_DEVELOPMENT_CONFIRMATION
+            ? 'DEVELOPMENT_PROJECT'
+            : null;
+    if (!sourceKind) {
         throw new Error(
-            `PHASE0_S_CLONE_CONFIRMED=${PHASE0_S_CLONE_CONFIRMATION} 확인값이 필요합니다.`
+            `PHASE0_S_CLONE_CONFIRMED는 ${PHASE0_S_CLONE_CONFIRMATION} 또는 ` +
+            `${PHASE0_S_DEVELOPMENT_CONFIRMATION} 확인값이어야 합니다.`
         );
     }
 
@@ -67,7 +77,7 @@ export function assertDisposableCloneTarget(input: DisposableCloneTargetInput): 
     const isLocal = ['127.0.0.1', 'localhost', '::1'].includes(url.hostname);
     if (isLocal) {
         if (!['http:', 'https:'].includes(url.protocol)) throw new Error('local clone URL protocol이 잘못됐습니다.');
-        return { normalizedUrl, projectRef: `local:${url.host}` };
+        return { normalizedUrl, projectRef: `local:${url.host}`, sourceKind };
     }
 
     if (url.protocol !== 'https:') throw new Error('hosted clone은 HTTPS만 허용합니다.');
@@ -84,7 +94,7 @@ export function assertDisposableCloneTarget(input: DisposableCloneTargetInput): 
     if (input.productionProjectRef === hostedRef) {
         throw new Error('운영 project ref에서는 Phase 0-S clone snapshot을 실행할 수 없습니다.');
     }
-    return { normalizedUrl, projectRef: hostedRef };
+    return { normalizedUrl, projectRef: hostedRef, sourceKind };
 }
 
 function asSnapshotRow(value: unknown, context: string): SnapshotRow {
@@ -293,6 +303,7 @@ async function readMinorParcelResults(client: SupabaseClient, unionId: string): 
 export async function capturePhase0CloneArtifact(input: {
     client: SupabaseClient;
     projectRef: string;
+    sourceKind?: Phase0NonProductionSourceKind;
     label: string;
     unions: Array<{ alias: string; unionId: string }>;
     capturedAt?: string;
@@ -330,7 +341,7 @@ export async function capturePhase0CloneArtifact(input: {
 
     return createPhase0SnapshotArtifact({
         source: {
-            kind: 'DISPOSABLE_CLONE',
+            kind: input.sourceKind ?? 'DISPOSABLE_CLONE',
             label: input.label,
             projectRefHash: hashCanonicalValue(`project:${input.projectRef}`),
         },

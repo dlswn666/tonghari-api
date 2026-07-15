@@ -1,6 +1,6 @@
-# Phase 0-S 공유 PNU clone gate
+# Phase 0-S 공유 PNU 비운영 DB gate
 
-이 gate는 disposable Supabase clone에서 A·B 조합이 같은 PNU를 가진 fixture를 검증한다. CLI 자체는 조회만 수행하며 GIS·가격·조합원 작업을 시작하지 않는다. 각 작업은 기존 인증 경계로 별도 실행하고, 실행 전후 snapshot만 이 CLI로 수집한다.
+이 gate는 disposable Supabase clone 또는 영구 개발 프로젝트에서 A·B 조합이 같은 PNU를 가진 fixture를 검증한다. CLI 자체는 조회만 수행하며 GIS·가격·조합원 작업을 시작하지 않는다. 각 작업은 기존 인증 경계로 별도 실행하고, 실행 전후 snapshot만 이 CLI로 수집한다. 영구 개발 프로젝트의 데이터는 작업 후에도 유지되므로 운영 데이터나 개인정보를 복사하지 않고 합성 fixture만 사용한다.
 
 ## 검증 데이터
 
@@ -17,19 +17,19 @@ artifact schema는 `phase0-s-artifact/v3`다. v3의 `rowHash`는 정렬된 `colu
 
 `sharedPnuHashes`는 단순 활성 PNU 목록이 아니다. parser는 원문 PNU 없이 hashed column 관계를 따라 활성 `property_units` → 활성 ownership → 동일 ownership/unit/PNU의 canonical row → status가 있는 과소필지 UNIT 및 해당 GROUP summary → 같은 PNU의 `building_land_lots` → mapping 건물의 non-orphan 상태를 다시 계산한다. 이 결과와 6개 dataset digest는 `sharedPnuCoverageCommitment`로 함께 묶인다. 배열 또는 commitment를 임의 SHA로 바꾸면 parser가 거부하며, A·B 사이에 완전 coverage hash 교집합이 없으면 데이터가 불변이어도 실패한다.
 
-## clone 대상 안전장치
+## 비운영 DB 대상 안전장치
 
 hosted Supabase에서는 아래 환경변수를 모두 명시한다. clone ref와 운영 ref가 같거나, `SUPABASE_URL`과 clone URL이 같거나, 일반 외부 주소이면 실행하지 않는다. localhost는 confirmation 값이 있는 경우만 허용한다.
 
 ```bash
-export PHASE0_S_CLONE_URL=https://<clone-ref>.supabase.co
-export PHASE0_S_CLONE_SERVICE_ROLE_KEY=<clone-service-role-key>
-export PHASE0_S_CLONE_PROJECT_REF=<clone-ref>
+export PHASE0_S_CLONE_URL=https://<non-production-ref>.supabase.co
+export PHASE0_S_CLONE_SERVICE_ROLE_KEY=<non-production-service-role-key>
+export PHASE0_S_CLONE_PROJECT_REF=<non-production-ref>
 export PHASE0_S_PRODUCTION_PROJECT_REF=<production-ref>
-export PHASE0_S_CLONE_CONFIRMED=DISPOSABLE_CLONE_READ_ONLY
+export PHASE0_S_CLONE_CONFIRMED=PERSISTENT_DEVELOPMENT_READ_ONLY
 ```
 
-운영 service-role key를 사용하지 않는다.
+일회성 clone이면 기존 확인값 `DISPOSABLE_CLONE_READ_ONLY`를 사용한다. 운영 service-role key를 사용하지 않는다. `PHASE0_S_CLONE_*` 이름은 기존 실행 환경과의 호환을 위해 유지하며 영구 개발 프로젝트도 동일 변수에 개발 프로젝트 값만 넣는다.
 
 ## snapshot 수집
 
@@ -43,7 +43,7 @@ npm run phase0-s:gate -- capture \
   --union B=<union-b-uuid> \
   --out .phase0-s/before-gis.json
 
-# disposable clone에서 인증된 기존 경로로 GIS 또는 가격 작업 실행
+# 동일 비운영 DB에서 인증된 기존 경로로 GIS 또는 가격 작업 실행
 
 npm run phase0-s:gate -- capture \
   --label after-gis \
@@ -64,7 +64,7 @@ npm run phase0-s:gate -- verify-invariant \
 ```
 
 `APT_PRICE`, `INDIVIDUAL_HOUSE_PRICE`, `LAND_PRICE`도 각각 별도 전후 artifact로 반복한다. 6개 dataset 중 한 row의 한 컬럼이라도 달라지면 exit code 1이다.
-`verify-invariant`와 `verify-member-import`는 모두 동일 disposable clone의 `DISPOSABLE_CLONE` artifact pair만 허용한다. `FIXTURE` artifact 또는 서로 다른 `projectRefHash` pair는 내부 비교 결과와 무관하게 실패한다.
+`verify-invariant`와 `verify-member-import`는 동일한 비운영 DB 종류와 `projectRefHash`를 가진 artifact pair만 허용한다. `DISPOSABLE_CLONE`과 `DEVELOPMENT_PROJECT`를 섞거나 `FIXTURE` artifact를 사용하거나 서로 다른 프로젝트를 비교하면 내부 비교 결과와 무관하게 실패한다.
 
 ## member import gate
 

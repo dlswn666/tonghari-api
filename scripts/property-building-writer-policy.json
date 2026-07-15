@@ -212,7 +212,7 @@
       "path": "src/verification/phase0-s-clone-reader.ts",
       "name": "get_admin_member_list_rows_lite",
       "contextSha256": "e4a03dcffaa037bdea7f27b904d8d5c289a8744e2c6f034b83a239c821396002",
-      "sourceFileSha256": "eb7917abcad041ea7570313043df03da8c0622cdbe79ec7ae182055f476ab88a",
+      "sourceFileSha256": "90d5357f97e5ccf8ae7c25bd4e106a8bca971ce40a68ea57f965af94ccc9e546",
       "owner": "Phase 0-S clone 검증 조회",
       "rationale": "A/B fixture의 조합원 목록을 읽는 검증 전용 RPC occurrence를 고정한다."
     }

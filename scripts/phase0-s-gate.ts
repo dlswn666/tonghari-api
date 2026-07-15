@@ -88,6 +88,7 @@ async function capture(args: ParsedArgs): Promise<void> {
     const artifact = await capturePhase0CloneArtifact({
         client,
         projectRef: target.projectRef,
+        sourceKind: target.sourceKind,
         label: required(args, 'label'),
         unions,
     });
