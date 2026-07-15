@@ -36,6 +36,19 @@ export PHASE0_S_CLONE_CONFIRMED=PERSISTENT_DEVELOPMENT_READ_ONLY
 artifact는 반드시 gitignored `.phase0-s/` 아래에 저장된다.
 각 `--union` alias는 서로 다른 실제 `union_id`를 가리켜야 하며 같은 조합을 A/B로 중복 지정할 수 없다.
 
+영구 개발 프로젝트의 합성 fixture는
+`scripts/phase0-s-development-fixture.sql`을 target guard가 있는 DB 실행 경로로 적용한다.
+이 파일은 migration이나 일반 seed가 아니며 운영 프로젝트에는 적용하지 않는다. 고정 fixture identity는 다음과 같다.
+
+- A 조합: `00000000-0000-4000-a000-000000000001`
+- B 조합: `00000000-0000-4000-a000-000000000002`
+- 공유 PNU: `1130510100107450062`
+
+fixture는 두 조합의 `land_lots`, `property_units`, `property_ownerships`를 각각 독립 행으로 만들고,
+전역 `building_land_lots`만 같은 물리 건물 projection을 가리킨다. 두 `property_units.building_unit_id`는
+Phase F 승인 전까지 `NULL`이다. 검증을 모두 마친 뒤에는
+`scripts/phase0-s-development-fixture-cleanup.sql`로 고정 identity만 제거한다.
+
 ```bash
 npm run phase0-s:gate -- capture \
   --label before-gis \

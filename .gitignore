@@ -17,6 +17,9 @@ npm-debug.log*
 # Phase 0-S clone snapshots (hash-only, local verification artifacts)
 .phase0-s/
 
+# Supabase CLI local project link metadata
+supabase/.temp/
+
 # OS files
 .DS_Store
 Thumbs.db
