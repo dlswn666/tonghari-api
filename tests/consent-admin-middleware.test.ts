@@ -7,7 +7,7 @@ type RuntimeModules = {
         typeof import('../src/middleware/consent-admin').consentBulkUpdateAdminMiddleware;
     consentBulkUploadAdminMiddleware:
         typeof import('../src/middleware/consent-admin').consentBulkUploadAdminMiddleware;
-    supabaseService: typeof import('../src/services/supabase.service').supabaseService;
+    getSupabaseService: typeof import('../src/services/supabase.service').getSupabaseService;
 };
 
 let runtimeModules: Promise<RuntimeModules> | undefined;
@@ -22,6 +22,9 @@ function loadRuntimeModules(): Promise<RuntimeModules> {
             DEFAULT_SENDER_KEY: 'test-sender-key',
             SUPABASE_URL: 'https://example.supabase.co',
             SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
+            DEV_API_JWT_SECRET: 'test-consent-dev-jwt-secret',
+            DEV_SUPABASE_URL: 'https://development-example.supabase.co',
+            DEV_SUPABASE_SERVICE_ROLE_KEY: 'test-development-service-role-key',
         });
 
         runtimeModules = Promise.all([
@@ -32,7 +35,7 @@ function loadRuntimeModules(): Promise<RuntimeModules> {
                 middlewareModule.consentBulkUpdateAdminMiddleware,
             consentBulkUploadAdminMiddleware:
                 middlewareModule.consentBulkUploadAdminMiddleware,
-            supabaseService: serviceModule.supabaseService,
+            getSupabaseService: serviceModule.getSupabaseService,
         }));
     }
 
@@ -179,6 +182,7 @@ function validRows(actor: Record<string, unknown> = {
             id: 'job-a',
             union_id: 'union-a',
             job_type: 'CONSENT_UPLOAD',
+            status: 'PROCESSING',
         }],
     };
 }
@@ -186,16 +190,16 @@ function validRows(actor: Record<string, unknown> = {
 async function runMiddleware(
     plan: FakePlan = { rows: validRows() },
     overrides: Partial<Request> = {},
-    mode: 'update' | 'upload' = 'update'
+    mode: 'update' | 'upload' = 'update',
+    otherTargetPlan: FakePlan = {
+        errors: { user_auth_links: { message: 'wrong target client selected' } },
+    }
 ) {
     const {
         consentBulkUpdateAdminMiddleware,
         consentBulkUploadAdminMiddleware,
-        supabaseService,
+        getSupabaseService,
     } = await loadRuntimeModules();
-    const fake = createFakeClient(plan);
-    const originalGetClient = supabaseService.getClient;
-    (supabaseService as unknown as { getClient: () => unknown }).getClient = () => fake.client;
 
     const { response, state } = createResponse();
     let nextCalled = false;
@@ -213,6 +217,17 @@ async function runMiddleware(
         }),
         ...overrides,
     } as unknown as Request;
+    const databaseTarget = request.user?.databaseTarget ?? 'production';
+    const selectedFake = createFakeClient(plan);
+    const otherFake = createFakeClient(otherTargetPlan);
+    const productionService = getSupabaseService('production');
+    const developmentService = getSupabaseService('development');
+    const originalProductionGetClient = productionService.getClient;
+    const originalDevelopmentGetClient = developmentService.getClient;
+    (productionService as unknown as { getClient: () => unknown }).getClient = () =>
+        databaseTarget === 'production' ? selectedFake.client : otherFake.client;
+    (developmentService as unknown as { getClient: () => unknown }).getClient = () =>
+        databaseTarget === 'development' ? selectedFake.client : otherFake.client;
 
     try {
         const middleware = mode === 'update'
@@ -223,14 +238,22 @@ async function runMiddleware(
             response,
             (() => { nextCalled = true; }) as NextFunction
         );
-        return { request, state, nextCalled, traces: fake.traces };
+        return {
+            request,
+            state,
+            nextCalled,
+            traces: selectedFake.traces,
+            otherTargetTraces: otherFake.traces,
+        };
     } finally {
-        (supabaseService as unknown as { getClient: typeof originalGetClient }).getClient =
-            originalGetClient;
+        (productionService as unknown as { getClient: typeof originalProductionGetClient }).getClient =
+            originalProductionGetClient;
+        (developmentService as unknown as { getClient: typeof originalDevelopmentGetClient }).getClient =
+            originalDevelopmentGetClient;
     }
 }
 
-test('무인증 요청과 legacy/dev 토큰을 운영 consent queue에서 거부한다', async () => {
+test('무인증 요청과 legacy 토큰을 consent queue에서 거부한다', async () => {
     const unauthenticated = await runMiddleware({}, { user: undefined });
     assert.equal(unauthenticated.state.status, 401);
     assert.equal(unauthenticated.nextCalled, false);
@@ -243,15 +266,50 @@ test('무인증 요청과 legacy/dev 토큰을 운영 consent queue에서 거부
     assert.equal((legacy.state.body as { code: string }).code, 'LEGACY_TOKEN_NOT_SUPPORTED');
     assert.equal(legacy.traces.length, 0);
 
-    const development = await runMiddleware({}, {
-        user: consentUser({ databaseTarget: 'development' }),
+});
+
+test('development consent 토큰은 개발 client에서만 현재 권한과 sync_job을 검증한다', async () => {
+    const development = await runMiddleware({ rows: validRows() }, {
+        user: consentUser({
+            databaseTarget: 'development',
+            issuer: 'tonghari-web-dev',
+        }),
     });
-    assert.equal(development.state.status, 403);
-    assert.equal(
-        (development.state.body as { code: string }).code,
-        'DEVELOPMENT_TARGET_NOT_SUPPORTED'
+
+    assert.equal(development.nextCalled, true);
+    assert.equal(development.state.status, 200);
+    assert.ok(development.traces.length > 0);
+    assert.equal(development.otherTargetTraces.length, 0);
+});
+
+test('development 요청은 운영에만 같은 UUID sync_job이 있어도 wrong-target not-found다', async () => {
+    const developmentRows = validRows();
+    developmentRows.sync_jobs = [];
+    const result = await runMiddleware(
+        { rows: developmentRows },
+        {
+            user: consentUser({
+                databaseTarget: 'development',
+                issuer: 'tonghari-web-dev',
+            }),
+        },
+        'update',
+        { rows: validRows() }
     );
-    assert.equal(development.traces.length, 0);
+
+    assert.equal(result.state.status, 404);
+    assert.equal((result.state.body as { code: string }).code, 'JOB_NOT_FOUND');
+    assert.equal(result.nextCalled, false);
+    assert.equal(result.otherTargetTraces.length, 0);
+    assert.deepEqual(
+        result.traces.find((trace) => trace.table === 'sync_jobs')?.eq,
+        [
+            ['id', 'job-a'],
+            ['union_id', 'union-a'],
+            ['job_type', 'CONSENT_UPLOAD'],
+            ['status', 'PROCESSING'],
+        ]
+    );
 });
 
 test('purpose/operation 또는 토큰 union이 요청 범위와 다르면 DB 조회 전에 거부한다', async () => {
@@ -316,9 +374,10 @@ test('auth UUID와 actor profile 링크가 정확하고 현재 미차단 ADMIN/S
 
 test('job은 요청한 union의 CONSENT_UPLOAD 원장과 정확히 일치해야 한다', async () => {
     for (const job of [
-        { id: 'job-a', union_id: 'union-b', job_type: 'CONSENT_UPLOAD' },
+        { id: 'job-a', union_id: 'union-b', job_type: 'CONSENT_UPLOAD', status: 'PROCESSING' },
         { id: 'job-a', union_id: 'union-a', job_type: 'GIS_UPLOAD' },
-        { id: 'other-job', union_id: 'union-a', job_type: 'CONSENT_UPLOAD' },
+        { id: 'other-job', union_id: 'union-a', job_type: 'CONSENT_UPLOAD', status: 'PROCESSING' },
+        { id: 'job-a', union_id: 'union-a', job_type: 'CONSENT_UPLOAD', status: 'COMPLETED' },
     ]) {
         const rows = validRows();
         rows.sync_jobs = [job];
@@ -332,6 +391,7 @@ test('job은 요청한 union의 CONSENT_UPLOAD 원장과 정확히 일치해야 
             ['id', 'job-a'],
             ['union_id', 'union-a'],
             ['job_type', 'CONSENT_UPLOAD'],
+            ['status', 'PROCESSING'],
         ]);
     }
 });

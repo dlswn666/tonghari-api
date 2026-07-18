@@ -59,7 +59,7 @@ function isLegalOrGovEntity(name: string): boolean {
  * - MEMBER_INVITE_SYNC: 조합원 초대 동기화 (member_invites 테이블)
  * - PRE_REGISTER: 사전 등록 (users 테이블, PRE_REGISTERED 상태)
  */
-class MemberQueueService {
+export class MemberQueueService {
     private queue: PQueue;
     private jobs: Map<string, MemberJobInfo>;
 
@@ -71,9 +71,10 @@ class MemberQueueService {
         this.jobs = new Map();
 
         // 주기적으로 완료된 작업 정리 (30분마다)
-        setInterval(() => {
+        const cleanupTimer = setInterval(() => {
             this.cleanupOldJobs();
         }, 30 * 60 * 1000);
+        cleanupTimer.unref();
     }
 
     /** Admission 뒤 queue 대기 중 role/block/union이 바뀌었는지 실행 직전에 다시 확인한다. */
@@ -135,7 +136,7 @@ class MemberQueueService {
                 .select('id, union_id')
                 .single()
         );
-        this.jobs.set(jobId, jobInfo);
+        this.jobs.set(this.jobKey(request.databaseTarget, jobId), jobInfo);
         logger.info(`Member invite sync job added: ${jobId} (members: ${request.members.length})`);
 
         this.queue
@@ -144,8 +145,12 @@ class MemberQueueService {
             })
             .catch((err) => {
                 logger.error(`Member invite sync job ${jobId} fatal error`, err);
-                this.updateJobStatus(jobId, { status: 'failed', error: err.message });
-                database.updateSyncJobStatus(jobId, 'FAILED', 0, err.message);
+                this.updateJobStatus(jobId, request.databaseTarget, {
+                    status: 'failed',
+                    error: err.message,
+                    completedAt: new Date(),
+                });
+                return database.updateSyncJobStatus(jobId, 'FAILED', 0, err.message);
             });
 
         return jobInfo;
@@ -187,7 +192,7 @@ class MemberQueueService {
                 .select('id, union_id')
                 .single()
         );
-        this.jobs.set(jobId, jobInfo);
+        this.jobs.set(this.jobKey(request.databaseTarget, jobId), jobInfo);
         logger.info(`Pre-register job added: ${jobId} (members: ${request.members.length})`);
 
         this.queue
@@ -196,8 +201,12 @@ class MemberQueueService {
             })
             .catch((err) => {
                 logger.error(`Pre-register job ${jobId} fatal error`, err);
-                this.updateJobStatus(jobId, { status: 'failed', error: err.message });
-                database.updateSyncJobStatus(jobId, 'FAILED', 0, err.message);
+                this.updateJobStatus(jobId, request.databaseTarget, {
+                    status: 'failed',
+                    error: err.message,
+                    completedAt: new Date(),
+                });
+                return database.updateSyncJobStatus(jobId, 'FAILED', 0, err.message);
             });
 
         return jobInfo;
@@ -217,7 +226,7 @@ class MemberQueueService {
      * 조합원 초대 동기화 처리
      */
     private async processMemberInviteSyncJob(jobId: string, request: MemberInviteSyncRequest): Promise<void> {
-        const job = this.jobs.get(jobId);
+        const job = this.jobs.get(this.jobKey(request.databaseTarget, jobId));
         if (!job) return;
 
         await this.assertActorAuthorizedAtExecution(
@@ -228,7 +237,7 @@ class MemberQueueService {
         );
 
         logger.info(`[Member Sync ${jobId}] Processing started`);
-        this.updateJobStatus(jobId, { status: 'processing', startedAt: new Date() });
+        this.updateJobStatus(jobId, request.databaseTarget, { status: 'processing', startedAt: new Date() });
 
         try {
             const database = getSupabaseService(request.databaseTarget);
@@ -267,7 +276,7 @@ class MemberQueueService {
             }
 
             // 완료 처리
-            this.updateJobStatus(jobId, {
+            this.updateJobStatus(jobId, request.databaseTarget, {
                 status: 'completed',
                 completedAt: new Date(),
                 processedCount: request.members.length,
@@ -290,7 +299,11 @@ class MemberQueueService {
         } catch (error: any) {
             const errorMessage = error.message || 'Unknown error';
             logger.error(`[Member Sync ${jobId}] Failed`, error);
-            this.updateJobStatus(jobId, { status: 'failed', error: errorMessage, completedAt: new Date() });
+            this.updateJobStatus(jobId, request.databaseTarget, {
+                status: 'failed',
+                error: errorMessage,
+                completedAt: new Date(),
+            });
             await getSupabaseService(request.databaseTarget)
                 .updateSyncJobStatus(jobId, 'FAILED', 0, errorMessage);
         }
@@ -302,7 +315,7 @@ class MemberQueueService {
      * 2단계: DB 저장 (50-100%) - users + property_units/property_ownerships
      */
     private async processPreRegisterJob(jobId: string, request: PreRegisterRequest): Promise<void> {
-        const job = this.jobs.get(jobId);
+        const job = this.jobs.get(this.jobKey(request.databaseTarget, jobId));
         if (!job) return;
 
         await this.assertActorAuthorizedAtExecution(
@@ -313,7 +326,7 @@ class MemberQueueService {
         );
 
         logger.info(`[Pre-Register ${jobId}] Processing started (${request.members.length} members)`);
-        this.updateJobStatus(jobId, { status: 'processing', startedAt: new Date() });
+        this.updateJobStatus(jobId, request.databaseTarget, { status: 'processing', startedAt: new Date() });
 
         const database = getSupabaseService(request.databaseTarget);
         const client = database.getClient();
@@ -761,7 +774,7 @@ class MemberQueueService {
                 if (validMembers.length === 0) {
                     // 진행률 업데이트
                     const progress = Math.round((processedRowCount / totalCount) * 100);
-                    this.updateJobStatus(jobId, { processedCount: processedRowCount });
+                    this.updateJobStatus(jobId, request.databaseTarget, { processedCount: processedRowCount });
                     if (progress % 5 === 0 || processedRowCount === totalCount) {
                         await database.updateSyncJobStatus(jobId, 'PROCESSING', progress, undefined, {
                             job_type: 'PRE_REGISTER',
@@ -796,7 +809,7 @@ class MemberQueueService {
                     if (userError) {
                         errors.push(`${firstRow.name}: ${userError.message}`);
                         const progress = Math.round((processedRowCount / totalCount) * 100);
-                        this.updateJobStatus(jobId, { processedCount: processedRowCount });
+                        this.updateJobStatus(jobId, request.databaseTarget, { processedCount: processedRowCount });
                         if (progress % 5 === 0 || processedRowCount === totalCount) {
                             await database.updateSyncJobStatus(jobId, 'PROCESSING', progress, undefined, {
                                 job_type: 'PRE_REGISTER',
@@ -942,7 +955,7 @@ class MemberQueueService {
             const progress = Math.round((processedRowCount / totalCount) * 100);
 
             // 인메모리 상태 업데이트 (클라이언트 폴링용)
-            this.updateJobStatus(jobId, { processedCount: processedRowCount });
+            this.updateJobStatus(jobId, request.databaseTarget, { processedCount: processedRowCount });
 
             // 5% 단위로 DB 업데이트
             if (progress % 5 === 0 || processedRowCount === totalCount) {
@@ -978,7 +991,7 @@ class MemberQueueService {
         });
         const { finalStatus, result } = completion;
 
-        this.updateJobStatus(jobId, {
+        this.updateJobStatus(jobId, request.databaseTarget, {
             status: finalStatus,
             completedAt: new Date(),
             result,
@@ -1312,19 +1325,28 @@ class MemberQueueService {
     /**
      * 작업 상태 업데이트
      */
-    private updateJobStatus(jobId: string, update: Partial<MemberJobInfo>): void {
-        const job = this.jobs.get(jobId);
+    private jobKey(databaseTarget: DatabaseTarget, jobId: string): string {
+        return `${databaseTarget}:${jobId}`;
+    }
+
+    private updateJobStatus(
+        jobId: string,
+        databaseTarget: DatabaseTarget,
+        update: Partial<MemberJobInfo>
+    ): void {
+        const key = this.jobKey(databaseTarget, jobId);
+        const job = this.jobs.get(key);
         if (job) {
             Object.assign(job, update);
-            this.jobs.set(jobId, job);
+            this.jobs.set(key, job);
         }
     }
 
     /**
      * 작업 상태 조회
      */
-    getJobStatus(jobId: string): MemberJobInfo | undefined {
-        return this.jobs.get(jobId);
+    getJobStatus(jobId: string, databaseTarget: DatabaseTarget): MemberJobInfo | undefined {
+        return this.jobs.get(this.jobKey(databaseTarget, jobId));
     }
 
     /**
@@ -1334,9 +1356,9 @@ class MemberQueueService {
         const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
         let cleaned = 0;
 
-        for (const [jobId, job] of this.jobs.entries()) {
+        for (const [jobKey, job] of this.jobs.entries()) {
             if (job.completedAt && job.completedAt < oneHourAgo) {
-                this.jobs.delete(jobId);
+                this.jobs.delete(jobKey);
                 cleaned++;
             }
         }

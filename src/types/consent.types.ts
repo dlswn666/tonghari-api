@@ -1,6 +1,7 @@
 /**
  * 동의 처리 관련 타입 정의
  */
+import { DatabaseTarget } from './database.types';
 
 /**
  * 작업 유형
@@ -29,8 +30,10 @@ export interface ConsentBulkUpdateRequest {
     jobId: string;
     unionId: string;
     stageId: string;
+    actorUserId: string;
     memberIds: string[];
     status: ConsentStatus;
+    databaseTarget: DatabaseTarget;
 }
 
 /**
@@ -68,7 +71,9 @@ export interface ConsentUploadRequest {
     jobId: string;
     unionId: string;
     stageId: string;
+    actorUserId: string;
     data: ConsentUploadRow[];
+    databaseTarget: DatabaseTarget;
 }
 
 /**

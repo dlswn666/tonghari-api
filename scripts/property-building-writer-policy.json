@@ -8,7 +8,7 @@
       "table": "property_units",
       "operation": "update",
       "contextSha256": "9a961b70f76581a2d36a3979812d0bf15f2ec1cd73f21d8d26639053cf542aad",
-      "sourceFileSha256": "f69b6ac3cd4c557e5acee636718aea0379257b2b017123417b009db3e741d40d",
+      "sourceFileSha256": "4596cd77e38c002e1f758fbed6bf5d0462fdae3b991bd827d456e22cc30c009e",
       "fields": [
         "building_area",
         "building_name",
@@ -28,7 +28,7 @@
       "table": "property_units",
       "operation": "update",
       "contextSha256": "a6482eb3b1f27b2d3f50ee71a45fca3217b7163b75f57b718bbce3dc1b762f21",
-      "sourceFileSha256": "f69b6ac3cd4c557e5acee636718aea0379257b2b017123417b009db3e741d40d",
+      "sourceFileSha256": "4596cd77e38c002e1f758fbed6bf5d0462fdae3b991bd827d456e22cc30c009e",
       "fields": [
         "building_area",
         "building_name",
@@ -51,7 +51,7 @@
       "table": "property_units",
       "operation": "insert",
       "contextSha256": "7577d2016261038492b3f38abdbfd208c2eed078d00bba8b2ba2bfad9dfcca5d",
-      "sourceFileSha256": "f69b6ac3cd4c557e5acee636718aea0379257b2b017123417b009db3e741d40d",
+      "sourceFileSha256": "4596cd77e38c002e1f758fbed6bf5d0462fdae3b991bd827d456e22cc30c009e",
       "fields": [
         "building_area",
         "building_name",
@@ -185,7 +185,7 @@
       "path": "src/services/member.queue.service.ts",
       "name": "sync_member_invites",
       "contextSha256": "d4ef824b8396dd3650fd2fe83112b6c3af96bce676277bdedb7789e7a7648510",
-      "sourceFileSha256": "f69b6ac3cd4c557e5acee636718aea0379257b2b017123417b009db3e741d40d",
+      "sourceFileSha256": "4596cd77e38c002e1f758fbed6bf5d0462fdae3b991bd827d456e22cc30c009e",
       "owner": "조합원 초대 동기화 큐",
       "rationale": "기존 조합원 초대 동기화 RPC occurrence만 허용하고 신규 자동 연결 RPC 추가를 검토 없이 허용하지 않는다."
     },

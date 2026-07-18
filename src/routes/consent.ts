@@ -6,7 +6,7 @@ import {
 } from '../types/consent.types';
 import { createLogger } from '../utils/logger';
 import { toSyncJobRouteFailure } from '../services/sync-job-admission';
-import { authMiddleware } from '../middleware/auth';
+import { databaseTargetAuthMiddleware as authMiddleware } from '../middleware/auth';
 import {
     consentBulkUpdateAdminMiddleware,
     consentBulkUploadAdminMiddleware,
@@ -61,8 +61,10 @@ router.post('/queue', authMiddleware, consentBulkUpdateAdminMiddleware, async (r
             jobId,
             unionId,
             stageId,
+            actorUserId: req.user!.actorUserId!,
             memberIds,
             status,
+            databaseTarget: req.user!.databaseTarget,
         };
 
         const jobInfo = await consentQueueService.addBulkUpdateJob(request);
@@ -124,7 +126,9 @@ router.post('/upload-queue', authMiddleware, consentBulkUploadAdminMiddleware, a
             jobId,
             unionId,
             stageId,
+            actorUserId: req.user!.actorUserId!,
             data,
+            databaseTarget: req.user!.databaseTarget,
         };
 
         const jobInfo = await consentQueueService.addUploadJob(request);

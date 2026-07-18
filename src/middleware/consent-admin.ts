@@ -1,5 +1,5 @@
 import { NextFunction, Request, Response } from 'express';
-import { supabaseService } from '../services/supabase.service';
+import { getSupabaseService } from '../services/supabase.service';
 import { createLogger } from '../utils/logger';
 
 const logger = createLogger('CONSENT-AUTH');
@@ -46,11 +46,11 @@ function requestString(value: unknown): string | null {
 }
 
 /**
- * 운영 consent queue의 service-role 쓰기 경계.
+ * target별 consent queue의 service-role 쓰기 경계.
  *
- * - 이 큐는 아직 production Supabase singleton만 사용하므로 dev 토큰을 절대 허용하지 않는다.
  * - 무인증이었던 과거 route에는 보존할 JWT 계약이 없으므로 kid 없는 legacy 토큰도 허용하지 않는다.
- * - 토큰 claim은 요청 범위를 좁히는 용도이며, 실제 역할/차단/조합 소속은 운영 DB 현재값으로 재검증한다.
+ * - 토큰 claim은 요청 범위를 좁히는 용도이며, 실제 역할/차단/조합 소속은 같은 target DB 현재값으로 재검증한다.
+ * - 외부 운영 부작용은 기본 authMiddleware 경계에 남고, 이 allowlist route는 선택된 DB 안의 동의 원장만 변경한다.
  */
 async function authorizeConsentAdmin(
     req: Request,
@@ -80,14 +80,6 @@ async function authorizeConsentAdmin(
         });
         return;
     }
-    if (req.user.databaseTarget !== 'production') {
-        res.status(403).json({
-            success: false,
-            code: 'DEVELOPMENT_TARGET_NOT_SUPPORTED',
-            error: '동의 변경 작업은 운영 전용입니다.',
-        });
-        return;
-    }
     if (req.user.legacyProductionToken) {
         res.status(403).json({
             success: false,
@@ -105,10 +97,13 @@ async function authorizeConsentAdmin(
         });
         return;
     }
+    const expectedIssuer = req.user.databaseTarget === 'development'
+        ? 'tonghari-web-dev'
+        : 'tonghari-web';
     if (
         req.user.purpose !== 'CONSENT_QUEUE' ||
         req.user.operation !== options.operation ||
-        req.user.issuer !== 'tonghari-web' ||
+        req.user.issuer !== expectedIssuer ||
         !hasExpectedAudience(req.user.audience)
     ) {
         res.status(403).json({
@@ -148,8 +143,8 @@ async function authorizeConsentAdmin(
         ));
     }
 
-    // 이 route의 worker는 production singleton에 고정돼 있다. 명시적으로 운영 client만 사용한다.
-    const client = supabaseService.getClient();
+    // 인증된 target에서 actor, union, stage, Web이 만든 sync_job을 같은 client로 검증한다.
+    const client = getSupabaseService(req.user.databaseTarget).getClient();
 
     try {
         const { data: link, error: linkError } = await client
@@ -294,10 +289,11 @@ async function authorizeConsentAdmin(
 
         const { data: job, error: jobError } = await client
             .from('sync_jobs')
-            .select('id, union_id, job_type')
+            .select('id, union_id, job_type, status')
             .eq('id', requestedJobId)
             .eq('union_id', requestedUnionId)
             .eq('job_type', CONSENT_SYNC_JOB_TYPE)
+            .eq('status', 'PROCESSING')
             .maybeSingle();
         if (jobError) {
             logger.error('동의 작업 원장 조회 실패', jobError);
@@ -312,7 +308,8 @@ async function authorizeConsentAdmin(
             !job ||
             job.id !== requestedJobId ||
             job.union_id !== requestedUnionId ||
-            job.job_type !== CONSENT_SYNC_JOB_TYPE
+            job.job_type !== CONSENT_SYNC_JOB_TYPE ||
+            job.status !== 'PROCESSING'
         ) {
             res.status(404).json({
                 success: false,

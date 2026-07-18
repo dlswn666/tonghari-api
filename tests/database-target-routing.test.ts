@@ -268,23 +268,49 @@ test('새 GIS 토큰은 production/development 모두 mutation purpose와 read s
     }
 });
 
-test('GIS/member admission과 background worker는 bare 운영 singleton 없이 request target을 전파한다', async () => {
+test('GIS/member/consent admission과 background worker는 bare 운영 singleton 없이 request target을 전파한다', async () => {
     const gisQueue = await readFile('src/services/gis.queue.service.ts', 'utf8');
     const memberQueue = await readFile('src/services/member.queue.service.ts', 'utf8');
+    const consentQueue = await readFile('src/services/consent.queue.service.ts', 'utf8');
     const gisRoute = await readFile('src/routes/gis.ts', 'utf8');
     const memberRoute = await readFile('src/routes/member.ts', 'utf8');
+    const consentRoute = await readFile('src/routes/consent.ts', 'utf8');
+    const consentAdmin = await readFile('src/middleware/consent-admin.ts', 'utf8');
 
     for (const [file, source] of [
         ['gis.queue.service.ts', gisQueue],
         ['member.queue.service.ts', memberQueue],
+        ['consent.queue.service.ts', consentQueue],
     ] as const) {
         assert.doesNotMatch(source, /\bsupabaseService\b/, `${file}: production singleton remains`);
         assert.match(source, /getSupabaseService\(/, `${file}: target-aware database selection missing`);
         assert.match(source, /request\.databaseTarget/, `${file}: queued request target missing`);
     }
     assert.match(gisQueue, /jobKey\(databaseTarget, jobId\)/);
+    assert.match(memberQueue, /jobKey\(databaseTarget, jobId\)/);
+    assert.match(consentQueue, /jobKey\(databaseTarget, jobId\)/);
     assert.match(gisRoute, /databaseTarget: req\.user!\.databaseTarget/);
     assert.match(memberRoute, /databaseTarget: req\.user!\.databaseTarget/);
+    assert.match(consentRoute, /databaseTarget: req\.user!\.databaseTarget/);
+    assert.match(consentRoute, /actorUserId: req\.user!\.actorUserId!/);
+    assert.match(consentRoute, /databaseTargetAuthMiddleware as authMiddleware/);
+    assert.doesNotMatch(consentAdmin, /\bsupabaseService\b/);
+    assert.match(consentAdmin, /getSupabaseService\(req\.user\.databaseTarget\)/);
+    assert.match(consentQueue, /assertAuthorizedAtExecution\(request\)/);
+    assert.match(consentQueue, /\.eq\('status', 'PROCESSING'\)/);
+    assert.match(consentQueue, /'memberIds' in request/);
+});
+
+test('consent만 target-aware allowlist에 추가하고 외부 운영 부작용 route는 기본 인증 차단을 유지한다', async () => {
+    const consentRoute = await readFile('src/routes/consent.ts', 'utf8');
+    const alimtalkRoute = await readFile('src/routes/alimtalk.ts', 'utf8');
+    const smsRoute = await readFile('src/routes/sms.ts', 'utf8');
+
+    assert.match(consentRoute, /databaseTargetAuthMiddleware as authMiddleware/);
+    assert.match(alimtalkRoute, /import \{ authMiddleware \} from '\.\.\/middleware'/);
+    assert.match(smsRoute, /import \{ authMiddleware \} from '\.\.\/middleware'/);
+    assert.doesNotMatch(alimtalkRoute, /databaseTargetAuthMiddleware/);
+    assert.doesNotMatch(smsRoute, /databaseTargetAuthMiddleware/);
 });
 
 test('배포 workflow는 GITHUB_TOKEN으로 GHCR digest를 배포하고 dev secrets를 안전하게 전달한다', async () => {

@@ -74,7 +74,7 @@ export const authMiddleware = (
     next: NextFunction
 ): void => authenticateRequest(req, res, next, false);
 
-/** DB target 전파가 완료된 GIS/조합원 경로에서만 사용하는 인증. */
+/** DB target 전파가 완료된 GIS/조합원/동의 경로에서만 사용하는 인증. */
 export const databaseTargetAuthMiddleware = (
     req: Request,
     res: Response,
