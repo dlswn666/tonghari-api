@@ -319,11 +319,13 @@ CLI timestamp migration `sync_job_operation_foundation`을 생성한다.
 - input PNU update/delete 차단
 - operation epoch 단조 증가
 - INSERT/operation fault injection 후 queue/jobs map 잔존 0
-- baseline→W1 clean replay
+- `tonghari_dev`의 감사된 baseline 위에 W1 incremental apply/replay
+- 빈 DB baseline→W1 clean replay는 audited baseline이 active migration chain으로 승격되는 O0에서 최종 검증한다. 현재 `supabase/migrations`만으로는 운영 baseline이 재현되지 않으므로 O0 전에는 이 항목을 PASS로 기록하지 않는다.
 
 #### Exit gate
 
 - [ ] W1 migration과 A1a가 개발 DB·dev API에서 PASS
+- [ ] O0 전 dev-only 검증 기록은 incremental apply PASS와 clean replay 미검증을 구분하고, baseline 승격 뒤 빈 DB clean replay를 재실행
 - [ ] operation 없는 building/queue write 0건
 - [ ] manifest hash가 호출자 값이 아니라 DB 계산값과 일치
 - [ ] Web dev gate의 동일 후보 SHA 기록
