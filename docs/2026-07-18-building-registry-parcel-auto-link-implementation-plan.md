@@ -295,21 +295,25 @@ W0/R0의 개발 선행 증거가 PASS하면 전용 작업 브랜치와 `tonghari
 CLI timestamp migration `sync_job_operation_foundation`을 생성한다.
 
 - `sync_jobs` composite identity와 archive/preflight
+- archive 완료 `sync_jobs` 전체 행 UPDATE/DELETE 차단과 최초 archive RPC-only 전이
 - `building_write_operations`
 - append-only `building_write_operation_input_pnus`
 - `building_write_operation_commands`
 - DB 발급 `operation_epoch`
 - canonical request manifest와 DB 계산 hash
 - immutable explicit input PNU evidence
+- 서로 다른 explicit input token이 같은 PNU로 해소되어도 `(operation_id, input_token_hash, pnu)`로 각 provenance 보존
 - command key/hash, retry lock set, terminal result replay
 
 생성하는 public table/view/sequence/function은 같은 transaction에서 RLS, PUBLIC/anon/auth revoke, 최소 service-role grant를 적용한다.
 
 #### A1a API
 
-- GIS·가격·member·consent queue가 `sync_jobs`와 필요한 operation 저장 성공 후에만 `queue.add`/jobs map에 등록된다.
+- 모든 queue producer는 `sync_jobs` 저장 성공 뒤에만 admission하고, building-family operation이 필요한 `GIS_SYNC`·`APART_HOUSING_PRICE_SYNC`·`INDIVIDUAL_HOUSING_PRICE_SYNC` 세 producer는 root operation까지 저장된 뒤에만 `queue.add`/jobs map에 등록된다. 토지가격·member invite/PRE_REGISTER·consent는 허용되지 않은 operation을 만들지 않는다.
+- `/sync-official-prices`는 세 producer의 durable prepare를 모두 끝낸 뒤 한 번에 memory queue admission을 commit한다. 하나라도 실패하면 세 queue 모두 0건이며 이미 준비된 durable job은 `FAILED`로 종결한다.
 - Phase A는 입력 주소에서 정규화된 explicit PNU manifest를 저장한다.
-- operation/command 저장 실패 시 503으로 종료하고 메모리 job을 남기지 않는다.
+- admission 전 `sync_jobs`/root operation 저장 실패는 HTTP 503으로 종료하고 메모리 job을 남기지 않는다. PNU 또는 source payload가 worker에서 생긴 뒤의 input/command 실패는 해당 durable job을 `FAILED`로 종결하고 그 PNU의 building mutation을 0건으로 유지한다.
+- W1이 개발 DB에만 적용된 공용 API 과도기에는 배포 설정의 명시적 target capability allowlist로 `development`에서만 operation을 필수화한다. RPC 존재 여부를 자동 감지해 legacy로 fallback하지 않는다. 운영 W1 적용 전에는 `production`을 allowlist에 추가하지 않는다.
 
 #### 검증
 
@@ -317,8 +321,13 @@ CLI timestamp migration `sync_job_operation_foundation`을 생성한다.
 - 같은 operation key/hash replay는 기존 결과 반환
 - 같은 key의 다른 hash는 `*_REPLAY_MISMATCH`
 - input PNU update/delete 차단
+- 서로 다른 두 input token이 같은 PNU로 해소된 경우 두 evidence 행이 보존되고, 동일 token/PNU/evidence replay만 재사용
+- retry payload는 canonical lock 배열 두 개와 8KB 이하 diagnostics object만 허용하고, response-loss replay identity에서는 diagnostics를 제외
+- archive/권한 회수 뒤에는 terminal exact replay만 허용하고 nonterminal replay와 새 전이는 현재 actor/job 권한을 재검증
 - operation epoch 단조 증가
 - INSERT/operation fault injection 후 queue/jobs map 잔존 0
+- `/sync-official-prices` 세 prepare 중 하나의 fault injection에서 세 queue 모두 잔존 0
+- W1 capability가 없는 target은 operation-required path 진입 전 명시적으로 차단되고 자동 legacy fallback 0
 - `tonghari_dev`의 감사된 baseline 위에 W1 incremental apply/replay
 - 빈 DB baseline→W1 clean replay는 audited baseline이 active migration chain으로 승격되는 O0에서 최종 검증한다. 현재 `supabase/migrations`만으로는 운영 baseline이 재현되지 않으므로 O0 전에는 이 항목을 PASS로 기록하지 않는다.
 
@@ -326,7 +335,7 @@ CLI timestamp migration `sync_job_operation_foundation`을 생성한다.
 
 - [ ] W1 migration과 A1a가 개발 DB·dev API에서 PASS
 - [ ] O0 전 dev-only 검증 기록은 incremental apply PASS와 clean replay 미검증을 구분하고, baseline 승격 뒤 빈 DB clean replay를 재실행
-- [ ] operation 없는 building/queue write 0건
+- [ ] operation-required queue producer에서 operation 없는 building/queue write 0건. `/gis/add-address`를 포함한 전역 direct writer 0건은 W3/W4 canonical cutover 전까지 PASS로 기록하지 않음
 - [ ] manifest hash가 호출자 값이 아니라 DB 계산값과 일치
 - [ ] Web dev gate의 동일 후보 SHA 기록
 - [ ] O0 미완료 상태에서는 후보가 `dev`와 `tonghari_dev` 밖으로 승격되지 않았음을 확인
