@@ -1,8 +1,8 @@
 import { Response, Router } from 'express';
 import { gisQueueService } from '../services/gis.queue.service';
 import { gisService } from '../services/gis.service';
-import { supabaseService } from '../services/supabase.service';
-import { authMiddleware } from '../middleware/auth';
+import { getSupabaseService } from '../services/supabase.service';
+import { databaseTargetAuthMiddleware as authMiddleware } from '../middleware/auth';
 import { gisSystemAdminMiddleware } from '../middleware/gis-system-admin';
 import { gisAddressReadRateLimitMiddleware } from '../middleware/gis-address-rate-limit';
 import { toSyncJobRouteFailure } from '../services/sync-job-admission';
@@ -31,6 +31,7 @@ router.post('/sync', authMiddleware, gisSystemAdminMiddleware, async (req, res) 
             unionId,
             addresses,
             actorUserId: req.user!.actorUserId!,
+            databaseTarget: req.user!.databaseTarget,
         });
         res.json(jobInfo);
     } catch (error) {
@@ -60,6 +61,7 @@ router.post('/sync-apartment-prices', authMiddleware, gisSystemAdminMiddleware, 
         const result = await gisQueueService.addApartmentPriceSyncJob({
             unionId,
             actorUserId: req.user!.actorUserId!,
+            databaseTarget: req.user!.databaseTarget,
         });
         return res.json({
             jobId: result.jobId,
@@ -92,6 +94,7 @@ router.post('/sync-individual-housing-prices', authMiddleware, gisSystemAdminMid
         const result = await gisQueueService.addIndividualHousingPriceSyncJob({
             unionId,
             actorUserId: req.user!.actorUserId!,
+            databaseTarget: req.user!.databaseTarget,
         });
         return res.json({
             jobId: result.jobId,
@@ -124,6 +127,7 @@ router.post('/sync-land-prices', authMiddleware, gisSystemAdminMiddleware, async
         const result = await gisQueueService.addLandPriceSyncJob({
             unionId,
             actorUserId: req.user!.actorUserId!,
+            databaseTarget: req.user!.databaseTarget,
         });
         return res.json({
             jobId: result.jobId,
@@ -153,9 +157,21 @@ router.post('/sync-official-prices', authMiddleware, gisSystemAdminMiddleware, a
 
     try {
         const [landResult, apartmentResult, individualHousingResult] = await Promise.all([
-            gisQueueService.addLandPriceSyncJob({ unionId, actorUserId: req.user!.actorUserId! }),
-            gisQueueService.addApartmentPriceSyncJob({ unionId, actorUserId: req.user!.actorUserId! }),
-            gisQueueService.addIndividualHousingPriceSyncJob({ unionId, actorUserId: req.user!.actorUserId! }),
+            gisQueueService.addLandPriceSyncJob({
+                unionId,
+                actorUserId: req.user!.actorUserId!,
+                databaseTarget: req.user!.databaseTarget,
+            }),
+            gisQueueService.addApartmentPriceSyncJob({
+                unionId,
+                actorUserId: req.user!.actorUserId!,
+                databaseTarget: req.user!.databaseTarget,
+            }),
+            gisQueueService.addIndividualHousingPriceSyncJob({
+                unionId,
+                actorUserId: req.user!.actorUserId!,
+                databaseTarget: req.user!.databaseTarget,
+            }),
         ]);
 
         return res.json({
@@ -178,13 +194,13 @@ router.post('/sync-official-prices', authMiddleware, gisSystemAdminMiddleware, a
  */
 router.get('/status/:jobId', authMiddleware, gisSystemAdminMiddleware, async (req, res) => {
     const { jobId } = req.params;
-    const jobStatus = gisQueueService.getJobStatus(jobId);
+    const jobStatus = gisQueueService.getJobStatus(jobId, req.user!.databaseTarget);
 
     if (jobStatus) {
         return res.json(jobStatus);
     }
 
-    const { data: persistedJob, error } = await supabaseService
+    const { data: persistedJob, error } = await getSupabaseService(req.user!.databaseTarget)
         .getClient()
         .from('sync_jobs')
         .select('id, union_id, status, progress, preview_data, created_at, updated_at, error_log')
@@ -362,6 +378,7 @@ router.post('/add-address', authMiddleware, gisSystemAdminMiddleware, async (req
     }
 
     try {
+        const database = getSupabaseService(req.user!.databaseTarget);
         logger.info('Manual address add request', {
             actorUserId: req.user!.actorUserId,
             unionId,
@@ -400,7 +417,7 @@ router.post('/add-address', authMiddleware, gisSystemAdminMiddleware, async (req
         }
 
         // 4. land_lots 테이블에 저장 (추정된 소유주 수 사용)
-        const landLotSaved = await supabaseService.upsertLandLot({
+        const landLotSaved = await database.upsertLandLot({
             pnu: landInfo.pnu,
             address: landInfo.address,
             union_id: unionId,
@@ -421,7 +438,7 @@ router.post('/add-address', authMiddleware, gisSystemAdminMiddleware, async (req
         // 5. 건물 정보 저장
         if (buildingInfo && buildingInfo.buildingType !== 'NONE') {
             try {
-                const buildingSaved = await supabaseService.saveBuildingWithUnits(pnu, buildingInfo);
+                const buildingSaved = await database.saveBuildingWithUnits(pnu, buildingInfo);
                 if (!buildingSaved) {
                     logger.warn(`Failed to save building info for PNU: ${pnu}, continuing...`);
                 }
@@ -431,7 +448,7 @@ router.post('/add-address', authMiddleware, gisSystemAdminMiddleware, async (req
         }
 
         // 6. union_land_lots 테이블에 관계 저장
-        const unionLandLotSaved = await supabaseService.createUnionLandLot(unionId, pnu, address);
+        const unionLandLotSaved = await database.createUnionLandLot(unionId, pnu, address);
 
         if (!unionLandLotSaved) {
             logger.error(`Failed to save union_land_lot for PNU: ${pnu}`);
@@ -499,6 +516,7 @@ router.post('/manual-add', authMiddleware, gisSystemAdminMiddleware, async (req,
     }
 
     try {
+        const database = getSupabaseService(req.user!.databaseTarget);
         logger.info('Manual input request', {
             actorUserId: req.user!.actorUserId,
             unionId,
@@ -537,7 +555,7 @@ router.post('/manual-add', authMiddleware, gisSystemAdminMiddleware, async (req,
         }
 
         // 1. land_lots 테이블에 저장 (수동 입력 데이터)
-        const landLotSaved = await supabaseService.upsertLandLot({
+        const landLotSaved = await database.upsertLandLot({
             pnu: pnu,
             address: address.trim(),
             union_id: unionId,
@@ -556,7 +574,7 @@ router.post('/manual-add', authMiddleware, gisSystemAdminMiddleware, async (req,
         }
 
         // 2. union_land_lots 테이블에 관계 저장
-        const unionLandLotSaved = await supabaseService.createUnionLandLot(unionId, pnu, address);
+        const unionLandLotSaved = await database.createUnionLandLot(unionId, pnu, address);
 
         if (!unionLandLotSaved) {
             logger.error(`Failed to save union_land_lot for PNU: ${pnu}`);

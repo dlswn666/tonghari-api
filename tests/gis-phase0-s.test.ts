@@ -11,11 +11,26 @@ import { FixedWindowRateLimiter } from '../src/security/fixed-window-rate-limite
 test('GIS 토큰 scope는 system 또는 요청 union과 정확히 일치해야 한다', () => {
     assert.equal(validateGisAuthenticatedScope(undefined, 'union-a')?.code, 'UNAUTHORIZED');
     assert.equal(
-        validateGisAuthenticatedScope({ unionId: 'union-a', userId: 'auth-1' }, 'union-b')?.code,
+        validateGisAuthenticatedScope({
+            unionId: 'union-a',
+            userId: 'auth-1',
+            databaseTarget: 'production',
+            legacyProductionToken: true,
+        }, 'union-b')?.code,
         'UNION_SCOPE_MISMATCH'
     );
-    assert.equal(validateGisAuthenticatedScope({ unionId: 'union-a', userId: 'auth-1' }, 'union-a'), null);
-    assert.equal(validateGisAuthenticatedScope({ unionId: 'system', userId: 'auth-1' }, 'union-b'), null);
+    assert.equal(validateGisAuthenticatedScope({
+        unionId: 'union-a',
+        userId: 'auth-1',
+        databaseTarget: 'production',
+        legacyProductionToken: true,
+    }, 'union-a'), null);
+    assert.equal(validateGisAuthenticatedScope({
+        unionId: 'system',
+        userId: 'auth-1',
+        databaseTarget: 'production',
+        legacyProductionToken: true,
+    }, 'union-b'), null);
 });
 
 test('sync_jobs는 반환 id와 union_id가 일치할 때만 admission된다', async () => {

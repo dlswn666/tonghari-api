@@ -80,6 +80,8 @@ function memberQueueUser(
         operation,
         issuer: 'tonghari-web',
         audience: 'tonghari-api',
+        databaseTarget: 'production' as const,
+        legacyProductionToken: true,
     };
 }
 

@@ -1,6 +1,6 @@
 import PQueue from 'p-queue';
 import { v4 as uuidv4 } from 'uuid';
-import { supabaseService } from './supabase.service';
+import { getSupabaseService, SupabaseService } from './supabase.service';
 import { gisService } from './gis.service';
 import {
     MemberJobInfo,
@@ -19,6 +19,7 @@ import {
     MemberQueueExecutionOperation,
     validateMemberQueueExecutionActor,
 } from '../security/member-queue-execution-policy';
+import { DatabaseTarget } from '../types/database.types';
 
 const logger = createLogger('MEMBER-QUEUE');
 
@@ -79,9 +80,10 @@ class MemberQueueService {
     private async assertActorAuthorizedAtExecution(
         actorUserId: string,
         unionId: string,
-        operation: MemberQueueExecutionOperation
+        operation: MemberQueueExecutionOperation,
+        databaseTarget: DatabaseTarget
     ): Promise<void> {
-        const { data: actor, error } = await supabaseService
+        const { data: actor, error } = await getSupabaseService(databaseTarget)
             .getClient()
             .from('users')
             .select('id, role, is_blocked, union_id')
@@ -102,6 +104,7 @@ class MemberQueueService {
      */
     async addMemberInviteSyncJob(request: MemberInviteSyncRequest): Promise<MemberJobInfo> {
         const jobId = uuidv4();
+        const database = getSupabaseService(request.databaseTarget);
         const jobInfo: MemberJobInfo = {
             jobId,
             jobType: 'MEMBER_INVITE_SYNC',
@@ -114,7 +117,7 @@ class MemberQueueService {
 
         // 영속 원장 생성에 실패하면 메모리 map과 queue에 넣지 않는다.
         await persistSyncJobOrThrow(jobId, request.unionId, () =>
-            supabaseService
+            database
                 .getClient()
                 .from('sync_jobs')
                 .insert({
@@ -142,7 +145,7 @@ class MemberQueueService {
             .catch((err) => {
                 logger.error(`Member invite sync job ${jobId} fatal error`, err);
                 this.updateJobStatus(jobId, { status: 'failed', error: err.message });
-                supabaseService.updateSyncJobStatus(jobId, 'FAILED', 0, err.message);
+                database.updateSyncJobStatus(jobId, 'FAILED', 0, err.message);
             });
 
         return jobInfo;
@@ -153,6 +156,7 @@ class MemberQueueService {
      */
     async addPreRegisterJob(request: PreRegisterRequest): Promise<MemberJobInfo> {
         const jobId = uuidv4();
+        const database = getSupabaseService(request.databaseTarget);
         const jobInfo: MemberJobInfo = {
             jobId,
             jobType: 'PRE_REGISTER',
@@ -165,7 +169,7 @@ class MemberQueueService {
 
         // PRE_REGISTER는 DB enum의 MEMBER_UPLOAD와 preview subtype으로 기록한다.
         await persistSyncJobOrThrow(jobId, request.unionId, () =>
-            supabaseService
+            database
                 .getClient()
                 .from('sync_jobs')
                 .insert({
@@ -193,7 +197,7 @@ class MemberQueueService {
             .catch((err) => {
                 logger.error(`Pre-register job ${jobId} fatal error`, err);
                 this.updateJobStatus(jobId, { status: 'failed', error: err.message });
-                supabaseService.updateSyncJobStatus(jobId, 'FAILED', 0, err.message);
+                database.updateSyncJobStatus(jobId, 'FAILED', 0, err.message);
             });
 
         return jobInfo;
@@ -219,14 +223,16 @@ class MemberQueueService {
         await this.assertActorAuthorizedAtExecution(
             request.createdBy,
             request.unionId,
-            'MEMBER_INVITE_SYNC'
+            'MEMBER_INVITE_SYNC',
+            request.databaseTarget
         );
 
         logger.info(`[Member Sync ${jobId}] Processing started`);
         this.updateJobStatus(jobId, { status: 'processing', startedAt: new Date() });
 
         try {
-            const client = supabaseService.getClient();
+            const database = getSupabaseService(request.databaseTarget);
+            const client = database.getClient();
 
             // RPC 함수 호출 - 동기화 수행
             const { data: syncResult, error: syncError } = await client.rpc('sync_member_invites', {
@@ -276,7 +282,7 @@ class MemberQueueService {
                 totalCount: request.members.length,
             };
 
-            await supabaseService.updateSyncJobStatus(jobId, 'COMPLETED', 100, undefined, previewData);
+            await database.updateSyncJobStatus(jobId, 'COMPLETED', 100, undefined, previewData);
 
             logger.info(
                 `[Member Sync ${jobId}] Completed - Inserted: ${result.inserted}, Deleted pending: ${result.deleted_pending}, Deleted used: ${result.deleted_used}`
@@ -285,7 +291,8 @@ class MemberQueueService {
             const errorMessage = error.message || 'Unknown error';
             logger.error(`[Member Sync ${jobId}] Failed`, error);
             this.updateJobStatus(jobId, { status: 'failed', error: errorMessage, completedAt: new Date() });
-            await supabaseService.updateSyncJobStatus(jobId, 'FAILED', 0, errorMessage);
+            await getSupabaseService(request.databaseTarget)
+                .updateSyncJobStatus(jobId, 'FAILED', 0, errorMessage);
         }
     }
 
@@ -301,13 +308,15 @@ class MemberQueueService {
         await this.assertActorAuthorizedAtExecution(
             request.actorUserId,
             request.unionId,
-            'PRE_REGISTER'
+            'PRE_REGISTER',
+            request.databaseTarget
         );
 
         logger.info(`[Pre-Register ${jobId}] Processing started (${request.members.length} members)`);
         this.updateJobStatus(jobId, { status: 'processing', startedAt: new Date() });
 
-        const client = supabaseService.getClient();
+        const database = getSupabaseService(request.databaseTarget);
+        const client = database.getClient();
         const errors: string[] = [];
         let savedCount = 0;
         let updatedCount = 0; // 중복 시 업데이트된 건수
@@ -754,7 +763,7 @@ class MemberQueueService {
                     const progress = Math.round((processedRowCount / totalCount) * 100);
                     this.updateJobStatus(jobId, { processedCount: processedRowCount });
                     if (progress % 5 === 0 || processedRowCount === totalCount) {
-                        await supabaseService.updateSyncJobStatus(jobId, 'PROCESSING', progress, undefined, {
+                        await database.updateSyncJobStatus(jobId, 'PROCESSING', progress, undefined, {
                             job_type: 'PRE_REGISTER',
                             memberOperation: 'PRE_REGISTER',
                             phase: 'SAVING',
@@ -789,7 +798,7 @@ class MemberQueueService {
                         const progress = Math.round((processedRowCount / totalCount) * 100);
                         this.updateJobStatus(jobId, { processedCount: processedRowCount });
                         if (progress % 5 === 0 || processedRowCount === totalCount) {
-                            await supabaseService.updateSyncJobStatus(jobId, 'PROCESSING', progress, undefined, {
+                            await database.updateSyncJobStatus(jobId, 'PROCESSING', progress, undefined, {
                                 job_type: 'PRE_REGISTER',
                                 memberOperation: 'PRE_REGISTER',
                                 phase: 'SAVING',
@@ -951,7 +960,7 @@ class MemberQueueService {
                     propertyLinkFailedCount,
                     totalCount,
                 };
-                await supabaseService.updateSyncJobStatus(jobId, 'PROCESSING', progress, undefined, previewData);
+                await database.updateSyncJobStatus(jobId, 'PROCESSING', progress, undefined, previewData);
             }
         }
 
@@ -984,7 +993,7 @@ class MemberQueueService {
 
         const errorLog = result.errors.length > 0 ? JSON.stringify({ errors: result.errors }) : undefined;
 
-        await supabaseService.updateSyncJobStatus(
+        await database.updateSyncJobStatus(
             jobId,
             completion.persistedStatus,
             100,
@@ -1043,7 +1052,7 @@ class MemberQueueService {
      * 예: 836-77(폐지) → land_lots에 "836-75, 836-77, 836-78, 836-79" → 836-75의 PNU 반환
      */
     private async resolveMergedPnu(
-        client: ReturnType<typeof supabaseService.getClient>,
+        client: ReturnType<SupabaseService['getClient']>,
         unionId: string,
         pnu: string,
         propertyAddress: string
@@ -1094,7 +1103,7 @@ class MemberQueueService {
     }
 
     private async findOrCreatePropertyUnit(
-        client: ReturnType<typeof supabaseService.getClient>,
+        client: ReturnType<SupabaseService['getClient']>,
         unionId: string,
         input: {
             pnu: string | null;

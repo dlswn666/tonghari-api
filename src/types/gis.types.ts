@@ -1,7 +1,10 @@
+import { DatabaseTarget } from './database.types';
+
 export interface GisSyncRequest {
     unionId: string;
     addresses: string[];
     actorUserId: string;
+    databaseTarget: DatabaseTarget;
 }
 
 export interface GisJobInfo {
@@ -23,6 +26,7 @@ export interface GisJobInfo {
 export interface ApartmentPriceSyncRequest {
     unionId: string;
     actorUserId: string;
+    databaseTarget: DatabaseTarget;
 }
 
 /**
@@ -42,6 +46,7 @@ export interface ApartmentPriceSyncTarget {
 export interface IndividualHousingPriceSyncRequest {
     unionId: string;
     actorUserId: string;
+    databaseTarget: DatabaseTarget;
 }
 
 /**
@@ -61,6 +66,7 @@ export interface IndividualHousingPriceSyncTarget {
 export interface LandPriceSyncRequest {
     unionId: string;
     actorUserId: string;
+    databaseTarget: DatabaseTarget;
 }
 
 /**

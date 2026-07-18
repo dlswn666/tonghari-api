@@ -7,7 +7,8 @@ import {
     gisService,
     IndividualHousingOfficialPrice,
 } from './gis.service';
-import { supabaseService } from './supabase.service';
+import { getSupabaseService } from './supabase.service';
+import { DatabaseTarget } from '../types/database.types';
 import {
     GisSyncRequest,
     GisJobInfo,
@@ -273,6 +274,7 @@ class GisQueueService {
 
     async addSyncJob(request: GisSyncRequest): Promise<GisJobInfo> {
         const jobId = uuidv4();
+        const database = getSupabaseService(request.databaseTarget);
         const jobInfo: GisJobInfo = {
             jobId,
             unionId: request.unionId,
@@ -283,7 +285,7 @@ class GisQueueService {
         };
 
         await persistSyncJobOrThrow(jobId, request.unionId, () =>
-            supabaseService.getClient().from('sync_jobs').insert({
+            database.getClient().from('sync_jobs').insert({
                 id: jobId,
                 union_id: request.unionId,
                 job_type: 'GIS_MAP',
@@ -296,7 +298,7 @@ class GisQueueService {
                 },
             }).select('id, union_id').single()
         );
-        this.jobs.set(jobId, jobInfo);
+        this.jobs.set(this.jobKey(request.databaseTarget, jobId), jobInfo);
         logger.info(`GIS job added: ${jobId} (parcels: ${request.addresses.length})`);
 
         this.queue
@@ -305,20 +307,21 @@ class GisQueueService {
             })
             .catch((err) => {
                 logger.error(`GIS job ${jobId} fatal error`, err);
-                this.updateJobStatus(jobId, { status: 'failed', error: err.message });
+                this.updateJobStatus(jobId, request.databaseTarget, { status: 'failed', error: err.message });
                 // 실패 상태 DB 업데이트
-                supabaseService.updateSyncJobStatus(jobId, 'FAILED', 0, err.message);
+                database.updateSyncJobStatus(jobId, 'FAILED', 0, err.message);
             });
 
         return jobInfo;
     }
 
     private async processSyncJob(jobId: string, request: GisSyncRequest) {
-        const job = this.jobs.get(jobId);
+        const job = this.jobs.get(this.jobKey(request.databaseTarget, jobId));
         if (!job) return;
+        const database = getSupabaseService(request.databaseTarget);
 
         logger.info(`[GIS ${jobId}] Collection process started`);
-        this.updateJobStatus(jobId, { status: 'processing', startedAt: new Date() });
+        this.updateJobStatus(jobId, request.databaseTarget, { status: 'processing', startedAt: new Date() });
 
         const failedAddresses: FailedAddress[] = [];
         const successfulPnus: string[] = [];
@@ -593,7 +596,7 @@ class GisQueueService {
                 }
 
                 // Step 3: land_lots 테이블에 필지 정보 저장 (경계 데이터 + 면적 + 소유자 수 + 공시지가 + 지목 + 도로명주소 포함)
-                const landLotSaved = await supabaseService.upsertLandLot({
+                const landLotSaved = await database.upsertLandLot({
                     pnu,
                     address,
                     union_id: request.unionId, // 조합 ID 추가
@@ -618,7 +621,7 @@ class GisQueueService {
                 // Step 3.5: 건물 정보 저장 (buildings, building_units)
                 if (buildingInfo && buildingInfo.buildingType !== 'NONE') {
                     try {
-                        const buildingSaved = await supabaseService.saveBuildingWithUnits(pnu, buildingInfo);
+                        const buildingSaved = await database.saveBuildingWithUnits(pnu, buildingInfo);
                         if (buildingSaved) {
                             logger.debug(
                                 `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Building info saved: ${pnu} (type: ${buildingInfo.buildingType}, units: ${buildingInfo.units.length})`
@@ -638,7 +641,7 @@ class GisQueueService {
                 }
 
                 // Step 4: union_land_lots 테이블에 조합-필지 관계 저장
-                const unionLandLotSaved = await supabaseService.createUnionLandLot(request.unionId, pnu, address);
+                const unionLandLotSaved = await database.createUnionLandLot(request.unionId, pnu, address);
 
                 if (!unionLandLotSaved) {
                     logger.warn(
@@ -679,7 +682,7 @@ class GisQueueService {
             }
 
             // Supabase 상태 업데이트
-            await supabaseService.updateSyncJobStatus(jobId, 'PROCESSING', progress);
+            await database.updateSyncJobStatus(jobId, 'PROCESSING', progress);
         }
 
         // 완료 처리
@@ -705,12 +708,12 @@ class GisQueueService {
             `[GIS ${jobId}] Collection completed - Success: ${successCount}, Failed: ${failedAddresses.length}, Total: ${job.totalCount}`
         );
 
-        this.updateJobStatus(jobId, {
+        this.updateJobStatus(jobId, request.databaseTarget, {
             status: finalStatus === 'COMPLETED' ? 'completed' : 'failed',
             completedAt: new Date(),
         });
 
-        await supabaseService.updateSyncJobStatus(
+        await database.updateSyncJobStatus(
             jobId,
             finalStatus as 'PROCESSING' | 'COMPLETED' | 'FAILED',
             100,
@@ -719,16 +722,25 @@ class GisQueueService {
         );
     }
 
-    private updateJobStatus(jobId: string, update: Partial<GisJobInfo>) {
-        const job = this.jobs.get(jobId);
+    private jobKey(databaseTarget: DatabaseTarget, jobId: string): string {
+        return `${databaseTarget}:${jobId}`;
+    }
+
+    private updateJobStatus(
+        jobId: string,
+        databaseTarget: DatabaseTarget,
+        update: Partial<GisJobInfo>
+    ) {
+        const key = this.jobKey(databaseTarget, jobId);
+        const job = this.jobs.get(key);
         if (job) {
             Object.assign(job, update);
-            this.jobs.set(jobId, job);
+            this.jobs.set(key, job);
         }
     }
 
-    getJobStatus(jobId: string) {
-        return this.jobs.get(jobId);
+    getJobStatus(jobId: string, databaseTarget: DatabaseTarget) {
+        return this.jobs.get(this.jobKey(databaseTarget, jobId));
     }
 
     /**
@@ -740,9 +752,10 @@ class GisQueueService {
         request: ApartmentPriceSyncRequest
     ): Promise<{ jobId: string; totalPnu: number }> {
         const jobId = uuidv4();
+        const database = getSupabaseService(request.databaseTarget);
 
         // 1. 공동주택 대상 조회
-        const targets = await supabaseService.listApartmentBuildingTargets(request.unionId);
+        const targets = await database.listApartmentBuildingTargets(request.unionId);
         const totalPnu = targets.length;
 
         const jobInfo: GisJobInfo = {
@@ -754,7 +767,7 @@ class GisQueueService {
             createdAt: new Date(),
         };
         await persistSyncJobOrThrow(jobId, request.unionId, () =>
-            supabaseService.getClient().from('sync_jobs').insert({
+            database.getClient().from('sync_jobs').insert({
                 id: jobId,
                 union_id: request.unionId,
                 job_type: 'APARTMENT_PRICE_SYNC',
@@ -767,13 +780,13 @@ class GisQueueService {
                 },
             }).select('id, union_id').single()
         );
-        this.jobs.set(jobId, jobInfo);
+        this.jobs.set(this.jobKey(request.databaseTarget, jobId), jobInfo);
         logger.info(`Apartment price sync job added: ${jobId} (targets: ${totalPnu})`);
 
         // 3. 대상 없으면 바로 완료 처리
         if (totalPnu === 0) {
-            this.updateJobStatus(jobId, { status: 'completed', completedAt: new Date() });
-            await supabaseService.updateSyncJobStatus(jobId, 'COMPLETED', 100, undefined, {
+            this.updateJobStatus(jobId, request.databaseTarget, { status: 'completed', completedAt: new Date() });
+            await database.updateSyncJobStatus(jobId, 'COMPLETED', 100, undefined, {
                 successCount: 0,
                 failedCount: 0,
                 totalCount: 0,
@@ -785,12 +798,12 @@ class GisQueueService {
         // 4. 큐 등록
         this.queue
             .add(async () => {
-                await this.processApartmentPriceSync(jobId, targets);
+                await this.processApartmentPriceSync(jobId, targets, request.databaseTarget);
             })
             .catch((err) => {
                 logger.error(`Apartment price sync job ${jobId} fatal error`, err);
-                this.updateJobStatus(jobId, { status: 'failed', error: err.message });
-                supabaseService.updateSyncJobStatus(jobId, 'FAILED', 0, err.message);
+                this.updateJobStatus(jobId, request.databaseTarget, { status: 'failed', error: err.message });
+                database.updateSyncJobStatus(jobId, 'FAILED', 0, err.message);
             });
 
         return { jobId, totalPnu };
@@ -802,12 +815,17 @@ class GisQueueService {
      * (building_id, dong, ho) 매칭으로 building_units.official_price를 갱신한다.
      * 개별 세대 갱신 실패는 fire-and-forget (배치 전체를 막지 않음).
      */
-    private async processApartmentPriceSync(jobId: string, targets: ApartmentPriceSyncTarget[]): Promise<void> {
-        const job = this.jobs.get(jobId);
+    private async processApartmentPriceSync(
+        jobId: string,
+        targets: ApartmentPriceSyncTarget[],
+        databaseTarget: DatabaseTarget
+    ): Promise<void> {
+        const job = this.jobs.get(this.jobKey(databaseTarget, jobId));
         if (!job) return;
+        const database = getSupabaseService(databaseTarget);
 
         logger.info(`[APT-PRICE ${jobId}] Apartment price sync started (targets: ${targets.length})`);
-        this.updateJobStatus(jobId, { status: 'processing', startedAt: new Date() });
+        this.updateJobStatus(jobId, databaseTarget, { status: 'processing', startedAt: new Date() });
 
         let successPnuCount = 0;
         let updatedUnitCount = 0;
@@ -849,7 +867,7 @@ class GisQueueService {
                             );
                         }
 
-                        await supabaseService.upsertBuildingExternalRefs(
+                        await database.upsertBuildingExternalRefs(
                             this.buildApartmentPriceExternalRefs(resolution.matchedPnu, resolution.prices).map((ref) => ({
                                 buildingId: target.buildingId,
                                 ...ref,
@@ -862,7 +880,7 @@ class GisQueueService {
                             }))
                         );
 
-                        const syncResult = await supabaseService.upsertApartmentOfficialPriceUnits(
+                        const syncResult = await database.upsertApartmentOfficialPriceUnits(
                             target.buildingId,
                             resolution.matchedPnu,
                             resolution.prices
@@ -896,7 +914,7 @@ class GisQueueService {
                     `[APT-PRICE ${jobId}] Progress: ${progress}% (${job.processedCount}/${job.totalCount}, success buildings: ${successPnuCount}, fallback: ${fallbackSuccessCount}, upserted units: ${updatedUnitCount}, linked user properties: ${linkedUserPropertyCount})`
                 );
             }
-            await supabaseService.updateSyncJobStatus(jobId, 'PROCESSING', progress);
+            await database.updateSyncJobStatus(jobId, 'PROCESSING', progress);
         }
 
         // 완료 처리
@@ -928,12 +946,12 @@ class GisQueueService {
             `[APT-PRICE ${jobId}] Completed — success buildings: ${successPnuCount}, fallback: ${fallbackSuccessCount}, skipped duplicates: ${skippedDuplicateBuildingCount}, failed: ${failedEntries.length}, upserted units: ${updatedUnitCount}, linked user properties: ${linkedUserPropertyCount}, linked property units: ${linkedPropertyUnitCount}`
         );
 
-        this.updateJobStatus(jobId, {
+        this.updateJobStatus(jobId, databaseTarget, {
             status: finalStatus === 'COMPLETED' ? 'completed' : 'failed',
             completedAt: new Date(),
         });
 
-        await supabaseService.updateSyncJobStatus(
+        await database.updateSyncJobStatus(
             jobId,
             finalStatus as 'PROCESSING' | 'COMPLETED' | 'FAILED',
             100,
@@ -951,8 +969,9 @@ class GisQueueService {
         request: IndividualHousingPriceSyncRequest
     ): Promise<{ jobId: string; totalPnu: number }> {
         const jobId = uuidv4();
+        const database = getSupabaseService(request.databaseTarget);
 
-        const targets = await supabaseService.listIndividualHousingBuildingTargets(request.unionId);
+        const targets = await database.listIndividualHousingBuildingTargets(request.unionId);
         const totalPnu = targets.length;
 
         const jobInfo: GisJobInfo = {
@@ -964,7 +983,7 @@ class GisQueueService {
             createdAt: new Date(),
         };
         await persistSyncJobOrThrow(jobId, request.unionId, () =>
-            supabaseService.getClient().from('sync_jobs').insert({
+            database.getClient().from('sync_jobs').insert({
                 id: jobId,
                 union_id: request.unionId,
                 job_type: 'INDIVIDUAL_HOUSING_PRICE_SYNC',
@@ -977,12 +996,12 @@ class GisQueueService {
                 },
             }).select('id, union_id').single()
         );
-        this.jobs.set(jobId, jobInfo);
+        this.jobs.set(this.jobKey(request.databaseTarget, jobId), jobInfo);
         logger.info(`Individual housing price sync job added: ${jobId} (targets: ${totalPnu})`);
 
         if (totalPnu === 0) {
-            this.updateJobStatus(jobId, { status: 'completed', completedAt: new Date() });
-            await supabaseService.updateSyncJobStatus(jobId, 'COMPLETED', 100, undefined, {
+            this.updateJobStatus(jobId, request.databaseTarget, { status: 'completed', completedAt: new Date() });
+            await database.updateSyncJobStatus(jobId, 'COMPLETED', 100, undefined, {
                 successCount: 0,
                 failedCount: 0,
                 totalCount: 0,
@@ -993,12 +1012,12 @@ class GisQueueService {
 
         this.queue
             .add(async () => {
-                await this.processIndividualHousingPriceSync(jobId, targets);
+                await this.processIndividualHousingPriceSync(jobId, targets, request.databaseTarget);
             })
             .catch((err) => {
                 logger.error(`Individual housing price sync job ${jobId} fatal error`, err);
-                this.updateJobStatus(jobId, { status: 'failed', error: err.message });
-                supabaseService.updateSyncJobStatus(jobId, 'FAILED', 0, err.message);
+                this.updateJobStatus(jobId, request.databaseTarget, { status: 'failed', error: err.message });
+                database.updateSyncJobStatus(jobId, 'FAILED', 0, err.message);
             });
 
         return { jobId, totalPnu };
@@ -1012,13 +1031,15 @@ class GisQueueService {
      */
     private async processIndividualHousingPriceSync(
         jobId: string,
-        targets: IndividualHousingPriceSyncTarget[]
+        targets: IndividualHousingPriceSyncTarget[],
+        databaseTarget: DatabaseTarget
     ): Promise<void> {
-        const job = this.jobs.get(jobId);
+        const job = this.jobs.get(this.jobKey(databaseTarget, jobId));
         if (!job) return;
+        const database = getSupabaseService(databaseTarget);
 
         logger.info(`[INDVD-HOUSE-PRICE ${jobId}] Individual housing price sync started (targets: ${targets.length})`);
-        this.updateJobStatus(jobId, { status: 'processing', startedAt: new Date() });
+        this.updateJobStatus(jobId, databaseTarget, { status: 'processing', startedAt: new Date() });
 
         let successPnuCount = 0;
         let updatedUnitCount = 0;
@@ -1059,7 +1080,7 @@ class GisQueueService {
                         apartmentCandidateCount++;
                         diagnosticBuildingIds.add(target.buildingId);
 
-                        await supabaseService.upsertBuildingExternalRefs(
+                        await database.upsertBuildingExternalRefs(
                             this.buildApartmentPriceExternalRefs(
                                 resolution.matchedPnu,
                                 resolution.apartmentPrices
@@ -1095,7 +1116,7 @@ class GisQueueService {
                             );
                         }
 
-                        await supabaseService.upsertBuildingExternalRefs(
+                        await database.upsertBuildingExternalRefs(
                             this.buildIndividualHousingExternalRefs(target.pnu, price).map((ref) => ({
                                 buildingId: target.buildingId,
                                 ...ref,
@@ -1108,7 +1129,7 @@ class GisQueueService {
                         );
 
                         const { updatedCount } =
-                            await supabaseService.updateBuildingUnitsOfficialPriceByBuildingId(
+                            await database.updateBuildingUnitsOfficialPriceByBuildingId(
                                 target.buildingId,
                                 price,
                                 target.pnu
@@ -1154,7 +1175,7 @@ class GisQueueService {
                     `[INDVD-HOUSE-PRICE ${jobId}] Progress: ${progress}% (${job.processedCount}/${job.totalCount}, success buildings: ${successPnuCount}, fallback: ${fallbackSuccessCount}, apartment candidates: ${apartmentCandidateCount}, updated units: ${updatedUnitCount})`
                 );
             }
-            await supabaseService.updateSyncJobStatus(jobId, 'PROCESSING', progress);
+            await database.updateSyncJobStatus(jobId, 'PROCESSING', progress);
         }
 
         const finalStatus = successPnuCount === 0 && apartmentCandidateCount === 0 ? 'FAILED' : 'COMPLETED';
@@ -1185,12 +1206,12 @@ class GisQueueService {
             `[INDVD-HOUSE-PRICE ${jobId}] Completed — success buildings: ${successPnuCount}, fallback: ${fallbackSuccessCount}, apartment candidates: ${apartmentCandidateCount}, failed: ${failedEntries.length}, updated units: ${updatedUnitCount}`
         );
 
-        this.updateJobStatus(jobId, {
+        this.updateJobStatus(jobId, databaseTarget, {
             status: finalStatus === 'COMPLETED' ? 'completed' : 'failed',
             completedAt: new Date(),
         });
 
-        await supabaseService.updateSyncJobStatus(
+        await database.updateSyncJobStatus(
             jobId,
             finalStatus as 'PROCESSING' | 'COMPLETED' | 'FAILED',
             100,
@@ -1208,9 +1229,10 @@ class GisQueueService {
         request: LandPriceSyncRequest
     ): Promise<{ jobId: string; totalPnu: number }> {
         const jobId = uuidv4();
+        const database = getSupabaseService(request.databaseTarget);
 
         // 1. 토지 대상 조회 (전체 무조건 재조회)
-        const targets = await supabaseService.listLandPriceTargetsByUnion(request.unionId);
+        const targets = await database.listLandPriceTargetsByUnion(request.unionId);
         const totalPnu = targets.length;
 
         const jobInfo: GisJobInfo = {
@@ -1222,7 +1244,7 @@ class GisQueueService {
             createdAt: new Date(),
         };
         await persistSyncJobOrThrow(jobId, request.unionId, () =>
-            supabaseService.getClient().from('sync_jobs').insert({
+            database.getClient().from('sync_jobs').insert({
                 id: jobId,
                 union_id: request.unionId,
                 job_type: 'LAND_PRICE_SYNC',
@@ -1235,13 +1257,13 @@ class GisQueueService {
                 },
             }).select('id, union_id').single()
         );
-        this.jobs.set(jobId, jobInfo);
+        this.jobs.set(this.jobKey(request.databaseTarget, jobId), jobInfo);
         logger.info(`Land price sync job added: ${jobId} (targets: ${totalPnu})`);
 
         // 3. 대상 없으면 바로 완료 처리
         if (totalPnu === 0) {
-            this.updateJobStatus(jobId, { status: 'completed', completedAt: new Date() });
-            await supabaseService.updateSyncJobStatus(jobId, 'COMPLETED', 100, undefined, {
+            this.updateJobStatus(jobId, request.databaseTarget, { status: 'completed', completedAt: new Date() });
+            await database.updateSyncJobStatus(jobId, 'COMPLETED', 100, undefined, {
                 successCount: 0,
                 failedCount: 0,
                 totalCount: 0,
@@ -1253,12 +1275,12 @@ class GisQueueService {
         // 4. 큐 등록
         this.queue
             .add(async () => {
-                await this.processLandPriceSync(jobId, targets);
+                await this.processLandPriceSync(jobId, targets, request.databaseTarget);
             })
             .catch((err) => {
                 logger.error(`Land price sync job ${jobId} fatal error`, err);
-                this.updateJobStatus(jobId, { status: 'failed', error: err.message });
-                supabaseService.updateSyncJobStatus(jobId, 'FAILED', 0, err.message);
+                this.updateJobStatus(jobId, request.databaseTarget, { status: 'failed', error: err.message });
+                database.updateSyncJobStatus(jobId, 'FAILED', 0, err.message);
             });
 
         return { jobId, totalPnu };
@@ -1270,12 +1292,17 @@ class GisQueueService {
      * land_lots.official_price 를 갱신한다.
      * 개별 필지 갱신 실패는 fire-and-forget (배치 전체를 막지 않음).
      */
-    private async processLandPriceSync(jobId: string, targets: LandPriceSyncTarget[]): Promise<void> {
-        const job = this.jobs.get(jobId);
+    private async processLandPriceSync(
+        jobId: string,
+        targets: LandPriceSyncTarget[],
+        databaseTarget: DatabaseTarget
+    ): Promise<void> {
+        const job = this.jobs.get(this.jobKey(databaseTarget, jobId));
         if (!job) return;
+        const database = getSupabaseService(databaseTarget);
 
         logger.info(`[LAND-PRICE ${jobId}] Land price sync started (targets: ${targets.length})`);
-        this.updateJobStatus(jobId, { status: 'processing', startedAt: new Date() });
+        this.updateJobStatus(jobId, databaseTarget, { status: 'processing', startedAt: new Date() });
 
         let successCount = 0;
         const failedEntries: Array<{ pnu: string; reason: string }> = [];
@@ -1293,7 +1320,7 @@ class GisQueueService {
                     );
                     failedEntries.push({ pnu: target.pnu, reason: '공시지가 조회 결과 없음' });
                 } else {
-                    const updated = await supabaseService.updateLandLotPrice(job.unionId, target.pnu, price);
+                    const updated = await database.updateLandLotPrice(job.unionId, target.pnu, price);
                     if (updated) {
                         successCount++;
                         logger.debug(
@@ -1320,7 +1347,7 @@ class GisQueueService {
                     `[LAND-PRICE ${jobId}] Progress: ${progress}% (${job.processedCount}/${job.totalCount}, success: ${successCount})`
                 );
             }
-            await supabaseService.updateSyncJobStatus(jobId, 'PROCESSING', progress);
+            await database.updateSyncJobStatus(jobId, 'PROCESSING', progress);
         }
 
         // 완료 처리
@@ -1345,12 +1372,12 @@ class GisQueueService {
             `[LAND-PRICE ${jobId}] Completed — success: ${successCount}, failed: ${failedEntries.length}`
         );
 
-        this.updateJobStatus(jobId, {
+        this.updateJobStatus(jobId, databaseTarget, {
             status: finalStatus === 'COMPLETED' ? 'completed' : 'failed',
             completedAt: new Date(),
         });
 
-        await supabaseService.updateSyncJobStatus(
+        await database.updateSyncJobStatus(
             jobId,
             finalStatus as 'PROCESSING' | 'COMPLETED' | 'FAILED',
             100,

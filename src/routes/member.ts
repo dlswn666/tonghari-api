@@ -3,7 +3,7 @@ import { memberQueueService } from '../services/member.queue.service';
 import { MemberInviteSyncRequest, PreRegisterRequest } from '../types/member.types';
 import { createLogger } from '../utils/logger';
 import { toSyncJobRouteFailure } from '../services/sync-job-admission';
-import { authMiddleware } from '../middleware/auth';
+import { databaseTargetAuthMiddleware as authMiddleware } from '../middleware/auth';
 import {
     memberAdminMiddleware,
     memberSystemAdminMiddleware,
@@ -69,6 +69,7 @@ router.post('/invite-sync', authMiddleware, memberAdminMiddleware, async (req, r
             createdBy: req.user!.actorUserId!,
             expiresHours: normalizedExpiresHours,
             members,
+            databaseTarget: req.user!.databaseTarget,
         };
 
         const jobInfo = await memberQueueService.addMemberInviteSyncJob(request);
@@ -137,6 +138,7 @@ router.post('/pre-register', authMiddleware, memberSystemAdminMiddleware, async 
             unionId,
             actorUserId: req.user!.actorUserId!,
             members,
+            databaseTarget: req.user!.databaseTarget,
         };
 
         const jobInfo = await memberQueueService.addPreRegisterJob(request);

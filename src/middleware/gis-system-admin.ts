@@ -1,5 +1,5 @@
 import { NextFunction, Request, Response } from 'express';
-import { supabaseService } from '../services/supabase.service';
+import { getSupabaseService } from '../services/supabase.service';
 import { validateGisAuthenticatedScope } from '../security/gis-access-policy';
 import { createLogger } from '../utils/logger';
 
@@ -30,10 +30,21 @@ export async function gisSystemAdminMiddleware(
         res.status(claimFailure.status).json({ success: false, ...claimFailure });
         return;
     }
+    if (
+        req.user?.legacyProductionToken === false &&
+        req.user.purpose !== 'GIS_SYSTEM_ADMIN'
+    ) {
+        res.status(403).json({
+            success: false,
+            code: 'TOKEN_PURPOSE_INVALID',
+            error: 'GIS 변경 전용 토큰이 필요합니다.',
+        });
+        return;
+    }
     if (requestedUnionId) req.body.unionId = requestedUnionId;
 
     try {
-        const client = supabaseService.getClient();
+        const client = getSupabaseService(req.user!.databaseTarget).getClient();
         // JWT userId는 auth.users UUID다. users.id(VARCHAR)와 직접 비교하지 않는다.
         const { data: links, error: linkError } = await client
             .from('user_auth_links')

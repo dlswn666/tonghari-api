@@ -9,13 +9,25 @@ export function gisAddressReadRateLimitMiddleware(
     res: Response,
     next: NextFunction,
 ): void {
-    const userId = req.user?.userId;
-    if (!userId) {
+    const authenticatedUser = req.user;
+    const userId = authenticatedUser?.userId;
+    if (!authenticatedUser || !userId) {
         res.status(401).json({ success: false, code: 'UNAUTHORIZED', error: '인증이 필요합니다.' });
         return;
     }
+    if (
+        authenticatedUser.legacyProductionToken === false &&
+        authenticatedUser.scope !== 'GIS_ADDRESS_READ'
+    ) {
+        res.status(403).json({
+            success: false,
+            code: 'TOKEN_SCOPE_INVALID',
+            error: 'GIS 주소 조회 전용 토큰이 필요합니다.',
+        });
+        return;
+    }
 
-    const decision = addressReadLimiter.consume(userId);
+    const decision = addressReadLimiter.consume(`${authenticatedUser.databaseTarget}:${userId}`);
     res.setHeader('X-RateLimit-Remaining', String(decision.remaining));
 
     if (!decision.allowed) {

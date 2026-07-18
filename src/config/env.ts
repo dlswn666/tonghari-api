@@ -20,13 +20,74 @@ function getEnvNumber(key: string, defaultValue: number): number {
     return isNaN(parsed) ? defaultValue : parsed;
 }
 
+export interface DevelopmentApiEnvironmentInput {
+    productionJwtSecret: string;
+    productionSupabaseUrl: string;
+    productionSupabaseServiceRoleKey: string;
+    developmentJwtSecret: string;
+    developmentSupabaseUrl: string;
+    developmentSupabaseServiceRoleKey: string;
+}
+
+/**
+ * 개발 환경은 JWT/URL/service-role 세 값이 모두 있어야 활성화된다.
+ * 운영과 같은 서명키 또는 같은 Supabase URL은 환경 격리를 무력화하므로 시작을 거부한다.
+ */
+export function validateDevelopmentApiEnvironment(
+    input: DevelopmentApiEnvironmentInput
+): boolean {
+    const developmentValues = [
+        input.developmentJwtSecret,
+        input.developmentSupabaseUrl,
+        input.developmentSupabaseServiceRoleKey,
+    ];
+    const configuredCount = developmentValues.filter(Boolean).length;
+
+    if (configuredCount === 0) return false;
+    if (configuredCount !== developmentValues.length) {
+        throw new Error(
+            '개발 DB 연결은 DEV_API_JWT_SECRET, DEV_SUPABASE_URL, DEV_SUPABASE_SERVICE_ROLE_KEY를 모두 설정해야 합니다.'
+        );
+    }
+    if (input.developmentJwtSecret === input.productionJwtSecret) {
+        throw new Error('DEV_API_JWT_SECRET은 운영 JWT_SECRET과 달라야 합니다.');
+    }
+
+    const normalizeUrl = (value: string) => value.trim().replace(/\/+$/, '').toLowerCase();
+    if (normalizeUrl(input.developmentSupabaseUrl) === normalizeUrl(input.productionSupabaseUrl)) {
+        throw new Error('DEV_SUPABASE_URL은 운영 SUPABASE_URL과 달라야 합니다.');
+    }
+    // 키 원문은 로그나 오류에 포함하지 않고 프로세스 내부에서만 동일 여부를 판정한다.
+    if (input.developmentSupabaseServiceRoleKey === input.productionSupabaseServiceRoleKey) {
+        throw new Error('DEV_SUPABASE_SERVICE_ROLE_KEY는 운영 SUPABASE_SERVICE_ROLE_KEY와 달라야 합니다.');
+    }
+
+    return true;
+}
+
+const jwtSecret = getEnvVar('JWT_SECRET');
+const supabaseUrl = getEnvVar('SUPABASE_URL');
+const supabaseServiceRoleKey = getEnvVar('SUPABASE_SERVICE_ROLE_KEY');
+const devApiJwtSecret = getEnvVar('DEV_API_JWT_SECRET', false);
+const devSupabaseUrl = getEnvVar('DEV_SUPABASE_URL', false);
+const devSupabaseServiceRoleKey = getEnvVar('DEV_SUPABASE_SERVICE_ROLE_KEY', false);
+const hasDevelopmentDatabase = validateDevelopmentApiEnvironment({
+    productionJwtSecret: jwtSecret,
+    productionSupabaseUrl: supabaseUrl,
+    productionSupabaseServiceRoleKey: supabaseServiceRoleKey,
+    developmentJwtSecret: devApiJwtSecret,
+    developmentSupabaseUrl: devSupabaseUrl,
+    developmentSupabaseServiceRoleKey: devSupabaseServiceRoleKey,
+});
+
 export const env = {
     // 서버 설정
     PORT: parseInt(process.env.PORT || '3100', 10),
     NODE_ENV: process.env.NODE_ENV || 'development',
 
     // JWT 인증 (Shared Secret 방식)
-    JWT_SECRET: getEnvVar('JWT_SECRET'),
+    JWT_SECRET: jwtSecret,
+    DEV_API_JWT_SECRET: devApiJwtSecret,
 
     // 알리고 API
     ALIGO_API_KEY: getEnvVar('ALIGO_API_KEY'),
@@ -38,8 +99,11 @@ export const env = {
     DEFAULT_CHANNEL_NAME: process.env.DEFAULT_CHANNEL_NAME || '통하리',
 
     // Supabase
-    SUPABASE_URL: getEnvVar('SUPABASE_URL'),
-    SUPABASE_SERVICE_ROLE_KEY: getEnvVar('SUPABASE_SERVICE_ROLE_KEY'),
+    SUPABASE_URL: supabaseUrl,
+    SUPABASE_SERVICE_ROLE_KEY: supabaseServiceRoleKey,
+    DEV_SUPABASE_URL: devSupabaseUrl,
+    DEV_SUPABASE_SERVICE_ROLE_KEY: devSupabaseServiceRoleKey,
+    hasDevelopmentDatabase,
 
     // 큐 설정
     QUEUE_CONCURRENCY: getEnvNumber('QUEUE_CONCURRENCY', 5),

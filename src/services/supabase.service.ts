@@ -3,6 +3,7 @@ import { env } from '../config/env';
 import { AlimtalkLogInput, AlimtalkTemplate, PricingMap } from '../types/alimtalk.types';
 import { SmsSendLogInput } from '../types/sms.types';
 import { createLogger } from '../utils/logger';
+import { DatabaseTarget } from '../types/database.types';
 
 const logger = createLogger('SUPABASE');
 
@@ -49,14 +50,11 @@ interface IndividualHousingOfficialPriceInput {
  * - 템플릿 동기화
  * - 단가 조회
  */
-class SupabaseService {
+export class SupabaseService {
     private client: SupabaseClient;
 
-    constructor() {
-        this.client = createClient(
-            env.SUPABASE_URL,
-            env.SUPABASE_SERVICE_ROLE_KEY
-        );
+    constructor(url: string = env.SUPABASE_URL, serviceRoleKey: string = env.SUPABASE_SERVICE_ROLE_KEY) {
+        this.client = createClient(url, serviceRoleKey);
     }
 
     /**
@@ -1427,4 +1425,23 @@ class SupabaseService {
 }
 
 export const supabaseService = new SupabaseService();
+const developmentSupabaseService = env.hasDevelopmentDatabase
+    ? new SupabaseService(env.DEV_SUPABASE_URL, env.DEV_SUPABASE_SERVICE_ROLE_KEY)
+    : null;
+
+/**
+ * 서명 검증으로 확정된 환경에 대응하는 service-role 클라이언트를 반환한다.
+ * development 설정이 완전하지 않으면 운영으로 폴백하지 않고 요청을 실패시킨다.
+ */
+export function getSupabaseService(databaseTarget: DatabaseTarget): SupabaseService {
+    if (databaseTarget === 'production') return supabaseService;
+    if (databaseTarget === 'development' && developmentSupabaseService) {
+        return developmentSupabaseService;
+    }
+
+    throw Object.assign(new Error('개발 Supabase 연결이 설정되지 않았습니다.'), {
+        code: 'DATABASE_TARGET_UNAVAILABLE',
+    });
+}
+
 export default supabaseService;

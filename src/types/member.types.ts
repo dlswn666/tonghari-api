@@ -1,3 +1,5 @@
+import { DatabaseTarget } from './database.types';
+
 /**
  * 조합원 대량 처리 관련 타입 정의
  */
@@ -33,6 +35,7 @@ export interface MemberInviteSyncRequest {
     createdBy: string;
     expiresHours?: number; // 기본값: 8760 (1년)
     members: MemberInviteData[];
+    databaseTarget: DatabaseTarget;
 }
 
 /**
@@ -107,6 +110,7 @@ export interface PreRegisterRequest {
     /** JWT claim이 아니라 DB의 현재 SYSTEM_ADMIN users.id에서 파생한 실행자 */
     actorUserId: string;
     members: PreRegisterData[]; // Raw 데이터 (매칭 전)
+    databaseTarget: DatabaseTarget;
 }
 
 /**
@@ -138,6 +142,7 @@ export interface PreRegisterResult {
 export interface SyncPropertiesRequest {
     jobType: 'SYNC_PROPERTIES';
     unionId: string;
+    databaseTarget: DatabaseTarget;
 }
 
 /**

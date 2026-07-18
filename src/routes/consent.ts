@@ -6,6 +6,11 @@ import {
 } from '../types/consent.types';
 import { createLogger } from '../utils/logger';
 import { toSyncJobRouteFailure } from '../services/sync-job-admission';
+import { authMiddleware } from '../middleware/auth';
+import {
+    consentBulkUpdateAdminMiddleware,
+    consentBulkUploadAdminMiddleware,
+} from '../middleware/consent-admin';
 
 const router = Router();
 const logger = createLogger('CONSENT-ROUTE');
@@ -25,7 +30,7 @@ function legacyJobReadDisabled(_req: Request, res: Response) {
  * Next.js API에서 sync_jobs 생성 후 호출
  * jobId가 포함된 요청을 받아서 큐에 추가
  */
-router.post('/queue', async (req, res) => {
+router.post('/queue', authMiddleware, consentBulkUpdateAdminMiddleware, async (req, res) => {
     const { jobId, unionId, stageId, memberIds, status } = req.body;
 
     if (!jobId || !unionId || !stageId || !memberIds || !status) {
@@ -84,7 +89,7 @@ router.post('/queue', async (req, res) => {
  * 엑셀 업로드 동의 처리 요청
  * POST /consent/upload-queue
  */
-router.post('/upload-queue', async (req, res) => {
+router.post('/upload-queue', authMiddleware, consentBulkUploadAdminMiddleware, async (req, res) => {
     const { jobId, unionId, stageId, data } = req.body;
 
     if (!jobId || !unionId || !stageId || !data) {

@@ -77,7 +77,12 @@ async function runMiddleware(plan: QueryPlan, overrides: Partial<Request> = {}) 
     const request = {
         body: { unionId: ' union-a ' },
         params: {},
-        user: { unionId: 'union-a', userId: 'auth-uuid' },
+        user: {
+            unionId: 'union-a',
+            userId: 'auth-uuid',
+            databaseTarget: 'production',
+            legacyProductionToken: true,
+        },
         ...overrides,
     } as unknown as Request;
 

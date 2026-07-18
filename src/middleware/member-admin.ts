@@ -1,6 +1,6 @@
 import { NextFunction, Request, Response } from 'express';
 import { validateGisAuthenticatedScope } from '../security/gis-access-policy';
-import { supabaseService } from '../services/supabase.service';
+import { getSupabaseService } from '../services/supabase.service';
 import { createLogger } from '../utils/logger';
 
 const logger = createLogger('MEMBER-AUTH');
@@ -60,10 +60,13 @@ async function authorizeMemberAdmin(
     const audience = req.user?.audience;
     const hasExpectedAudience = audience === 'tonghari-api' ||
         (Array.isArray(audience) && audience.includes('tonghari-api'));
+    const expectedIssuer = req.user?.databaseTarget === 'development'
+        ? 'tonghari-web-dev'
+        : 'tonghari-web';
     if (
         req.user?.purpose !== 'MEMBER_QUEUE' ||
         req.user?.operation !== options.operation ||
-        req.user?.issuer !== 'tonghari-web' ||
+        req.user?.issuer !== expectedIssuer ||
         !hasExpectedAudience
     ) {
         res.status(403).json({
@@ -76,7 +79,7 @@ async function authorizeMemberAdmin(
     req.body.unionId = requestedUnionId;
 
     try {
-        const client = supabaseService.getClient();
+        const client = getSupabaseService(req.user!.databaseTarget).getClient();
         const { data: links, error: linkError } = await client
             .from('user_auth_links')
             .select('user_id')

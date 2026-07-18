@@ -10,13 +10,14 @@ on:
 
 permissions:
   contents: read
+  packages: write
 
 concurrency:
   group: tonghari-api-production
   cancel-in-progress: false
 
 env:
-  IMAGE_NAME: alimtalk-proxy
+  IMAGE_REPOSITORY: ghcr.io/dlswn666/alimtalk-proxy
 
 jobs:
   preflight:
@@ -27,12 +28,13 @@ jobs:
       - name: Require main branch and deployment secrets
         shell: bash
         env:
-          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
           EC2_HOST: ${{ secrets.EC2_HOST }}
           EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
           EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
           EC2_SSH_FINGERPRINT: ${{ secrets.EC2_SSH_FINGERPRINT }}
+          DEV_API_JWT_SECRET: ${{ secrets.DEV_API_JWT_SECRET }}
+          DEV_SUPABASE_URL: ${{ secrets.DEV_SUPABASE_URL }}
+          DEV_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.DEV_SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           set -euo pipefail
 
@@ -43,12 +45,13 @@ jobs:
 
           missing=()
           for secret_name in \
-            DOCKER_USERNAME \
-            DOCKER_PASSWORD \
             EC2_HOST \
             EC2_USERNAME \
             EC2_SSH_KEY \
-            EC2_SSH_FINGERPRINT
+            EC2_SSH_FINGERPRINT \
+            DEV_API_JWT_SECRET \
+            DEV_SUPABASE_URL \
+            DEV_SUPABASE_SERVICE_ROLE_KEY
           do
             if [[ -z "${!secret_name:-}" ]]; then
               missing+=("${secret_name}")
@@ -109,11 +112,12 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login to Docker Hub
+      - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push immutable image
         id: build
@@ -121,11 +125,11 @@ jobs:
         with:
           context: .
           push: true
-          tags: ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          tags: ${{ env.IMAGE_REPOSITORY }}:${{ github.sha }}
           build-args: |
             GIT_SHA=${{ github.sha }}
             BUILD_TIME=${{ steps.metadata.outputs.build_time }}
-            IMAGE_TAG=${{ env.IMAGE_NAME }}:${{ github.sha }}
+            IMAGE_TAG=${{ env.IMAGE_REPOSITORY }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -150,30 +154,61 @@ jobs:
       - name: Deploy immutable image to EC2
         # appleboy/ssh-action v1.2.5
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2
+        env:
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEV_API_JWT_SECRET: ${{ secrets.DEV_API_JWT_SECRET }}
+          DEV_SUPABASE_URL: ${{ secrets.DEV_SUPABASE_URL }}
+          DEV_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.DEV_SUPABASE_SERVICE_ROLE_KEY }}
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USERNAME }}
           key: ${{ secrets.EC2_SSH_KEY }}
           fingerprint: ${{ secrets.EC2_SSH_FINGERPRINT }}
+          envs: GHCR_USERNAME,GHCR_TOKEN,DEV_API_JWT_SECRET,DEV_SUPABASE_URL,DEV_SUPABASE_SERVICE_ROLE_KEY
           script: |
             set -Eeuo pipefail
 
             cd "$HOME/alimtalk-proxy"
 
-            IMAGE="${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+            IMAGE_REPOSITORY="${{ env.IMAGE_REPOSITORY }}"
+            IMAGE_TAG="${IMAGE_REPOSITORY}:${{ github.sha }}"
             EXPECTED_DIGEST="${{ needs.build-and-push.outputs.image_digest }}"
+            IMAGE="${IMAGE_REPOSITORY}@${EXPECTED_DIGEST}"
             EXPECTED_GIT_SHA="${{ github.sha }}"
             EXPECTED_BUILD_TIME="${{ needs.build-and-push.outputs.build_time }}"
-            EXPECTED_IMAGE_TAG="${{ env.IMAGE_NAME }}:${{ github.sha }}"
+            EXPECTED_IMAGE_TAG="${IMAGE_TAG}"
             CONTAINER_NAME="alimtalk-proxy"
             ROLLBACK_CONTAINER="${CONTAINER_NAME}-rollback"
             had_previous=0
             new_container_attempted=0
+            registry_logged_in=0
+
+            for variable_name in \
+              GHCR_USERNAME \
+              GHCR_TOKEN \
+              DEV_API_JWT_SECRET \
+              DEV_SUPABASE_URL \
+              DEV_SUPABASE_SERVICE_ROLE_KEY
+            do
+              if [[ -z "${!variable_name:-}" ]]; then
+                echo "Required deployment variable ${variable_name} was not transferred to EC2."
+                false
+              fi
+            done
+
+            logout_registry() {
+              if [[ "${registry_logged_in}" -eq 1 ]]; then
+                docker logout ghcr.io >/dev/null 2>&1 || true
+                registry_logged_in=0
+              fi
+            }
 
             rollback() {
               exit_code=$?
               trap - ERR
               set +e
+              logout_registry
 
               echo "Deployment verification failed; restoring the previous container."
               if [[ "${new_container_attempted}" -eq 1 ]] \
@@ -196,7 +231,11 @@ jobs:
 
             trap rollback ERR
 
+            printf '%s' "${GHCR_TOKEN}" \
+              | docker login ghcr.io --username "${GHCR_USERNAME}" --password-stdin >/dev/null 2>&1
+            registry_logged_in=1
             docker pull "${IMAGE}"
+            logout_registry
 
             if ! docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${IMAGE}" \
               | grep -Fq "@${EXPECTED_DIGEST}"; then
@@ -218,6 +257,9 @@ jobs:
               --restart unless-stopped \
               -p 3100:3100 \
               --env-file .env \
+              -e DEV_API_JWT_SECRET \
+              -e DEV_SUPABASE_URL \
+              -e DEV_SUPABASE_SERVICE_ROLE_KEY \
               -v "$(pwd)/logs:/app/logs" \
               --memory=800m \
               --memory-swap=1600m \

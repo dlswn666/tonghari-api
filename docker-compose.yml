@@ -13,6 +13,7 @@ services:
       - NODE_ENV=production
       - PORT=3100
       - JWT_SECRET=${JWT_SECRET}
+      - DEV_API_JWT_SECRET=${DEV_API_JWT_SECRET:-}
       - ALIGO_API_KEY=${ALIGO_API_KEY}
       - ALIGO_USER_ID=${ALIGO_USER_ID}
       - ALIGO_SENDER_PHONE=${ALIGO_SENDER_PHONE}
@@ -20,6 +21,8 @@ services:
       - DEFAULT_CHANNEL_NAME=${DEFAULT_CHANNEL_NAME:-통하리}
       - SUPABASE_URL=${SUPABASE_URL}
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - DEV_SUPABASE_URL=${DEV_SUPABASE_URL:-}
+      - DEV_SUPABASE_SERVICE_ROLE_KEY=${DEV_SUPABASE_SERVICE_ROLE_KEY:-}
       - QUEUE_CONCURRENCY=${QUEUE_CONCURRENCY:-5}
       - QUEUE_MAX_SIZE=${QUEUE_MAX_SIZE:-100}
       # GIS & Public Data API
@@ -45,4 +48,3 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-
