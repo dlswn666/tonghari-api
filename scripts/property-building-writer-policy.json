@@ -181,6 +181,15 @@
   ],
   "rpcCalls": [
     {
+      "id": "29d461d6017b2163b954",
+      "path": "src/services/building-operation-admission.ts",
+      "name": "create_building_write_operation",
+      "contextSha256": "75e99242e47536111d0957d5d845a45b235bf1b9e82cda3f559761b96d7ac917",
+      "sourceFileSha256": "209b707fbb783d09c95badb55298b2c1fde8aec3241efe8f38805ce72277bbe7",
+      "owner": "building-family queue durable admission",
+      "rationale": "W1/A1a에서 sync_jobs 저장 뒤 root operation을 생성한 producer만 memory queue에 admission한다."
+    },
+    {
       "id": "19776f84a876d4abff2b",
       "path": "src/services/member.queue.service.ts",
       "name": "sync_member_invites",

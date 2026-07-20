@@ -21,6 +21,11 @@ import {
 } from '../types/gis.types';
 import { createLogger } from '../utils/logger';
 import { persistSyncJobOrThrow } from './sync-job-admission';
+import {
+    persistBuildingQueueAdmissionOrThrow,
+    persistBuildingWriteOperation,
+} from './building-operation-admission';
+import { finalizeDeferredQueueAdmissions } from './deferred-queue-admission';
 
 const logger = createLogger('GIS-QUEUE');
 
@@ -46,6 +51,16 @@ interface IndividualHousingPriceFailure {
     code?: IndividualHousingPriceFailureCode;
     attemptedPnus?: string[];
     matchedPnu?: string;
+}
+
+interface PreparedPriceSyncJob {
+    jobId: string;
+    totalPnu: number;
+    admit: () => Promise<void>;
+}
+
+interface PriceSyncJobOptions {
+    deferQueueAdmission?: boolean;
 }
 
 type IndividualHousingPriceResolution =
@@ -284,8 +299,14 @@ class GisQueueService {
             createdAt: new Date(),
         };
 
-        await persistSyncJobOrThrow(jobId, request.unionId, () =>
-            database.getClient().from('sync_jobs').insert({
+        await persistBuildingQueueAdmissionOrThrow({
+            databaseTarget: request.databaseTarget,
+            unionId: request.unionId,
+            jobId,
+            operationKind: 'GIS_SYNC',
+            explicitInputs: request.addresses.map((address) => `address:${address}`),
+            enabledTargets: env.BUILDING_WRITE_OPERATION_TARGETS,
+            persistSyncJob: () => database.getClient().from('sync_jobs').insert({
                 id: jobId,
                 union_id: request.unionId,
                 job_type: 'GIS_MAP',
@@ -296,8 +317,11 @@ class GisQueueService {
                     source: 'GIS_MAP',
                     totalCount: request.addresses.length,
                 },
-            }).select('id, union_id').single()
-        );
+            }).select('id, union_id').single(),
+            persistOperation: (args) => persistBuildingWriteOperation(database.getClient(), args),
+            markSyncJobFailed: (message) =>
+                database.updateSyncJobStatus(jobId, 'FAILED', 0, message),
+        });
         this.jobs.set(this.jobKey(request.databaseTarget, jobId), jobInfo);
         logger.info(`GIS job added: ${jobId} (parcels: ${request.addresses.length})`);
 
@@ -749,8 +773,9 @@ class GisQueueService {
      * VWorld 공동주택가격 API로 재조회해 building_units에 갱신한다.
      */
     async addApartmentPriceSyncJob(
-        request: ApartmentPriceSyncRequest
-    ): Promise<{ jobId: string; totalPnu: number }> {
+        request: ApartmentPriceSyncRequest,
+        options: PriceSyncJobOptions = {}
+    ): Promise<{ jobId: string; totalPnu: number; admit?: () => Promise<void> }> {
         const jobId = uuidv4();
         const database = getSupabaseService(request.databaseTarget);
 
@@ -766,8 +791,14 @@ class GisQueueService {
             status: 'pending',
             createdAt: new Date(),
         };
-        await persistSyncJobOrThrow(jobId, request.unionId, () =>
-            database.getClient().from('sync_jobs').insert({
+        await persistBuildingQueueAdmissionOrThrow({
+            databaseTarget: request.databaseTarget,
+            unionId: request.unionId,
+            jobId,
+            operationKind: 'APART_HOUSING_PRICE_SYNC',
+            explicitInputs: targets.map((target) => `pnu:${target.pnu}`),
+            enabledTargets: env.BUILDING_WRITE_OPERATION_TARGETS,
+            persistSyncJob: () => database.getClient().from('sync_jobs').insert({
                 id: jobId,
                 union_id: request.unionId,
                 job_type: 'APARTMENT_PRICE_SYNC',
@@ -778,34 +809,39 @@ class GisQueueService {
                     source: 'APARTMENT_PRICE_SYNC',
                     totalCount: totalPnu,
                 },
-            }).select('id, union_id').single()
-        );
-        this.jobs.set(this.jobKey(request.databaseTarget, jobId), jobInfo);
-        logger.info(`Apartment price sync job added: ${jobId} (targets: ${totalPnu})`);
+            }).select('id, union_id').single(),
+            persistOperation: (args) => persistBuildingWriteOperation(database.getClient(), args),
+            markSyncJobFailed: (message) =>
+                database.updateSyncJobStatus(jobId, 'FAILED', 0, message),
+        });
+        const admit = async () => {
+            this.jobs.set(this.jobKey(request.databaseTarget, jobId), jobInfo);
+            logger.info(`Apartment price sync job added: ${jobId} (targets: ${totalPnu})`);
 
-        // 3. 대상 없으면 바로 완료 처리
-        if (totalPnu === 0) {
-            this.updateJobStatus(jobId, request.databaseTarget, { status: 'completed', completedAt: new Date() });
-            await database.updateSyncJobStatus(jobId, 'COMPLETED', 100, undefined, {
-                successCount: 0,
-                failedCount: 0,
-                totalCount: 0,
-                message: '대상 공동주택이 없습니다.',
-            });
-            return { jobId, totalPnu: 0 };
-        }
+            if (totalPnu === 0) {
+                this.updateJobStatus(jobId, request.databaseTarget, { status: 'completed', completedAt: new Date() });
+                await database.updateSyncJobStatus(jobId, 'COMPLETED', 100, undefined, {
+                    successCount: 0,
+                    failedCount: 0,
+                    totalCount: 0,
+                    message: '대상 공동주택이 없습니다.',
+                });
+                return;
+            }
 
-        // 4. 큐 등록
-        this.queue
-            .add(async () => {
-                await this.processApartmentPriceSync(jobId, targets, request.databaseTarget);
-            })
-            .catch((err) => {
-                logger.error(`Apartment price sync job ${jobId} fatal error`, err);
-                this.updateJobStatus(jobId, request.databaseTarget, { status: 'failed', error: err.message });
-                database.updateSyncJobStatus(jobId, 'FAILED', 0, err.message);
-            });
+            this.queue
+                .add(async () => {
+                    await this.processApartmentPriceSync(jobId, targets, request.databaseTarget);
+                })
+                .catch((err) => {
+                    logger.error(`Apartment price sync job ${jobId} fatal error`, err);
+                    this.updateJobStatus(jobId, request.databaseTarget, { status: 'failed', error: err.message });
+                    database.updateSyncJobStatus(jobId, 'FAILED', 0, err.message);
+                });
+        };
 
+        if (options.deferQueueAdmission) return { jobId, totalPnu, admit };
+        await admit();
         return { jobId, totalPnu };
     }
 
@@ -966,8 +1002,9 @@ class GisQueueService {
      * VWorld 개별주택가격 API로 재조회해 building_units에 갱신한다.
      */
     async addIndividualHousingPriceSyncJob(
-        request: IndividualHousingPriceSyncRequest
-    ): Promise<{ jobId: string; totalPnu: number }> {
+        request: IndividualHousingPriceSyncRequest,
+        options: PriceSyncJobOptions = {}
+    ): Promise<{ jobId: string; totalPnu: number; admit?: () => Promise<void> }> {
         const jobId = uuidv4();
         const database = getSupabaseService(request.databaseTarget);
 
@@ -982,8 +1019,14 @@ class GisQueueService {
             status: 'pending',
             createdAt: new Date(),
         };
-        await persistSyncJobOrThrow(jobId, request.unionId, () =>
-            database.getClient().from('sync_jobs').insert({
+        await persistBuildingQueueAdmissionOrThrow({
+            databaseTarget: request.databaseTarget,
+            unionId: request.unionId,
+            jobId,
+            operationKind: 'INDIVIDUAL_HOUSING_PRICE_SYNC',
+            explicitInputs: targets.map((target) => `pnu:${target.pnu}`),
+            enabledTargets: env.BUILDING_WRITE_OPERATION_TARGETS,
+            persistSyncJob: () => database.getClient().from('sync_jobs').insert({
                 id: jobId,
                 union_id: request.unionId,
                 job_type: 'INDIVIDUAL_HOUSING_PRICE_SYNC',
@@ -994,32 +1037,39 @@ class GisQueueService {
                     source: 'INDIVIDUAL_HOUSING_PRICE_SYNC',
                     totalCount: totalPnu,
                 },
-            }).select('id, union_id').single()
-        );
-        this.jobs.set(this.jobKey(request.databaseTarget, jobId), jobInfo);
-        logger.info(`Individual housing price sync job added: ${jobId} (targets: ${totalPnu})`);
+            }).select('id, union_id').single(),
+            persistOperation: (args) => persistBuildingWriteOperation(database.getClient(), args),
+            markSyncJobFailed: (message) =>
+                database.updateSyncJobStatus(jobId, 'FAILED', 0, message),
+        });
+        const admit = async () => {
+            this.jobs.set(this.jobKey(request.databaseTarget, jobId), jobInfo);
+            logger.info(`Individual housing price sync job added: ${jobId} (targets: ${totalPnu})`);
 
-        if (totalPnu === 0) {
-            this.updateJobStatus(jobId, request.databaseTarget, { status: 'completed', completedAt: new Date() });
-            await database.updateSyncJobStatus(jobId, 'COMPLETED', 100, undefined, {
-                successCount: 0,
-                failedCount: 0,
-                totalCount: 0,
-                message: '대상 개별주택이 없습니다.',
-            });
-            return { jobId, totalPnu: 0 };
-        }
+            if (totalPnu === 0) {
+                this.updateJobStatus(jobId, request.databaseTarget, { status: 'completed', completedAt: new Date() });
+                await database.updateSyncJobStatus(jobId, 'COMPLETED', 100, undefined, {
+                    successCount: 0,
+                    failedCount: 0,
+                    totalCount: 0,
+                    message: '대상 개별주택이 없습니다.',
+                });
+                return;
+            }
 
-        this.queue
-            .add(async () => {
-                await this.processIndividualHousingPriceSync(jobId, targets, request.databaseTarget);
-            })
-            .catch((err) => {
-                logger.error(`Individual housing price sync job ${jobId} fatal error`, err);
-                this.updateJobStatus(jobId, request.databaseTarget, { status: 'failed', error: err.message });
-                database.updateSyncJobStatus(jobId, 'FAILED', 0, err.message);
-            });
+            this.queue
+                .add(async () => {
+                    await this.processIndividualHousingPriceSync(jobId, targets, request.databaseTarget);
+                })
+                .catch((err) => {
+                    logger.error(`Individual housing price sync job ${jobId} fatal error`, err);
+                    this.updateJobStatus(jobId, request.databaseTarget, { status: 'failed', error: err.message });
+                    database.updateSyncJobStatus(jobId, 'FAILED', 0, err.message);
+                });
+        };
 
+        if (options.deferQueueAdmission) return { jobId, totalPnu, admit };
+        await admit();
         return { jobId, totalPnu };
     }
 
@@ -1221,13 +1271,52 @@ class GisQueueService {
     }
 
     /**
+     * 토지/공동주택/개별주택 durable prepare를 모두 끝낸 뒤에만 세 memory queue를 연다.
+     * 일부 prepare가 실패하면 이미 만들어진 다른 sync_jobs도 FAILED로 종결한다.
+     */
+    async addOfficialPriceSyncJobs(request: LandPriceSyncRequest): Promise<{
+        land: { jobId: string; totalPnu: number };
+        apartment: { jobId: string; totalPnu: number };
+        individualHousing: { jobId: string; totalPnu: number };
+    }> {
+        const settled = await Promise.allSettled([
+            this.addLandPriceSyncJob(request, { deferQueueAdmission: true }),
+            this.addApartmentPriceSyncJob(request, { deferQueueAdmission: true }),
+            this.addIndividualHousingPriceSyncJob(request, { deferQueueAdmission: true }),
+        ]);
+        const database = getSupabaseService(request.databaseTarget);
+        const prepared = await finalizeDeferredQueueAdmissions<PreparedPriceSyncJob>({
+            settled: settled as PromiseSettledResult<PreparedPriceSyncJob>[],
+            markFailed: (job) => database.updateSyncJobStatus(
+                job.jobId,
+                'FAILED',
+                0,
+                '전체 공시가격 작업의 durable prepare가 완료되지 않았습니다.'
+            ),
+        });
+        if (prepared.length !== 3) {
+            throw new Error('전체 공시가격 작업의 durable prepare 수가 잘못되었습니다.');
+        }
+        const [land, apartment, individualHousing] = prepared;
+        return {
+            land: { jobId: land.jobId, totalPnu: land.totalPnu },
+            apartment: { jobId: apartment.jobId, totalPnu: apartment.totalPnu },
+            individualHousing: {
+                jobId: individualHousing.jobId,
+                totalPnu: individualHousing.totalPnu,
+            },
+        };
+    }
+
+    /**
      * 토지 공시지가 일괄 재동기화 작업 추가 (2026-04)
      * 해당 조합의 land_lots 전체 PNU에 대해 VWorld 개별공시지가 API를
      * 재조회해 land_lots.official_price 를 갱신한다.
      */
     async addLandPriceSyncJob(
-        request: LandPriceSyncRequest
-    ): Promise<{ jobId: string; totalPnu: number }> {
+        request: LandPriceSyncRequest,
+        options: PriceSyncJobOptions = {}
+    ): Promise<{ jobId: string; totalPnu: number; admit?: () => Promise<void> }> {
         const jobId = uuidv4();
         const database = getSupabaseService(request.databaseTarget);
 
@@ -1257,32 +1346,34 @@ class GisQueueService {
                 },
             }).select('id, union_id').single()
         );
-        this.jobs.set(this.jobKey(request.databaseTarget, jobId), jobInfo);
-        logger.info(`Land price sync job added: ${jobId} (targets: ${totalPnu})`);
+        const admit = async () => {
+            this.jobs.set(this.jobKey(request.databaseTarget, jobId), jobInfo);
+            logger.info(`Land price sync job added: ${jobId} (targets: ${totalPnu})`);
 
-        // 3. 대상 없으면 바로 완료 처리
-        if (totalPnu === 0) {
-            this.updateJobStatus(jobId, request.databaseTarget, { status: 'completed', completedAt: new Date() });
-            await database.updateSyncJobStatus(jobId, 'COMPLETED', 100, undefined, {
-                successCount: 0,
-                failedCount: 0,
-                totalCount: 0,
-                message: '대상 토지가 없습니다.',
-            });
-            return { jobId, totalPnu: 0 };
-        }
+            if (totalPnu === 0) {
+                this.updateJobStatus(jobId, request.databaseTarget, { status: 'completed', completedAt: new Date() });
+                await database.updateSyncJobStatus(jobId, 'COMPLETED', 100, undefined, {
+                    successCount: 0,
+                    failedCount: 0,
+                    totalCount: 0,
+                    message: '대상 토지가 없습니다.',
+                });
+                return;
+            }
 
-        // 4. 큐 등록
-        this.queue
-            .add(async () => {
-                await this.processLandPriceSync(jobId, targets, request.databaseTarget);
-            })
-            .catch((err) => {
-                logger.error(`Land price sync job ${jobId} fatal error`, err);
-                this.updateJobStatus(jobId, request.databaseTarget, { status: 'failed', error: err.message });
-                database.updateSyncJobStatus(jobId, 'FAILED', 0, err.message);
-            });
+            this.queue
+                .add(async () => {
+                    await this.processLandPriceSync(jobId, targets, request.databaseTarget);
+                })
+                .catch((err) => {
+                    logger.error(`Land price sync job ${jobId} fatal error`, err);
+                    this.updateJobStatus(jobId, request.databaseTarget, { status: 'failed', error: err.message });
+                    database.updateSyncJobStatus(jobId, 'FAILED', 0, err.message);
+                });
+        };
 
+        if (options.deferQueueAdmission) return { jobId, totalPnu, admit };
+        await admit();
         return { jobId, totalPnu };
     }
 

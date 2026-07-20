@@ -36,7 +36,11 @@ export function toSyncJobRouteFailure(
             : fallbackCode;
 
     return {
-        status: code === 'SYNC_JOB_PERSIST_FAILED' ? 503 : 500,
+        status: [
+            'SYNC_JOB_PERSIST_FAILED',
+            'BUILDING_OPERATION_PERSIST_FAILED',
+            'BUILDING_OPERATION_CAPABILITY_DISABLED',
+        ].includes(code) ? 503 : 500,
         code,
         message: error instanceof Error ? error.message : 'Internal server error.',
     };
