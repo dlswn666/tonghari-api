@@ -9,16 +9,9 @@
     "test": "node --import tsx --test tests/*.test.ts",
     "phase0-s:gate": "tsx scripts/phase0-s-gate.ts",
     "start": "node dist/index.js",
-    "pm2:start": "pm2 start ecosystem.config.js",
-    "pm2:stop": "pm2 stop tonghari-api",
-    "pm2:restart": "pm2 restart tonghari-api",
-    "pm2:logs": "pm2 logs tonghari-api",
     "docker:build": "docker build --build-arg GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo unknown) --build-arg BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) --build-arg IMAGE_TAG=alimtalk-proxy:local -t alimtalk-proxy .",
-    "docker:run": "docker run -d -p 3100:3100 --env-file .env --name alimtalk-proxy alimtalk-proxy",
-    "docker:stop": "docker stop alimtalk-proxy && docker rm alimtalk-proxy",
     "docker:logs": "docker logs -f alimtalk-proxy",
-    "docker:compose:up": "docker-compose up -d",
-    "docker:compose:down": "docker-compose down"
+    "docker:deployment": "echo '배포는 GitHub Actions의 GHCR SHA/digest workflow만 사용합니다.'"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.1",

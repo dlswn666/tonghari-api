@@ -10,7 +10,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 concurrency:
   group: tonghari-api-production
@@ -21,20 +20,17 @@ env:
 
 jobs:
   preflight:
-    name: Deployment preflight
+    name: EC2 deployment preflight
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Require main branch and deployment secrets
+      - name: Require main branch and EC2 connection secrets
         shell: bash
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
           EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
           EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
           EC2_SSH_FINGERPRINT: ${{ secrets.EC2_SSH_FINGERPRINT }}
-          DEV_API_JWT_SECRET: ${{ secrets.DEV_API_JWT_SECRET }}
-          DEV_SUPABASE_URL: ${{ secrets.DEV_SUPABASE_URL }}
-          DEV_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.DEV_SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           set -euo pipefail
 
@@ -48,10 +44,7 @@ jobs:
             EC2_HOST \
             EC2_USERNAME \
             EC2_SSH_KEY \
-            EC2_SSH_FINGERPRINT \
-            DEV_API_JWT_SECRET \
-            DEV_SUPABASE_URL \
-            DEV_SUPABASE_SERVICE_ROLE_KEY
+            EC2_SSH_FINGERPRINT
           do
             if [[ -z "${!secret_name:-}" ]]; then
               missing+=("${secret_name}")
@@ -70,10 +63,12 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        # actions/checkout v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        # actions/setup-node v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 22
           cache: npm
@@ -92,15 +87,19 @@ jobs:
 
   build-and-push:
     name: Build immutable image
-    needs: [preflight, quality-gates]
+    needs: quality-gates
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
     outputs:
       image_digest: ${{ steps.build.outputs.digest }}
       build_time: ${{ steps.metadata.outputs.build_time }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        # actions/checkout v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Prepare immutable build metadata
         id: metadata
@@ -110,10 +109,12 @@ jobs:
           echo "build_time=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "${GITHUB_OUTPUT}"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        # docker/setup-buildx-action v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
+        # docker/login-action v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -121,7 +122,8 @@ jobs:
 
       - name: Build and push immutable image
         id: build
-        uses: docker/build-push-action@v5
+        # docker/build-push-action v5
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
         with:
           context: .
           push: true
@@ -147,9 +149,12 @@ jobs:
 
   deploy:
     name: Deploy and verify exact revision
-    needs: build-and-push
+    needs: [preflight, build-and-push]
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
     steps:
       - name: Deploy immutable image to EC2
         # appleboy/ssh-action v1.2.5
@@ -157,15 +162,12 @@ jobs:
         env:
           GHCR_USERNAME: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DEV_API_JWT_SECRET: ${{ secrets.DEV_API_JWT_SECRET }}
-          DEV_SUPABASE_URL: ${{ secrets.DEV_SUPABASE_URL }}
-          DEV_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.DEV_SUPABASE_SERVICE_ROLE_KEY }}
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USERNAME }}
           key: ${{ secrets.EC2_SSH_KEY }}
           fingerprint: ${{ secrets.EC2_SSH_FINGERPRINT }}
-          envs: GHCR_USERNAME,GHCR_TOKEN,DEV_API_JWT_SECRET,DEV_SUPABASE_URL,DEV_SUPABASE_SERVICE_ROLE_KEY
+          envs: GHCR_USERNAME,GHCR_TOKEN
           script: |
             set -Eeuo pipefail
 
@@ -179,20 +181,45 @@ jobs:
             EXPECTED_BUILD_TIME="${{ needs.build-and-push.outputs.build_time }}"
             EXPECTED_IMAGE_TAG="${IMAGE_TAG}"
             CONTAINER_NAME="alimtalk-proxy"
+            CANDIDATE_CONTAINER="${CONTAINER_NAME}-candidate"
             ROLLBACK_CONTAINER="${CONTAINER_NAME}-rollback"
             had_previous=0
             new_container_attempted=0
+            candidate_started=0
             registry_logged_in=0
+            previous_image_id=""
 
             for variable_name in \
               GHCR_USERNAME \
-              GHCR_TOKEN \
+              GHCR_TOKEN
+            do
+              if [[ -z "${!variable_name:-}" ]]; then
+                echo "Required deployment variable ${variable_name} was not transferred to EC2."
+                false
+              fi
+            done
+
+            if [[ ! -f .env || -L .env ]]; then
+              echo "Runtime .env must exist as a regular, non-symlink file on EC2."
+              false
+            fi
+
+            env_owner="$(stat -c '%U' .env)"
+            env_mode="$(stat -c '%a' .env)"
+            if [[ "${env_owner}" != "$(id -un)" || "${env_mode}" != "600" ]]; then
+              echo "Runtime .env must be owned by the deploy user with mode 600."
+              false
+            fi
+
+            for variable_name in \
               DEV_API_JWT_SECRET \
               DEV_SUPABASE_URL \
               DEV_SUPABASE_SERVICE_ROLE_KEY
             do
-              if [[ -z "${!variable_name:-}" ]]; then
-                echo "Required deployment variable ${variable_name} was not transferred to EC2."
+              definition_count="$(grep -c "^${variable_name}=" .env || true)"
+              if [[ "${definition_count}" != "1" ]] \
+                || ! grep -Eq "^${variable_name}=.+" .env; then
+                echo "Runtime .env must contain exactly one non-empty ${variable_name} entry."
                 false
               fi
             done
@@ -204,26 +231,103 @@ jobs:
               fi
             }
 
+            verify_status_ok() {
+              local container_name="$1"
+              local port="$2"
+
+              for attempt in $(seq 1 15); do
+                if curl -fsS --connect-timeout 2 --max-time 5 "http://127.0.0.1:${port}/health" \
+                  | docker exec -i "${container_name}" node -e '
+                      let body = "";
+                      process.stdin.setEncoding("utf8");
+                      process.stdin.on("data", (chunk) => { body += chunk; });
+                      process.stdin.on("end", () => {
+                        try {
+                          process.exit(JSON.parse(body).status === "ok" ? 0 : 1);
+                        } catch {
+                          process.exit(1);
+                        }
+                      });
+                    ' >/dev/null 2>&1
+                then
+                  return 0
+                fi
+                sleep 2
+              done
+
+              return 1
+            }
+
             rollback() {
               exit_code=$?
+              rollback_failed=0
               trap - ERR
               set +e
               logout_registry
+
+              if [[ "${candidate_started}" -eq 1 ]] \
+                && docker container inspect "${CANDIDATE_CONTAINER}" >/dev/null 2>&1; then
+                docker logs --tail 200 "${CANDIDATE_CONTAINER}" || true
+                if ! docker rm -f "${CANDIDATE_CONTAINER}"; then
+                  echo "Candidate cleanup failed; manual cleanup is required."
+                fi
+              fi
 
               echo "Deployment verification failed; restoring the previous container."
               if [[ "${new_container_attempted}" -eq 1 ]] \
                 && docker container inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
                 docker logs --tail 200 "${CONTAINER_NAME}" || true
-                docker rm -f "${CONTAINER_NAME}" || true
+                if ! docker rm -f "${CONTAINER_NAME}"; then
+                  echo "ROLLBACK_FAILED: failed candidate could not be removed."
+                  rollback_failed=1
+                fi
               fi
 
               if [[ "${had_previous}" -eq 1 ]]; then
-                if docker container inspect "${ROLLBACK_CONTAINER}" >/dev/null 2>&1; then
-                  docker rename "${ROLLBACK_CONTAINER}" "${CONTAINER_NAME}" || true
-                  docker start "${CONTAINER_NAME}" || true
-                elif docker container inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
-                  docker start "${CONTAINER_NAME}" || true
+                restore_source=""
+                if docker container inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
+                  current_image_id="$(docker container inspect --format '{{.Image}}' "${CONTAINER_NAME}")"
+                  if [[ "${current_image_id}" == "${previous_image_id}" ]]; then
+                    restore_source="${CONTAINER_NAME}"
+                  else
+                    echo "ROLLBACK_FAILED: current container is not the previous image."
+                    rollback_failed=1
+                  fi
+                elif docker container inspect "${ROLLBACK_CONTAINER}" >/dev/null 2>&1; then
+                  rollback_image_id="$(docker container inspect --format '{{.Image}}' "${ROLLBACK_CONTAINER}")"
+                  if [[ "${rollback_image_id}" != "${previous_image_id}" ]]; then
+                    echo "ROLLBACK_FAILED: rollback container image ID is not the previous image."
+                    rollback_failed=1
+                  elif docker rename "${ROLLBACK_CONTAINER}" "${CONTAINER_NAME}"; then
+                    restore_source="${CONTAINER_NAME}"
+                  else
+                    echo "ROLLBACK_FAILED: rollback container rename failed."
+                    rollback_failed=1
+                  fi
+                else
+                  echo "ROLLBACK_FAILED: previous container is missing."
+                  rollback_failed=1
                 fi
+
+                if [[ "${rollback_failed}" -eq 0 && -n "${restore_source}" ]]; then
+                  if ! docker start "${restore_source}" >/dev/null; then
+                    echo "ROLLBACK_FAILED: previous container could not be started."
+                    rollback_failed=1
+                  elif [[ "$(docker container inspect --format '{{.Image}}' "${restore_source}")" != "${previous_image_id}" ]]; then
+                    echo "ROLLBACK_FAILED: restored container image ID changed unexpectedly."
+                    rollback_failed=1
+                  elif ! verify_status_ok "${restore_source}" 3100; then
+                    echo "ROLLBACK_FAILED: restored container health check failed."
+                    rollback_failed=1
+                  else
+                    echo "Previous container restored and health-checked successfully."
+                  fi
+                fi
+              fi
+
+              if [[ "${rollback_failed}" -ne 0 ]]; then
+                echo "ROLLBACK_FAILED: containers were preserved for manual recovery."
+                exit 70
               fi
 
               exit "${exit_code}"
@@ -243,10 +347,75 @@ jobs:
               false
             fi
 
-            docker rm -f "${ROLLBACK_CONTAINER}" >/dev/null 2>&1 || true
+            verify_health() {
+              local container_name="$1"
+              local port="$2"
+
+              for attempt in $(seq 1 30); do
+                if curl -fsS --connect-timeout 2 --max-time 5 "http://127.0.0.1:${port}/health" \
+                  | docker exec -i \
+                      -e EXPECTED_GIT_SHA="${EXPECTED_GIT_SHA}" \
+                      -e EXPECTED_BUILD_TIME="${EXPECTED_BUILD_TIME}" \
+                      -e EXPECTED_IMAGE_TAG="${EXPECTED_IMAGE_TAG}" \
+                      "${container_name}" \
+                      node -e '
+                        let body = "";
+                        process.stdin.setEncoding("utf8");
+                        process.stdin.on("data", (chunk) => { body += chunk; });
+                        process.stdin.on("end", () => {
+                          try {
+                            const health = JSON.parse(body);
+                            const valid = health.status === "ok"
+                              && health.gitSha === process.env.EXPECTED_GIT_SHA
+                              && health.buildTime === process.env.EXPECTED_BUILD_TIME
+                              && health.imageTag === process.env.EXPECTED_IMAGE_TAG;
+                            process.exit(valid ? 0 : 1);
+                          } catch {
+                            process.exit(1);
+                          }
+                        });
+                      ' >/dev/null 2>&1
+                then
+                  return 0
+                fi
+                sleep 2
+              done
+
+              return 1
+            }
+
+            docker rm -f "${CANDIDATE_CONTAINER}" >/dev/null 2>&1 || true
+            candidate_started=1
+            docker run -d \
+              --name "${CANDIDATE_CONTAINER}" \
+              --restart no \
+              -p 127.0.0.1:13100:3100 \
+              --env-file .env \
+              --memory=800m \
+              --memory-swap=1600m \
+              "${IMAGE}"
+
+            EXPECTED_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "${IMAGE}")"
+            CANDIDATE_IMAGE_ID="$(docker container inspect --format '{{.Image}}' "${CANDIDATE_CONTAINER}")"
+            if [[ "${CANDIDATE_IMAGE_ID}" != "${EXPECTED_IMAGE_ID}" ]]; then
+              echo "Candidate container image ID does not match the pulled immutable image."
+              false
+            fi
+
+            if ! verify_health "${CANDIDATE_CONTAINER}" 13100; then
+              echo "Candidate health response did not match git SHA ${EXPECTED_GIT_SHA}."
+              false
+            fi
+
+            docker rm -f "${CANDIDATE_CONTAINER}"
+            candidate_started=0
 
             if docker container inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
               had_previous=1
+              previous_image_id="$(docker container inspect --format '{{.Image}}' "${CONTAINER_NAME}")"
+              if docker container inspect "${ROLLBACK_CONTAINER}" >/dev/null 2>&1; then
+                docker rm -f "${ROLLBACK_CONTAINER}"
+              fi
               docker stop "${CONTAINER_NAME}"
               docker rename "${CONTAINER_NAME}" "${ROLLBACK_CONTAINER}"
             fi
@@ -257,61 +426,25 @@ jobs:
               --restart unless-stopped \
               -p 3100:3100 \
               --env-file .env \
-              -e DEV_API_JWT_SECRET \
-              -e DEV_SUPABASE_URL \
-              -e DEV_SUPABASE_SERVICE_ROLE_KEY \
               -v "$(pwd)/logs:/app/logs" \
               --memory=800m \
               --memory-swap=1600m \
               "${IMAGE}"
 
-            EXPECTED_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "${IMAGE}")"
             RUNNING_IMAGE_ID="$(docker container inspect --format '{{.Image}}' "${CONTAINER_NAME}")"
             if [[ "${RUNNING_IMAGE_ID}" != "${EXPECTED_IMAGE_ID}" ]]; then
               echo "Running container image ID does not match the pulled immutable image."
               false
             fi
 
-            health_verified=0
-            for attempt in $(seq 1 30); do
-              if curl -fsS --connect-timeout 2 --max-time 5 http://127.0.0.1:3100/health \
-                | docker exec -i \
-                    -e EXPECTED_GIT_SHA="${EXPECTED_GIT_SHA}" \
-                    -e EXPECTED_BUILD_TIME="${EXPECTED_BUILD_TIME}" \
-                    -e EXPECTED_IMAGE_TAG="${EXPECTED_IMAGE_TAG}" \
-                    "${CONTAINER_NAME}" \
-                    node -e '
-                      let body = "";
-                      process.stdin.setEncoding("utf8");
-                      process.stdin.on("data", (chunk) => { body += chunk; });
-                      process.stdin.on("end", () => {
-                        try {
-                          const health = JSON.parse(body);
-                          const valid = health.status === "ok"
-                            && health.gitSha === process.env.EXPECTED_GIT_SHA
-                            && health.buildTime === process.env.EXPECTED_BUILD_TIME
-                            && health.imageTag === process.env.EXPECTED_IMAGE_TAG;
-                          process.exit(valid ? 0 : 1);
-                        } catch {
-                          process.exit(1);
-                        }
-                      });
-                    ' >/dev/null 2>&1
-              then
-                health_verified=1
-                break
-              fi
-              sleep 2
-            done
-
-            if [[ "${health_verified}" -ne 1 ]]; then
+            if ! verify_health "${CONTAINER_NAME}" 3100; then
               echo "Health response did not match git SHA ${EXPECTED_GIT_SHA}."
               false
             fi
 
             trap - ERR
             if [[ "${had_previous}" -eq 1 ]]; then
-              docker rm -f "${ROLLBACK_CONTAINER}"
+              echo "Previous container preserved as ${ROLLBACK_CONTAINER} for rollback."
             fi
             docker image prune -f || true
 

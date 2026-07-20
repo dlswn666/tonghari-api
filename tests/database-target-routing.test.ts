@@ -313,9 +313,15 @@ test('consent만 target-aware allowlist에 추가하고 외부 운영 부작용 
     assert.doesNotMatch(smsRoute, /databaseTargetAuthMiddleware/);
 });
 
-test('배포 workflow는 GITHUB_TOKEN으로 GHCR digest를 배포하고 dev secrets를 안전하게 전달한다', async () => {
-    const workflow = await readFile('.github/workflows/docker-build.yml', 'utf8');
-    assert.match(workflow, /permissions:\s+contents: read\s+packages: write/);
+test('배포 workflow는 GHCR digest와 EC2 env 단일 원본으로 안전하게 배포한다', async () => {
+    const [workflow, packageJson, legacyBuildScript, legacyDeployScript] = await Promise.all([
+        readFile('.github/workflows/docker-build.yml', 'utf8'),
+        readFile('package.json', 'utf8'),
+        readFile('scripts/build-and-push.sh', 'utf8'),
+        readFile('scripts/deploy-to-ec2.sh', 'utf8'),
+    ]);
+    assert.match(workflow, /build-and-push:[\s\S]*permissions:\s+contents: read\s+packages: write/);
+    assert.match(workflow, /deploy:[\s\S]*permissions:\s+contents: read\s+packages: read/);
     assert.doesNotMatch(workflow, /DOCKER_(?:USERNAME|PASSWORD)/);
     assert.match(workflow, /registry: ghcr\.io\s+username: \$\{\{ github\.actor \}\}\s+password: \$\{\{ secrets\.GITHUB_TOKEN \}\}/);
     assert.ok(workflow.includes('IMAGE_REPOSITORY: ghcr.io/dlswn666/alimtalk-proxy'));
@@ -325,14 +331,31 @@ test('배포 workflow는 GITHUB_TOKEN으로 GHCR digest를 배포하고 dev secr
     assert.match(workflow, /GHCR_TOKEN: \$\{\{ secrets\.GITHUB_TOKEN \}\}/);
     assert.match(workflow, /printf '%s' "\$\{GHCR_TOKEN\}"[\s\\]+\| docker login ghcr\.io --username "\$\{GHCR_USERNAME\}" --password-stdin/);
     assert.match(workflow, /docker pull "\$\{IMAGE\}"\s+logout_registry/);
+    assert.match(workflow, /needs: quality-gates/);
+    assert.match(workflow, /needs: \[preflight, build-and-push\]/);
     for (const name of [
         'DEV_API_JWT_SECRET',
         'DEV_SUPABASE_URL',
         'DEV_SUPABASE_SERVICE_ROLE_KEY',
     ]) {
-        assert.ok(workflow.includes(`${name}: \${{ secrets.${name} }}`));
-        assert.ok(workflow.includes(`-e ${name}`));
+        assert.ok(workflow.includes(name));
+        assert.ok(!workflow.includes(`${name}: \${{ secrets.${name} }}`));
+        assert.ok(!workflow.includes(`-e ${name}`));
     }
-    assert.match(workflow, /envs: GHCR_USERNAME,GHCR_TOKEN,DEV_API_JWT_SECRET,DEV_SUPABASE_URL,DEV_SUPABASE_SERVICE_ROLE_KEY/);
+    assert.match(workflow, /envs: GHCR_USERNAME,GHCR_TOKEN/);
+    assert.match(workflow, /--env-file \.env/);
+    assert.match(workflow, /env_mode="\$\(stat -c '%a' \.env\)"/);
+    assert.match(workflow, /"\$\{env_mode\}" != "600"/);
+    assert.match(workflow, /definition_count="\$\(grep -c "\^\$\{variable_name\}=" \.env \|\| true\)"/);
+    assert.match(workflow, /-p 127\.0\.0\.1:13100:3100/);
+    assert.match(workflow, /Previous container preserved as \$\{ROLLBACK_CONTAINER\} for rollback/);
+    assert.match(workflow, /ROLLBACK_FAILED: restored container health check failed/);
+    assert.doesNotMatch(workflow, /uses: (?:actions|docker)\/[^@\s]+@v\d/);
     assert.doesNotMatch(workflow, /echo[^\n]*DEV_(?:API_JWT_SECRET|SUPABASE_SERVICE_ROLE_KEY)/);
+    assert.ok(!('docker:run' in JSON.parse(packageJson).scripts));
+    assert.ok(!('docker:stop' in JSON.parse(packageJson).scripts));
+    assert.ok(!('docker:compose:up' in JSON.parse(packageJson).scripts));
+    assert.ok(!Object.keys(JSON.parse(packageJson).scripts).some((name) => name.startsWith('pm2:')));
+    assert.doesNotMatch(legacyBuildScript, /docker (?:build|push)/);
+    assert.doesNotMatch(legacyDeployScript, /docker (?:pull|run|stop|rm)/);
 });

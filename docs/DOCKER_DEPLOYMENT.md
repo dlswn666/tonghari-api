@@ -1,283 +1,111 @@
-# Docker 배포 가이드 (Build Local, Run Remote)
+# Tonghari API Docker 배포 가이드
 
-## 개요
+## 운영 원칙
 
-이 문서는 알림톡 프록시 서버의 Docker 배포 전략을 설명합니다.
+Tonghari API는 `.github/workflows/docker-build.yml`을 통한 자동 배포만 사용한다.
 
-**핵심 전략**: "Build Local, Run Remote"
+- 이미지는 GitHub Actions에서 빌드하고 GHCR(`ghcr.io/dlswn666/alimtalk-proxy`)에 저장한다.
+- 배포 대상은 `latest`가 아니라 Git SHA 태그와 `sha256` digest로 고정한다.
+- EC2에서는 이미지를 빌드하지 않고 검증된 digest를 pull해 실행한다.
+- 런타임 비밀값은 GitHub에 복제하지 않고 EC2의 `/home/ubuntu/alimtalk-proxy/.env`만 사용한다.
+- 후보 컨테이너를 `127.0.0.1:13100`에서 검증한 후 공개 포트 `3100`을 교체한다.
+- 성공 후 직전 컨테이너를 `alimtalk-proxy-rollback`이라는 정지 상태 컨테이너로 1세대 보존한다.
 
-1GB RAM EC2 서버에서 직접 `docker build`를 실행하면 `npm install` 과정에서 메모리 부족으로 100% 실패합니다. 따라서 로컬 또는 CI/CD에서 이미지를 빌드하고, EC2에서는 Pull과 Run만 수행합니다.
+기존 `scripts/build-and-push.sh`와 `scripts/deploy-to-ec2.sh`의 Docker Hub/`latest` 방식은 사용하지 않는다.
 
-## 배포 흐름
+## GitHub Actions 설정
 
+Repository Settings > Secrets and variables > Actions에는 EC2 접속에 필요한 다음 값만 저장한다.
+
+- `EC2_HOST`: EC2 퍼블릭 IP 또는 호스트명
+- `EC2_USERNAME`: 현재 서버 기준 `ubuntu`
+- `EC2_SSH_KEY`: EC2 SSH private key 원문
+- `EC2_SSH_FINGERPRINT`: 접속 대상 EC2 host key fingerprint
+
+`GITHUB_TOKEN`은 Actions가 자동 발급하며 GHCR 로그인에만 사용한다. 다음 런타임 값은 GitHub Secrets에 저장하지 않는다.
+
+- `DEV_API_JWT_SECRET`
+- `DEV_SUPABASE_URL`
+- `DEV_SUPABASE_SERVICE_ROLE_KEY`
+
+## EC2 런타임 설정
+
+파일 위치:
+
+```text
+/home/ubuntu/alimtalk-proxy/.env
 ```
-┌─────────────────┐     ┌──────────────────┐     ┌──────────────┐
-│  로컬/CI에서     │────▶│   Docker Hub     │────▶│    EC2       │
-│  docker build   │     │   또는 ECR       │     │  docker run  │
-└─────────────────┘     └──────────────────┘     └──────────────┘
-        │                       │                       │
-   이미지 빌드              이미지 저장            이미지 실행
-   npm install              (레지스트리)          (메모리 절약)
-```
 
-## 방법 1: 로컬 빌드 및 배포
-
-### 1. 사전 준비
+필수 보안 조건:
 
 ```bash
-# Docker Hub 계정 생성 (무료)
-# https://hub.docker.com/
-
-# Docker 로그인
-docker login
+cd /home/ubuntu/alimtalk-proxy
+stat -c 'owner=%U group=%G mode=%a file=%n' .env
 ```
 
-### 2. 환경 변수 설정
+정상 기준은 `owner=ubuntu`, `mode=600`이다. 배포 workflow도 컨테이너를 건드리기 전에 이 조건을 검사한다.
+
+개발 DB 분기를 위한 필수 항목은 다음 세 개다.
+
+```text
+DEV_API_JWT_SECRET
+DEV_SUPABASE_URL
+DEV_SUPABASE_SERVICE_ROLE_KEY
+```
+
+값을 출력하지 않고 항목 수만 확인한다.
 
 ```bash
-# Windows (PowerShell)
-$env:DOCKER_USERNAME="your-dockerhub-username"
-
-# Linux/Mac
-export DOCKER_USERNAME="your-dockerhub-username"
+for key in DEV_API_JWT_SECRET DEV_SUPABASE_URL DEV_SUPABASE_SERVICE_ROLE_KEY; do
+  printf '%s count=' "$key"
+  grep -c "^${key}=" .env
+done
 ```
 
-### 3. 이미지 빌드 및 Push
+각 항목은 정확히 `count=1`이어야 한다. Supabase secret key와 JWT 원문은 터미널 로그, GitHub, 저장소에 남기지 않는다.
+
+## 자동 배포 흐름
+
+`main` push 또는 수동 workflow 실행 시 다음 순서로 진행한다.
+
+1. 테스트, TypeScript 컴파일, property-building writer guard를 실행한다.
+2. Git SHA 태그로 이미지를 빌드하고 GHCR에 push한다.
+3. push 결과의 digest 형식을 검증한다.
+4. EC2 접속 비밀과 EC2 `.env` 소유자·권한·필수 항목을 검사한다.
+5. `repo@sha256:digest` 형식으로 정확한 이미지를 pull한다.
+6. 후보 컨테이너를 `127.0.0.1:13100`에 띄워 SHA, build time, image tag를 검증한다.
+7. 후보가 통과한 경우에만 기존 `3100` 컨테이너를 rollback 이름으로 보존하고 새 컨테이너로 교체한다.
+8. 최종 `3100` health 검증에 실패하면 직전 컨테이너를 복구한다.
+
+## 상태 확인과 롤백
+
+배포 상태 확인:
 
 ```bash
-# 스크립트 사용
-./scripts/build-and-push.sh latest
-
-# 또는 수동 실행
-docker build -t alimtalk-proxy .
-docker tag alimtalk-proxy $DOCKER_USERNAME/alimtalk-proxy:latest
-docker push $DOCKER_USERNAME/alimtalk-proxy:latest
+docker ps --filter name=alimtalk-proxy
+curl -fsS http://127.0.0.1:3100/health
 ```
 
-### 4. EC2에서 배포
+배포 성공 후 rollback 컨테이너 확인:
 
 ```bash
-# EC2 서버에 SSH 접속
-ssh ec2-user@your-ec2-ip
-
-# 환경 변수 설정
-export DOCKER_USERNAME="your-dockerhub-username"
-
-# 배포 스크립트 실행
-./scripts/deploy-to-ec2.sh latest
-
-# 또는 수동 실행
-docker pull $DOCKER_USERNAME/alimtalk-proxy:latest
-docker stop alimtalk-proxy 2>/dev/null || true
-docker rm alimtalk-proxy 2>/dev/null || true
-docker run -d \
-  --name alimtalk-proxy \
-  --restart unless-stopped \
-  -p 3100:3100 \
-  --env-file .env \
-  -v $(pwd)/logs:/app/logs \
-  $DOCKER_USERNAME/alimtalk-proxy:latest
+docker ps -a --filter name=alimtalk-proxy-rollback
 ```
 
-## 방법 2: GitHub Actions 자동 배포
-
-### 1. GitHub Secrets 설정
-
-Repository Settings > Secrets and variables > Actions에서 다음 설정:
-
-- `DOCKER_USERNAME`: Docker Hub 사용자명
-- `DOCKER_PASSWORD`: Docker Hub 비밀번호 또는 Access Token
-- `EC2_HOST`: EC2 퍼블릭 IP
-- `EC2_SSH_KEY`: EC2 SSH 프라이빗 키 (PEM 파일 내용)
-
-### 2. GitHub Actions 워크플로우
-
-`.github/workflows/docker-build.yml`:
-
-```yaml
-name: Docker Build and Deploy
-
-on:
-  push:
-    branches: [main]
-  workflow_dispatch:
-
-jobs:
-  build-and-push:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Build and Push
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: |
-            ${{ secrets.DOCKER_USERNAME }}/alimtalk-proxy:latest
-            ${{ secrets.DOCKER_USERNAME }}/alimtalk-proxy:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-  deploy:
-    needs: build-and-push
-    runs-on: ubuntu-latest
-    steps:
-      - name: Deploy to EC2
-        uses: appleboy/ssh-action@master
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ec2-user
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            cd ~/alimtalk-proxy
-            docker pull ${{ secrets.DOCKER_USERNAME }}/alimtalk-proxy:latest
-            docker stop alimtalk-proxy || true
-            docker rm alimtalk-proxy || true
-            docker run -d \
-              --name alimtalk-proxy \
-              --restart unless-stopped \
-              -p 3100:3100 \
-              --env-file .env \
-              -v $(pwd)/logs:/app/logs \
-              --memory=800m \
-              ${{ secrets.DOCKER_USERNAME }}/alimtalk-proxy:latest
-```
-
-## 방법 3: AWS ECR 사용
-
-### 1. ECR 리포지토리 생성
+자동 rollback이 실패한 비상 상황에서만 다음을 실행한다.
 
 ```bash
-# AWS CLI로 생성
-aws ecr create-repository --repository-name alimtalk-proxy --region ap-northeast-2
+docker rm -f alimtalk-proxy
+docker rename alimtalk-proxy-rollback alimtalk-proxy
+docker start alimtalk-proxy
+curl -fsS http://127.0.0.1:3100/health
 ```
 
-### 2. ECR 로그인 및 Push
+비상 롤백 전에는 실행 중인 컨테이너와 rollback 컨테이너의 존재를 먼저 확인한다.
 
-```bash
-# ECR 로그인
-aws ecr get-login-password --region ap-northeast-2 | docker login --username AWS --password-stdin 123456789.dkr.ecr.ap-northeast-2.amazonaws.com
+## 주의사항
 
-# 이미지 빌드 및 Push
-docker build -t alimtalk-proxy .
-docker tag alimtalk-proxy:latest 123456789.dkr.ecr.ap-northeast-2.amazonaws.com/alimtalk-proxy:latest
-docker push 123456789.dkr.ecr.ap-northeast-2.amazonaws.com/alimtalk-proxy:latest
-```
-
-### 3. EC2에서 Pull
-
-```bash
-# EC2에서 ECR 로그인
-aws ecr get-login-password --region ap-northeast-2 | docker login --username AWS --password-stdin 123456789.dkr.ecr.ap-northeast-2.amazonaws.com
-
-# 이미지 Pull
-docker pull 123456789.dkr.ecr.ap-northeast-2.amazonaws.com/alimtalk-proxy:latest
-```
-
-## Docker 이미지 최적화
-
-### .dockerignore 확인
-
-이미지 크기를 줄이기 위해 `.dockerignore`에 다음 항목이 포함되어야 합니다:
-
-```
-node_modules
-.git
-.env
-dist
-logs
-*.log
-```
-
-### 멀티 스테이지 빌드
-
-Dockerfile은 멀티 스테이지 빌드를 사용합니다:
-
-1. **builder 스테이지**: npm install, TypeScript 빌드
-2. **production 스테이지**: 빌드 결과물만 복사, 최소 런타임
-
-이를 통해 최종 이미지 크기를 최소화합니다.
-
-## 트러블슈팅
-
-### 이미지 빌드 실패 (로컬)
-
-```bash
-# Docker 캐시 정리
-docker system prune -a
-
-# 캐시 없이 빌드
-docker build --no-cache -t alimtalk-proxy .
-```
-
-### Push 실패
-
-```bash
-# Docker 재로그인
-docker logout
-docker login
-```
-
-### EC2에서 Pull 실패
-
-```bash
-# 디스크 공간 확인
-df -h
-
-# 오래된 이미지 정리
-docker image prune -a
-
-# Docker 재시작
-sudo systemctl restart docker
-```
-
-### 컨테이너 메모리 부족
-
-```bash
-# Swap 확인
-free -h
-
-# Swap이 없으면 설정
-sudo ./scripts/setup-swap.sh
-
-# 컨테이너 메모리 제한 조정
-docker run -d \
-  --memory=800m \
-  --memory-swap=1600m \
-  ...
-```
-
-## 버전 관리
-
-### 태그 전략
-
-- `latest`: 최신 안정 버전
-- `v1.0.0`: 시맨틱 버전
-- `sha-abc123`: Git 커밋 해시
-
-### 롤백
-
-```bash
-# 이전 버전으로 롤백
-docker pull $DOCKER_USERNAME/alimtalk-proxy:v1.0.0
-docker stop alimtalk-proxy
-docker rm alimtalk-proxy
-docker run -d \
-  --name alimtalk-proxy \
-  --restart unless-stopped \
-  -p 3100:3100 \
-  --env-file .env \
-  $DOCKER_USERNAME/alimtalk-proxy:v1.0.0
-```
-
+- `.env`를 수정해도 실행 중인 컨테이너에는 반영되지 않는다. `docker restart`도 환경변수를 다시 읽지 않으므로 새 컨테이너 배포가 필요하다.
+- Vercel 환경변수도 새 배포부터 적용된다. 공유 JWT를 교체한 경우 API와 `johapon-dev`를 연속으로 재배포한다.
+- 공개 HTTP `3100`은 HTTPS 전환 전 합성 개발 GIS 검증에만 제한한다. 운영 bearer token 검증에 사용하지 않는다.
+- `.env` 원문은 저장소나 GitHub Actions artifact에 백업하지 않는다. 별도의 암호화 백업 절차를 사용한다.
