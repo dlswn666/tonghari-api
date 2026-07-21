@@ -22,8 +22,13 @@ import {
 import { createLogger } from '../utils/logger';
 import { persistSyncJobOrThrow } from './sync-job-admission';
 import {
+    appendBuildingOperationInputPnuOrThrow,
+    BuildingOperationIdentity,
+    BuildingOperationInputFailureFinalizationError,
     persistBuildingQueueAdmissionOrThrow,
+    persistBuildingOperationInputFailureOrThrow,
     persistBuildingWriteOperation,
+    persistBuildingWriteOperationInputPnu,
 } from './building-operation-admission';
 import { finalizeDeferredQueueAdmissions } from './deferred-queue-admission';
 
@@ -299,7 +304,7 @@ class GisQueueService {
             createdAt: new Date(),
         };
 
-        await persistBuildingQueueAdmissionOrThrow({
+        const operationIdentity = await persistBuildingQueueAdmissionOrThrow({
             databaseTarget: request.databaseTarget,
             unionId: request.unionId,
             jobId,
@@ -316,6 +321,10 @@ class GisQueueService {
                     actorUserId: request.actorUserId,
                     source: 'GIS_MAP',
                     totalCount: request.addresses.length,
+                    parcelSuccessCount: 0,
+                    buildingObservationCount: 0,
+                    buildingSaveSuccessCount: 0,
+                    buildingSaveFailedCount: 0,
                 },
             }).select('id, union_id').single(),
             persistOperation: (args) => persistBuildingWriteOperation(database.getClient(), args),
@@ -327,19 +336,31 @@ class GisQueueService {
 
         this.queue
             .add(async () => {
-                await this.processSyncJob(jobId, request);
+                await this.processSyncJob(jobId, request, operationIdentity);
             })
-            .catch((err) => {
+            .catch(async (err) => {
                 logger.error(`GIS job ${jobId} fatal error`, err);
                 this.updateJobStatus(jobId, request.databaseTarget, { status: 'failed', error: err.message });
                 // 실패 상태 DB 업데이트
-                database.updateSyncJobStatus(jobId, 'FAILED', 0, err.message);
+                const durableFailed = await database.updateSyncJobStatus(
+                    jobId,
+                    'FAILED',
+                    0,
+                    err.message
+                );
+                if (!durableFailed) {
+                    logger.error(`GIS job ${jobId} fatal FAILED 상태 저장 실패`);
+                }
             });
 
         return jobInfo;
     }
 
-    private async processSyncJob(jobId: string, request: GisSyncRequest) {
+    private async processSyncJob(
+        jobId: string,
+        request: GisSyncRequest,
+        operationIdentity: BuildingOperationIdentity | null
+    ) {
         const job = this.jobs.get(this.jobKey(request.databaseTarget, jobId));
         if (!job) return;
         const database = getSupabaseService(request.databaseTarget);
@@ -350,6 +371,9 @@ class GisQueueService {
         const failedAddresses: FailedAddress[] = [];
         const successfulPnus: string[] = [];
         let successCount = 0;
+        let buildingObservationCount = 0;
+        let buildingSaveSuccessCount = 0;
+        let buildingSaveFailedCount = 0;
 
         for (let i = 0; i < request.addresses.length; i++) {
             const address = request.addresses[i];
@@ -381,6 +405,63 @@ class GisQueueService {
                         index: currentIndex,
                     });
                     continue;
+                }
+
+                // Phase A input provenance는 PNU 해소 직후, 외부 관측 및 모든 land/building
+                // mutation보다 먼저 영속화한다. production legacy target은 identity가 null이라
+                // RPC를 호출하지 않는다.
+                // TODO(A1b/W3): 현재 legacy boolean writer로는 진실한 terminal 결과를 보장할 수
+                // 없으므로 W1 command begin/result는 canonical writer 계약 전까지 기록하지 않는다.
+                try {
+                    await appendBuildingOperationInputPnuOrThrow({
+                        operationIdentity,
+                        unionId: request.unionId,
+                        jobId,
+                        pnu,
+                        explicitInput: `address:${address}`,
+                        persistInput: (args) =>
+                            persistBuildingWriteOperationInputPnu(database.getClient(), args),
+                    });
+                } catch (inputError: any) {
+                    const reason = inputError instanceof Error
+                        ? inputError.message
+                        : 'building operation input PNU 저장 실패';
+                    failedAddresses.push({ address, reason, index: currentIndex });
+                    job.processedCount = currentIndex;
+                    const progress = Math.round((job.processedCount / job.totalCount) * 100);
+                    const previewData = {
+                        successCount,
+                        parcelSuccessCount: successCount,
+                        failedCount: failedAddresses.length,
+                        totalCount: job.totalCount,
+                        buildingObservationCount,
+                        buildingSaveSuccessCount,
+                        buildingSaveFailedCount,
+                        successfulPnus: successfulPnus.slice(0, 50),
+                    };
+
+                    this.updateJobStatus(jobId, request.databaseTarget, {
+                        status: 'failed',
+                        error: reason,
+                        completedAt: new Date(),
+                    });
+                    await persistBuildingOperationInputFailureOrThrow({
+                        jobId,
+                        pnu,
+                        persistFailed: () => database.updateSyncJobStatus(
+                            jobId,
+                            'FAILED',
+                            progress,
+                            reason,
+                            previewData
+                        ),
+                    });
+
+                    logger.error(
+                        `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) operation input PNU fail-closed: ${pnu}`,
+                        inputError
+                    );
+                    return;
                 }
 
                 // Step 2.5 (NEW): 필지 경계(Polygon) 데이터 조회
@@ -475,6 +556,7 @@ class GisQueueService {
                 try {
                     buildingInfo = await gisService.getBuildingInfo(pnu);
                     if (buildingInfo && buildingInfo.buildingType !== 'NONE') {
+                        buildingObservationCount++;
                         logger.debug(
                             `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Building info found: ${pnu} (type: ${buildingInfo.buildingType}, units: ${buildingInfo.units.length})`
                         );
@@ -647,15 +729,18 @@ class GisQueueService {
                     try {
                         const buildingSaved = await database.saveBuildingWithUnits(pnu, buildingInfo);
                         if (buildingSaved) {
+                            buildingSaveSuccessCount++;
                             logger.debug(
                                 `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Building info saved: ${pnu} (type: ${buildingInfo.buildingType}, units: ${buildingInfo.units.length})`
                             );
                         } else {
+                            buildingSaveFailedCount++;
                             logger.warn(
                                 `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Building info save failed: ${pnu}, continuing...`
                             );
                         }
                     } catch (buildingSaveError: any) {
+                        buildingSaveFailedCount++;
                         logger.warn(
                             `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Building info save error for ${pnu}: ${
                                 buildingSaveError?.message || 'Unknown error'
@@ -686,6 +771,9 @@ class GisQueueService {
                     `[GIS ${jobId}] (${currentIndex}/${job.totalCount}) Successfully saved: ${address} -> ${pnu}`
                 );
             } catch (err: any) {
+                if (err instanceof BuildingOperationInputFailureFinalizationError) {
+                    throw err;
+                }
                 logger.error(`[GIS ${jobId}] Address processing error (${address})`, err);
                 failedAddresses.push({
                     address,
@@ -723,8 +811,12 @@ class GisQueueService {
 
         const previewData = {
             successCount,
+            parcelSuccessCount: successCount,
             failedCount: failedAddresses.length,
             totalCount: job.totalCount,
+            buildingObservationCount,
+            buildingSaveSuccessCount,
+            buildingSaveFailedCount,
             successfulPnus: successfulPnus.slice(0, 50), // 프리뷰용 최대 50개
         };
 
@@ -791,7 +883,7 @@ class GisQueueService {
             status: 'pending',
             createdAt: new Date(),
         };
-        await persistBuildingQueueAdmissionOrThrow({
+        const operationIdentity = await persistBuildingQueueAdmissionOrThrow({
             databaseTarget: request.databaseTarget,
             unionId: request.unionId,
             jobId,
@@ -831,7 +923,12 @@ class GisQueueService {
 
             this.queue
                 .add(async () => {
-                    await this.processApartmentPriceSync(jobId, targets, request.databaseTarget);
+                    await this.processApartmentPriceSync(
+                        jobId,
+                        targets,
+                        request.databaseTarget,
+                        operationIdentity
+                    );
                 })
                 .catch((err) => {
                     logger.error(`Apartment price sync job ${jobId} fatal error`, err);
@@ -854,13 +951,18 @@ class GisQueueService {
     private async processApartmentPriceSync(
         jobId: string,
         targets: ApartmentPriceSyncTarget[],
-        databaseTarget: DatabaseTarget
+        databaseTarget: DatabaseTarget,
+        operationIdentity: BuildingOperationIdentity | null
     ): Promise<void> {
         const job = this.jobs.get(this.jobKey(databaseTarget, jobId));
         if (!job) return;
         const database = getSupabaseService(databaseTarget);
 
-        logger.info(`[APT-PRICE ${jobId}] Apartment price sync started (targets: ${targets.length})`);
+        logger.info(
+            `[APT-PRICE ${jobId}] Apartment price sync started (targets: ${targets.length}, operation: ${operationIdentity?.operationId ?? 'legacy'})`
+        );
+        // TODO(A1b/W3): legacy boolean writer가 거짓 terminal status를 만들 수 있으므로
+        // W1 command begin/result는 canonical writer 계약이 준비되기 전에는 기록하지 않는다.
         this.updateJobStatus(jobId, databaseTarget, { status: 'processing', startedAt: new Date() });
 
         let successPnuCount = 0;
@@ -1019,7 +1121,7 @@ class GisQueueService {
             status: 'pending',
             createdAt: new Date(),
         };
-        await persistBuildingQueueAdmissionOrThrow({
+        const operationIdentity = await persistBuildingQueueAdmissionOrThrow({
             databaseTarget: request.databaseTarget,
             unionId: request.unionId,
             jobId,
@@ -1059,7 +1161,12 @@ class GisQueueService {
 
             this.queue
                 .add(async () => {
-                    await this.processIndividualHousingPriceSync(jobId, targets, request.databaseTarget);
+                    await this.processIndividualHousingPriceSync(
+                        jobId,
+                        targets,
+                        request.databaseTarget,
+                        operationIdentity
+                    );
                 })
                 .catch((err) => {
                     logger.error(`Individual housing price sync job ${jobId} fatal error`, err);
@@ -1082,13 +1189,18 @@ class GisQueueService {
     private async processIndividualHousingPriceSync(
         jobId: string,
         targets: IndividualHousingPriceSyncTarget[],
-        databaseTarget: DatabaseTarget
+        databaseTarget: DatabaseTarget,
+        operationIdentity: BuildingOperationIdentity | null
     ): Promise<void> {
         const job = this.jobs.get(this.jobKey(databaseTarget, jobId));
         if (!job) return;
         const database = getSupabaseService(databaseTarget);
 
-        logger.info(`[INDVD-HOUSE-PRICE ${jobId}] Individual housing price sync started (targets: ${targets.length})`);
+        logger.info(
+            `[INDVD-HOUSE-PRICE ${jobId}] Individual housing price sync started (targets: ${targets.length}, operation: ${operationIdentity?.operationId ?? 'legacy'})`
+        );
+        // TODO(A1b/W3): legacy boolean writer가 거짓 terminal status를 만들 수 있으므로
+        // W1 command begin/result는 canonical writer 계약이 준비되기 전에는 기록하지 않는다.
         this.updateJobStatus(jobId, databaseTarget, { status: 'processing', startedAt: new Date() });
 
         let successPnuCount = 0;

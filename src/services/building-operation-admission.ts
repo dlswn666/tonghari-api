@@ -18,11 +18,39 @@ interface OperationRpcResult {
     error: OperationRpcError | null;
 }
 
+export interface BuildingOperationInputRpcArguments {
+    p_operation_id: string;
+    p_union_id: string;
+    p_pnu: string;
+    p_input_token_hash: string;
+    p_normalized_input: string;
+    p_resolution_evidence: {
+        input_token_hash: string;
+        pnu: string;
+        normalized_input: string;
+    };
+}
+
+export interface BuildingOperationInputIdentity {
+    status: 'CREATED' | 'REUSED';
+    operationId: string;
+    pnu: string;
+    inputTokenHash: string;
+    resolutionEvidenceHash: string;
+}
+
 export async function persistBuildingWriteOperation(
     client: SupabaseClient,
     args: BuildingOperationRpcArguments
 ): Promise<OperationRpcResult> {
     return client.rpc('create_building_write_operation', args);
+}
+
+export async function persistBuildingWriteOperationInputPnu(
+    client: SupabaseClient,
+    args: BuildingOperationInputRpcArguments
+): Promise<OperationRpcResult> {
+    return client.rpc('append_building_write_operation_input_pnu', args);
 }
 
 export interface BuildingOperationIdentity {
@@ -66,12 +94,49 @@ export class BuildingOperationPersistenceError extends Error {
     }
 }
 
+export class BuildingOperationInputPersistenceError extends Error {
+    readonly code = 'BUILDING_OPERATION_INPUT_PERSIST_FAILED';
+    readonly jobId: string;
+    readonly pnu: string;
+
+    constructor(jobId: string, pnu: string, cause: OperationRpcError) {
+        super(`building operation input PNU 저장 실패 (${jobId}/${pnu}): ${cause.message}`);
+        this.name = 'BuildingOperationInputPersistenceError';
+        this.jobId = jobId;
+        this.pnu = pnu;
+    }
+}
+
+export class BuildingOperationInputFailureFinalizationError extends Error {
+    readonly code = 'BUILDING_OPERATION_INPUT_FAILURE_FINALIZE_FAILED';
+    readonly jobId: string;
+    readonly pnu: string;
+
+    constructor(jobId: string, pnu: string) {
+        super(`building operation input 실패 상태 저장 실패 (${jobId}/${pnu})`);
+        this.name = 'BuildingOperationInputFailureFinalizationError';
+        this.jobId = jobId;
+        this.pnu = pnu;
+    }
+}
+
 function sha256(value: string): string {
     return createHash('sha256').update(value).digest('hex');
 }
 
-function canonicalInput(value: string): string {
+export function canonicalBuildingOperationInput(value: string): string {
     return value.normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+export function buildBuildingOperationInputToken(value: string): {
+    normalizedInput: string;
+    inputTokenHash: string;
+} {
+    const normalizedInput = canonicalBuildingOperationInput(value);
+    return {
+        normalizedInput,
+        inputTokenHash: sha256(normalizedInput),
+    };
 }
 
 export function buildBuildingOperationRpcArguments(input: {
@@ -85,7 +150,7 @@ export function buildBuildingOperationRpcArguments(input: {
 }): BuildingOperationRpcArguments {
     const explicitInputTokens = Array.from(new Set(
         input.explicitInputs
-            .map(canonicalInput)
+            .map(canonicalBuildingOperationInput)
             .filter(Boolean)
             .map((value) => sha256(value))
     )).sort();
@@ -110,7 +175,7 @@ export function buildBuildingOperationRpcArguments(input: {
         p_operation_kind: input.operationKind,
         p_execution_mode: input.executionMode ?? 'STANDARD',
         p_source_deployment_version: deploymentVersion,
-        p_writer_contract_version: 'building-writer-v1',
+        p_writer_contract_version: 'legacy-v1',
         p_source_fingerprint: sourceFingerprint,
         p_explicit_input_tokens: explicitInputTokens,
         p_source_release_sha: sourceReleaseSha,
@@ -118,6 +183,140 @@ export function buildBuildingOperationRpcArguments(input: {
         p_idempotency_key: null,
         p_actor_user_id: null,
     };
+}
+
+export function buildBuildingOperationInputPnuRpcArguments(input: {
+    operationIdentity: BuildingOperationIdentity;
+    unionId: string;
+    pnu: string;
+    explicitInput: string;
+}): BuildingOperationInputRpcArguments {
+    const { normalizedInput, inputTokenHash } = buildBuildingOperationInputToken(
+        input.explicitInput
+    );
+    const resolutionEvidence = {
+        input_token_hash: inputTokenHash,
+        pnu: input.pnu,
+        normalized_input: normalizedInput,
+    };
+
+    return {
+        p_operation_id: input.operationIdentity.operationId,
+        p_union_id: input.unionId,
+        p_pnu: input.pnu,
+        p_input_token_hash: inputTokenHash,
+        p_normalized_input: normalizedInput,
+        p_resolution_evidence: resolutionEvidence,
+    };
+}
+
+function normalizeOperationInputIdentity(
+    jobId: string,
+    pnu: string,
+    result: OperationRpcResult
+): BuildingOperationInputIdentity {
+    if (result.error) {
+        throw new BuildingOperationInputPersistenceError(jobId, pnu, result.error);
+    }
+
+    const value = result.data;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        throw new BuildingOperationInputPersistenceError(jobId, pnu, {
+            message: 'operation input RPC 응답이 object가 아닙니다.',
+        });
+    }
+    const row = value as Record<string, unknown>;
+    if (
+        (row.status !== 'CREATED' && row.status !== 'REUSED')
+        || typeof row.operation_id !== 'string'
+        || row.pnu !== pnu
+        || typeof row.input_token_hash !== 'string'
+        || !/^[0-9a-f]{64}$/.test(row.input_token_hash)
+        || typeof row.resolution_evidence_hash !== 'string'
+        || !/^[0-9a-f]{64}$/.test(row.resolution_evidence_hash)
+    ) {
+        throw new BuildingOperationInputPersistenceError(jobId, pnu, {
+            message: 'operation input RPC 응답 identity가 잘못되었습니다.',
+        });
+    }
+
+    return {
+        status: row.status,
+        operationId: row.operation_id,
+        pnu,
+        inputTokenHash: row.input_token_hash,
+        resolutionEvidenceHash: row.resolution_evidence_hash,
+    };
+}
+
+/**
+ * Phase A에서 명시 입력이 PNU로 해소된 직후 호출한다.
+ * operation identity가 null인 production legacy target은 RPC를 호출하지 않는다.
+ */
+export async function appendBuildingOperationInputPnuOrThrow(input: {
+    operationIdentity: BuildingOperationIdentity | null;
+    unionId: string;
+    jobId: string;
+    pnu: string;
+    explicitInput: string;
+    persistInput: (args: BuildingOperationInputRpcArguments) => PromiseLike<OperationRpcResult>;
+}): Promise<BuildingOperationInputIdentity | null> {
+    if (!input.operationIdentity) return null;
+
+    const args = buildBuildingOperationInputPnuRpcArguments({
+        operationIdentity: input.operationIdentity,
+        unionId: input.unionId,
+        pnu: input.pnu,
+        explicitInput: input.explicitInput,
+    });
+
+    try {
+        const identity = normalizeOperationInputIdentity(
+            input.jobId,
+            input.pnu,
+            await input.persistInput(args)
+        );
+        if (
+            identity.operationId !== input.operationIdentity.operationId
+            || identity.inputTokenHash !== args.p_input_token_hash
+        ) {
+            throw new BuildingOperationInputPersistenceError(input.jobId, input.pnu, {
+                message: 'operation input RPC 응답이 요청 identity와 일치하지 않습니다.',
+            });
+        }
+        return identity;
+    } catch (error) {
+        if (error instanceof BuildingOperationInputPersistenceError) throw error;
+        throw new BuildingOperationInputPersistenceError(input.jobId, input.pnu, {
+            message: error instanceof Error ? error.message : '알 수 없는 operation input 오류',
+        });
+    }
+}
+
+/**
+ * input provenance 실패 뒤 sync_jobs를 FAILED로 고정한다. 모든 시도가 실패하면
+ * worker가 일반 주소 오류로 삼키지 않도록 별도 fatal 오류를 반환한다.
+ */
+export async function persistBuildingOperationInputFailureOrThrow(input: {
+    jobId: string;
+    pnu: string;
+    persistFailed: () => PromiseLike<boolean>;
+    maxAttempts?: number;
+}): Promise<void> {
+    const maxAttempts = input.maxAttempts ?? 3;
+    if (!Number.isInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 5) {
+        throw new RangeError('maxAttempts는 1~5 정수여야 합니다.');
+    }
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            if (await input.persistFailed()) return;
+        } catch {
+            // 다음 bounded attempt에서 다시 시도한다.
+        }
+    }
+
+    throw new BuildingOperationInputFailureFinalizationError(input.jobId, input.pnu);
 }
 
 export function buildingOperationEnabledForTarget(

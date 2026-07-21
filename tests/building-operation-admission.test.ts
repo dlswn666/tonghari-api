@@ -2,8 +2,13 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
     BuildingOperationCapabilityError,
+    BuildingOperationInputFailureFinalizationError,
+    BuildingOperationInputPersistenceError,
     BuildingOperationPersistenceError,
+    appendBuildingOperationInputPnuOrThrow,
+    buildBuildingOperationInputPnuRpcArguments,
     buildBuildingOperationRpcArguments,
+    persistBuildingOperationInputFailureOrThrow,
     persistBuildingQueueAdmissionOrThrow,
 } from '../src/services/building-operation-admission';
 import { finalizeDeferredQueueAdmissions } from '../src/services/deferred-queue-admission';
@@ -11,6 +16,13 @@ import { finalizeDeferredQueueAdmissions } from '../src/services/deferred-queue-
 const unionId = '00000000-0000-4000-a000-000000000001';
 const jobId = '00000000-0000-4000-b000-000000000001';
 const operationId = '00000000-0000-4000-c000-000000000001';
+const pnu = '1130510100107450001';
+const operationIdentity = {
+    status: 'CREATED' as const,
+    operationId,
+    operationEpoch: 12,
+    requestHash: 'a'.repeat(64),
+};
 
 function persistedSyncJob() {
     return Promise.resolve({ data: { id: jobId, union_id: unionId }, error: null });
@@ -36,7 +48,142 @@ test('operation manifest는 입력 순서와 공백 차이에도 같은 canonica
 
     assert.deepEqual(first.p_explicit_input_tokens, second.p_explicit_input_tokens);
     assert.equal(first.p_source_fingerprint, second.p_source_fingerprint);
+    assert.equal(first.p_writer_contract_version, 'legacy-v1');
     assert.match(first.p_source_fingerprint, /^[0-9a-f]{64}$/);
+});
+
+test('PNU provenance는 root manifest와 같은 canonical input token 및 exact evidence를 만든다', () => {
+    const explicitInput = ' address:서울  강북구 미아동 745-1 ';
+    const root = buildBuildingOperationRpcArguments({
+        unionId,
+        jobId,
+        operationKind: 'GIS_SYNC',
+        explicitInputs: [explicitInput],
+        sourceDeploymentVersion: 'test',
+        sourceReleaseSha: null,
+    });
+    const input = buildBuildingOperationInputPnuRpcArguments({
+        operationIdentity,
+        unionId,
+        pnu,
+        explicitInput,
+    });
+
+    assert.equal(input.p_input_token_hash, root.p_explicit_input_tokens[0]);
+    assert.equal(input.p_normalized_input, 'address:서울 강북구 미아동 745-1');
+    assert.deepEqual(input.p_resolution_evidence, {
+        input_token_hash: input.p_input_token_hash,
+        pnu,
+        normalized_input: input.p_normalized_input,
+    });
+});
+
+test('production legacy operation identity가 없으면 input PNU RPC를 호출하지 않는다', async () => {
+    let calls = 0;
+    const result = await appendBuildingOperationInputPnuOrThrow({
+        operationIdentity: null,
+        unionId,
+        jobId,
+        pnu,
+        explicitInput: 'address:서울 강북구 미아동 745-1',
+        persistInput: async () => {
+            calls++;
+            return { data: null, error: null };
+        },
+    });
+
+    assert.equal(result, null);
+    assert.equal(calls, 0);
+});
+
+test('development operation identity는 input PNU identity까지 검증해 worker에 반환한다', async () => {
+    const result = await appendBuildingOperationInputPnuOrThrow({
+        operationIdentity,
+        unionId,
+        jobId,
+        pnu,
+        explicitInput: 'address:서울 강북구 미아동 745-1',
+        persistInput: async (args) => ({
+            data: {
+                status: 'CREATED',
+                operation_id: args.p_operation_id,
+                pnu: args.p_pnu,
+                input_token_hash: args.p_input_token_hash,
+                resolution_evidence_hash: 'b'.repeat(64),
+            },
+            error: null,
+        }),
+    });
+
+    assert.equal(result?.operationId, operationId);
+    assert.equal(result?.pnu, pnu);
+    assert.match(result?.inputTokenHash ?? '', /^[0-9a-f]{64}$/);
+});
+
+test('input PNU RPC 실패와 응답 identity mismatch는 fail-closed 오류로 변환한다', async () => {
+    await assert.rejects(
+        appendBuildingOperationInputPnuOrThrow({
+            operationIdentity,
+            unionId,
+            jobId,
+            pnu,
+            explicitInput: 'address:서울 강북구 미아동 745-1',
+            persistInput: async () => ({
+                data: null,
+                error: { message: 'append failed', code: 'P0001' },
+            }),
+        }),
+        BuildingOperationInputPersistenceError
+    );
+
+    await assert.rejects(
+        appendBuildingOperationInputPnuOrThrow({
+            operationIdentity,
+            unionId,
+            jobId,
+            pnu,
+            explicitInput: 'address:서울 강북구 미아동 745-1',
+            persistInput: async (args) => ({
+                data: {
+                    status: 'REUSED',
+                    operation_id: '00000000-0000-4000-c000-000000000099',
+                    pnu: args.p_pnu,
+                    input_token_hash: args.p_input_token_hash,
+                    resolution_evidence_hash: 'c'.repeat(64),
+                },
+                error: null,
+            }),
+        }),
+        BuildingOperationInputPersistenceError
+    );
+});
+
+test('input PNU 실패 상태는 bounded retry로 durable FAILED를 저장한다', async () => {
+    let calls = 0;
+    await persistBuildingOperationInputFailureOrThrow({
+        jobId,
+        pnu,
+        persistFailed: async () => ++calls === 3,
+    });
+
+    assert.equal(calls, 3);
+});
+
+test('input PNU FAILED 저장이 끝까지 실패하면 worker용 fatal 오류를 반환한다', async () => {
+    let calls = 0;
+    await assert.rejects(
+        persistBuildingOperationInputFailureOrThrow({
+            jobId,
+            pnu,
+            persistFailed: async () => {
+                calls++;
+                return false;
+            },
+        }),
+        BuildingOperationInputFailureFinalizationError
+    );
+
+    assert.equal(calls, 3);
 });
 
 test('development capability가 없으면 sync_jobs 저장 전 차단한다', async () => {
