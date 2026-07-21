@@ -4,6 +4,22 @@ import test from 'node:test';
 
 const sourcePath = new URL('../src/services/gis.queue.service.ts', import.meta.url);
 
+test('root operation admission이 끝나기 전에는 GIS jobs map과 queue를 열지 않는다', async () => {
+    const source = await readFile(sourcePath, 'utf8');
+    const producerStart = source.indexOf('async addSyncJob(request: GisSyncRequest)');
+    const durableAdmission = source.indexOf(
+        'await persistBuildingQueueAdmissionOrThrow({',
+        producerStart
+    );
+    const memoryAdmission = source.indexOf('this.jobs.set(', durableAdmission);
+    const queueAdmission = source.indexOf('this.queue', memoryAdmission);
+
+    assert.ok(producerStart >= 0);
+    assert.ok(durableAdmission > producerStart);
+    assert.ok(memoryAdmission > durableAdmission);
+    assert.ok(queueAdmission > memoryAdmission);
+});
+
 test('GIS worker는 PNU 해소 직후 mutation 전에 operation input provenance를 기록한다', async () => {
     const source = await readFile(sourcePath, 'utf8');
     const pnuResolved = source.indexOf('const { pnu, x, y } = geocodeData;');

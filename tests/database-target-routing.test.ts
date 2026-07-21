@@ -347,6 +347,19 @@ test('배포 workflow는 GHCR digest와 EC2 env 단일 원본으로 안전하게
     assert.match(workflow, /env_mode="\$\(stat -c '%a' \.env\)"/);
     assert.match(workflow, /"\$\{env_mode\}" != "600"/);
     assert.match(workflow, /definition_count="\$\(grep -c "\^\$\{variable_name\}=" \.env \|\| true\)"/);
+    assert.match(
+        workflow,
+        /operation_target_count="\$\(grep -c '\^BUILDING_WRITE_OPERATION_TARGETS=' \.env \|\| true\)"/
+    );
+    assert.match(workflow, /"\$\{operation_target_count\}" != "1"/);
+    assert.match(workflow, /grep -qx 'BUILDING_WRITE_OPERATION_TARGETS=development' \.env/);
+    const operationTargetGuard = workflow.indexOf('operation_target_count="$(');
+    const candidateStart = workflow.indexOf('docker run -d \\\n              --name "${CANDIDATE_CONTAINER}"');
+    const productionReplacement = workflow.indexOf('docker stop "${CONTAINER_NAME}"');
+    assert.ok(operationTargetGuard >= 0);
+    assert.ok(candidateStart > operationTargetGuard);
+    assert.ok(productionReplacement > operationTargetGuard);
+    assert.doesNotMatch(workflow, /echo[^\n]*\$\{operation_target_(?:line|value)\}/);
     assert.match(workflow, /-p 127\.0\.0\.1:13100:3100/);
     assert.match(workflow, /Previous container preserved as \$\{ROLLBACK_CONTAINER\} for rollback/);
     assert.match(workflow, /ROLLBACK_FAILED: restored container health check failed/);

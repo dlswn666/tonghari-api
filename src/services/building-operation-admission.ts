@@ -94,6 +94,31 @@ export class BuildingOperationPersistenceError extends Error {
     }
 }
 
+export class BuildingOperationAdmissionFinalizationError extends Error {
+    readonly code = 'BUILDING_OPERATION_ADMISSION_FINALIZE_FAILED';
+    readonly jobId: string;
+    readonly admissionFailure: BuildingOperationPersistenceError;
+    readonly finalizationCause: unknown;
+
+    constructor(
+        jobId: string,
+        admissionFailure: BuildingOperationPersistenceError,
+        finalizationCause: unknown
+    ) {
+        const finalizationMessage = finalizationCause instanceof Error
+            ? finalizationCause.message
+            : String(finalizationCause ?? '알 수 없는 FAILED 종결 오류');
+        super(
+            `${admissionFailure.message}; sync_jobs FAILED 종결 실패 (${jobId}): ${finalizationMessage}`,
+            { cause: admissionFailure }
+        );
+        this.name = 'BuildingOperationAdmissionFinalizationError';
+        this.jobId = jobId;
+        this.admissionFailure = admissionFailure;
+        this.finalizationCause = finalizationCause;
+    }
+}
+
 export class BuildingOperationInputPersistenceError extends Error {
     readonly code = 'BUILDING_OPERATION_INPUT_PERSIST_FAILED';
     readonly jobId: string;
@@ -361,6 +386,33 @@ function normalizeOperationIdentity(jobId: string, result: OperationRpcResult): 
     };
 }
 
+async function finalizeBuildingOperationAdmissionFailureOrThrow(input: {
+    jobId: string;
+    failure: BuildingOperationPersistenceError;
+    markSyncJobFailed: (message: string) => PromiseLike<boolean>;
+}): Promise<void> {
+    let finalizationCause: unknown = new Error(
+        'updateSyncJobStatus가 false를 반환했습니다.'
+    );
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+            if (await input.markSyncJobFailed(input.failure.message) === true) return;
+            finalizationCause = new Error(
+                'updateSyncJobStatus가 false를 반환했습니다.'
+            );
+        } catch (error) {
+            finalizationCause = error;
+        }
+    }
+
+    throw new BuildingOperationAdmissionFinalizationError(
+        input.jobId,
+        input.failure,
+        finalizationCause
+    );
+}
+
 /**
  * DB target capability 확인 → sync_jobs → root operation 순서가 끝난 뒤에만
  * 호출자가 memory jobs map/queue admission을 수행할 수 있다.
@@ -378,7 +430,7 @@ export async function persistBuildingQueueAdmissionOrThrow(input: {
         error: { message: string; code?: string } | null;
     }>;
     persistOperation: (args: BuildingOperationRpcArguments) => PromiseLike<OperationRpcResult>;
-    markSyncJobFailed?: (message: string) => PromiseLike<unknown>;
+    markSyncJobFailed: (message: string) => PromiseLike<boolean>;
 }): Promise<BuildingOperationIdentity | null> {
     const operationEnabled = buildingOperationEnabledForTarget(
         input.databaseTarget,
@@ -388,15 +440,14 @@ export async function persistBuildingQueueAdmissionOrThrow(input: {
     await persistSyncJobOrThrow(input.jobId, input.unionId, input.persistSyncJob);
     if (!operationEnabled) return null;
 
-    const args = buildBuildingOperationRpcArguments({
-        unionId: input.unionId,
-        jobId: input.jobId,
-        operationKind: input.operationKind,
-        explicitInputs: input.explicitInputs,
-        executionMode: input.executionMode,
-    });
-
     try {
+        const args = buildBuildingOperationRpcArguments({
+            unionId: input.unionId,
+            jobId: input.jobId,
+            operationKind: input.operationKind,
+            explicitInputs: input.explicitInputs,
+            executionMode: input.executionMode,
+        });
         return normalizeOperationIdentity(
             input.jobId,
             await input.persistOperation(args)
@@ -407,11 +458,12 @@ export async function persistBuildingQueueAdmissionOrThrow(input: {
             : new BuildingOperationPersistenceError(input.jobId, {
                   message: error instanceof Error ? error.message : '알 수 없는 operation 오류',
               });
-        try {
-            await input.markSyncJobFailed?.(failure.message);
-        } catch {
-            // 원래 operation 실패를 보존한다. durable job 보정 실패는 상위 로그에서 함께 진단한다.
-        }
+
+        await finalizeBuildingOperationAdmissionFailureOrThrow({
+            jobId: input.jobId,
+            failure,
+            markSyncJobFailed: input.markSyncJobFailed,
+        });
         throw failure;
     }
 }
