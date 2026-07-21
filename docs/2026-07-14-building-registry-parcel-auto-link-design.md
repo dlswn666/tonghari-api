@@ -193,7 +193,7 @@ flowchart LR
 
 `building_registry_land_lot_relations`를 신규 생성한다. 건축물대장 API에서 실제로 관측한 기준 PNU 하나, 부속 PNU 하나, 관리번호 하나를 증거 한 행으로 저장한다. API 관측은 stale 수명주기를 가지므로 관리자 판단과 같은 행에 섞지 않는다.
 
-핵심 컬럼은 `id uuid PRIMARY KEY`, `union_id`, `base_pnu`, `attached_pnu`, 필수 `mgm_bldrgst_pk`, `observation_status`, `projection_status`, `projection_reason_code`, `is_active`, 최초·최근 관측 시각, 완전 조회 시각, stale count, 마지막 GIS 작업, 응답 snapshot metadata, `created_at`, `updated_at`이다.
+핵심 컬럼은 `id uuid PRIMARY KEY`, `union_id`, `base_pnu`, `attached_pnu`, 필수 `mgm_bldrgst_pk`, `observation_status`, `projection_status`, `projection_reason_code`, `is_active`, 최초·최근 관측 시각, 완전 조회 시각, stale count, 마지막 GIS 작업, 필수 `last_seen_operation_id`·`last_seen_command_id`, 응답 snapshot metadata, `created_at`, `updated_at`이다. relation이 현재 상태를 마지막으로 갱신한 command를 직접 가리켜야 수동 idempotency 요청과 sync job 모두 동일한 provenance로 추적할 수 있다.
 
 ```text
 UNIQUE (union_id, base_pnu, attached_pnu, mgm_bldrgst_pk)
@@ -203,6 +203,8 @@ CHECK (base_pnu <> attached_pnu)
 FK (base_pnu, union_id) -> land_lots (pnu, union_id)
 FK (attached_pnu, union_id) -> land_lots (pnu, union_id)
 FK (last_seen_sync_job_id, union_id) -> sync_jobs (id, union_id)
+FK (last_seen_command_id, last_seen_operation_id, union_id)
+  -> building_write_operation_commands (id, operation_id, union_id)
 CREATE INDEX building_registry_relations_active_attached_idx
   ON building_registry_land_lot_relations(union_id, attached_pnu) WHERE is_active
 ```
@@ -270,6 +272,8 @@ FK (operation_id, union_id) -> building_write_operations (id, union_id)
 | `created_by_user_id`, `confirmed_at` | 등록한 시스템관리자와 확정 시각 |
 | `revoked_by_user_id`, `revoked_at`, `revocation_reason` | 명시적 해제 감사정보 |
 | `source_sync_job_id`, `last_reverified_at` | 시작 GIS 작업과 마지막 API 재관측 시각 |
+| `created_operation_id`, `created_command_id` | 생성 원인이 된 필수 수동 operation/command |
+| `revoked_operation_id`, `revoked_command_id` | REVOKED 전이 원인이 된 operation/command |
 | `created_at`, `updated_at` | 생성·상태 갱신 시각 |
 
 ```text
@@ -284,11 +288,15 @@ FK (attached_pnu, union_id) -> land_lots (pnu, union_id)
 FK (created_by_user_id) -> users (id)
 FK (revoked_by_user_id) -> users (id)
 FK (source_sync_job_id, union_id) -> sync_jobs (id, union_id) ON DELETE RESTRICT
+FK (created_command_id, created_operation_id, union_id)
+  -> building_write_operation_commands (id, operation_id, union_id) ON DELETE RESTRICT
+FK (revoked_command_id, revoked_operation_id, union_id)
+  -> building_write_operation_commands (id, operation_id, union_id) ON DELETE RESTRICT
 ```
 
 `users.id`는 UUID가 아니라 `varchar`이므로 행위자 컬럼도 그 계약을 따른다. 동일 부속 PNU를 서로 다른 기준 PNU에 동시에 수동 등록할 수 있으므로, RPC는 충돌 조회 전에 기준·부속 PNU 전체를 정렬한 전역 advisory lock을 잡는다. 충돌 입력도 감사 evidence로 보존하되 effective projection에는 사용하지 않는다.
 
-`override_status`, `api_alignment_status`, `projection_status`, `reason_code`에는 문서에 정의한 문자열만 허용하는 `CHECK`를 둔다. `REVOKED`이면 `revoked_by_user_id`, `revoked_at`, `revocation_reason`을 필수로 하고, `ACTIVE`이면 세 revoke 필드를 null로 유지하는 상태 일관성 CHECK도 적용한다.
+`override_status`, `api_alignment_status`, `projection_status`, `reason_code`에는 문서에 정의한 문자열만 허용하는 `CHECK`를 둔다. `REVOKED`이면 `revoked_by_user_id`, `revoked_at`, `revocation_reason`, `revoked_operation_id`, `revoked_command_id`를 모두 필수로 하고, `ACTIVE`이면 이 revoke tuple 전체를 null로 유지하는 상태 일관성 CHECK도 적용한다. 수동 근거가 특정 관리번호를 주장할 수 있도록 nullable `claimed_mgm_bldrgst_pk`를 별도 컬럼으로 두고, JSON evidence 안의 암묵 값으로 cardinality 검증을 우회하지 않는다.
 
 수동 관계의 positive-cache predicate는 `override_status='ACTIVE' AND projection_status IN ('PENDING', 'LINKED')`로 중앙 정의한다. Phase 4 evidence-only에서 생성된 `ACTIVE/PENDING` 관계도 다음 작업의 기준·부속 역조회에는 사용할 수 있지만 building projection 근거로 사용할 때는 현재 rollout flag와 canonical evidence를 다시 검증한다. `REVIEW_REQUIRED`, `CONFLICT`, `STALE_REVIEW`, `REVOKED`는 positive cache에서 제외한다.
 
