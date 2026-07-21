@@ -1398,12 +1398,14 @@ export class SupabaseService {
                 updateData.preview_data = { ...currentPreview, ...previewData };
             }
 
-            const { error, count } = await this.client
+            const { data: updatedJob, error } = await this.client
                 .from('sync_jobs')
                 .update(updateData)
-                .eq('id', jobId);
+                .eq('id', jobId)
+                .select('id')
+                .maybeSingle();
 
-            if (error) {
+            if (error || updatedJob?.id !== jobId) {
                 logger.error(`sync_jobs update failed (${jobId}): ${JSON.stringify(error)}`);
                 return false;
             }

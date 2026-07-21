@@ -193,7 +193,7 @@ flowchart LR
 
 `building_registry_land_lot_relations`를 신규 생성한다. 건축물대장 API에서 실제로 관측한 기준 PNU 하나, 부속 PNU 하나, 관리번호 하나를 증거 한 행으로 저장한다. API 관측은 stale 수명주기를 가지므로 관리자 판단과 같은 행에 섞지 않는다.
 
-핵심 컬럼은 `id uuid PRIMARY KEY`, `union_id`, `base_pnu`, `attached_pnu`, 필수 `mgm_bldrgst_pk`, `observation_status`, `projection_status`, `projection_reason_code`, `is_active`, 최초·최근 관측 시각, 완전 조회 시각, stale count, 마지막 GIS 작업, 응답 snapshot metadata, `created_at`, `updated_at`이다.
+핵심 컬럼은 `id uuid PRIMARY KEY`, `union_id`, `base_pnu`, `attached_pnu`, 필수 `mgm_bldrgst_pk`, `observation_status`, `projection_status`, `projection_reason_code`, `is_active`, 최초·최근 관측 시각, 완전 조회 시각, stale count, 마지막 GIS 작업, 필수 `last_seen_operation_id`·`last_seen_command_id`, 응답 snapshot metadata, `created_at`, `updated_at`이다. relation이 현재 상태를 마지막으로 갱신한 command를 직접 가리켜야 수동 idempotency 요청과 sync job 모두 동일한 provenance로 추적할 수 있다.
 
 ```text
 UNIQUE (union_id, base_pnu, attached_pnu, mgm_bldrgst_pk)
@@ -203,6 +203,8 @@ CHECK (base_pnu <> attached_pnu)
 FK (base_pnu, union_id) -> land_lots (pnu, union_id)
 FK (attached_pnu, union_id) -> land_lots (pnu, union_id)
 FK (last_seen_sync_job_id, union_id) -> sync_jobs (id, union_id)
+FK (last_seen_command_id, last_seen_operation_id, union_id)
+  -> building_write_operation_commands (id, operation_id, union_id)
 CREATE INDEX building_registry_relations_active_attached_idx
   ON building_registry_land_lot_relations(union_id, attached_pnu) WHERE is_active
 ```
@@ -270,6 +272,8 @@ FK (operation_id, union_id) -> building_write_operations (id, union_id)
 | `created_by_user_id`, `confirmed_at` | 등록한 시스템관리자와 확정 시각 |
 | `revoked_by_user_id`, `revoked_at`, `revocation_reason` | 명시적 해제 감사정보 |
 | `source_sync_job_id`, `last_reverified_at` | 시작 GIS 작업과 마지막 API 재관측 시각 |
+| `created_operation_id`, `created_command_id` | 생성 원인이 된 필수 수동 operation/command |
+| `revoked_operation_id`, `revoked_command_id` | REVOKED 전이 원인이 된 operation/command |
 | `created_at`, `updated_at` | 생성·상태 갱신 시각 |
 
 ```text
@@ -284,11 +288,15 @@ FK (attached_pnu, union_id) -> land_lots (pnu, union_id)
 FK (created_by_user_id) -> users (id)
 FK (revoked_by_user_id) -> users (id)
 FK (source_sync_job_id, union_id) -> sync_jobs (id, union_id) ON DELETE RESTRICT
+FK (created_command_id, created_operation_id, union_id)
+  -> building_write_operation_commands (id, operation_id, union_id) ON DELETE RESTRICT
+FK (revoked_command_id, revoked_operation_id, union_id)
+  -> building_write_operation_commands (id, operation_id, union_id) ON DELETE RESTRICT
 ```
 
 `users.id`는 UUID가 아니라 `varchar`이므로 행위자 컬럼도 그 계약을 따른다. 동일 부속 PNU를 서로 다른 기준 PNU에 동시에 수동 등록할 수 있으므로, RPC는 충돌 조회 전에 기준·부속 PNU 전체를 정렬한 전역 advisory lock을 잡는다. 충돌 입력도 감사 evidence로 보존하되 effective projection에는 사용하지 않는다.
 
-`override_status`, `api_alignment_status`, `projection_status`, `reason_code`에는 문서에 정의한 문자열만 허용하는 `CHECK`를 둔다. `REVOKED`이면 `revoked_by_user_id`, `revoked_at`, `revocation_reason`을 필수로 하고, `ACTIVE`이면 세 revoke 필드를 null로 유지하는 상태 일관성 CHECK도 적용한다.
+`override_status`, `api_alignment_status`, `projection_status`, `reason_code`에는 문서에 정의한 문자열만 허용하는 `CHECK`를 둔다. `REVOKED`이면 `revoked_by_user_id`, `revoked_at`, `revocation_reason`, `revoked_operation_id`, `revoked_command_id`를 모두 필수로 하고, `ACTIVE`이면 이 revoke tuple 전체를 null로 유지하는 상태 일관성 CHECK도 적용한다. 수동 근거가 특정 관리번호를 주장할 수 있도록 nullable `claimed_mgm_bldrgst_pk`를 별도 컬럼으로 두고, JSON evidence 안의 암묵 값으로 cardinality 검증을 우회하지 않는다.
 
 수동 관계의 positive-cache predicate는 `override_status='ACTIVE' AND projection_status IN ('PENDING', 'LINKED')`로 중앙 정의한다. Phase 4 evidence-only에서 생성된 `ACTIVE/PENDING` 관계도 다음 작업의 기준·부속 역조회에는 사용할 수 있지만 building projection 근거로 사용할 때는 현재 rollout flag와 canonical evidence를 다시 검증한다. `REVIEW_REQUIRED`, `CONFLICT`, `STALE_REVIEW`, `REVOKED`는 positive cache에서 제외한다.
 
@@ -676,23 +684,24 @@ canary 또는 배포 rollback도 같은 비파괴 quarantine 경계를 사용한
 - 브라우저 Supabase client의 building 패밀리 직접 SELECT/DML을 모두 제거한다. `SYSTEM_ADMIN`, 조합 `ADMIN`, 일반 사용자의 읽기는 Next.js/API 서버 경계를 거친다.
 - 서버 읽기 API는 JWT `auth.uid()` → `user_auth_links` → `users`를 검증하고 `is_blocked IS NOT TRUE`를 확인한다. `SYSTEM_ADMIN`은 요청 목적에 필요한 전역 범위, 조합 `ADMIN`은 `building_land_lots.pnu → land_lots(pnu, union_id)`로 증명된 요청 조합 범위만 읽는다. 최초 릴리스에서 일반 `USER`에게 building 상세 API를 제공하지 않는다.
 - `useBuildingSearch`, `usePnuBuildingMapping`, `useBuildingUnitsUnion`, `useLandLotsInfinite`, `useParcelDetail` 등 기존 hook은 `unionId`가 필수인 scoped server endpoint adapter로 전환한다. 전역 이름 검색은 SYSTEM_ADMIN endpoint에만 둔다.
-- 쓰기·reconcile·conflict resolution RPC 실행은 `service_role`만 허용하고 `PUBLIC`, `anon`, `authenticated` EXECUTE를 회수한다.
+- 쓰기·reconcile·conflict resolution **entrypoint RPC** 실행은 `service_role`만 허용하고 `PUBLIC`, `anon`, `authenticated` EXECUTE를 회수한다. entrypoint가 내부에서 호출하는 helper 함수는 `service_role` 직접 EXECUTE도 회수한다.
 - 수동 보정 요청은 별도 systemAdmin 서버 경계에서 `SYSTEM_ADMIN`, 미차단 상태, 요청 조합 범위를 검증한다. `created_by_user_id`는 클라이언트 입력을 신뢰하지 않고 검증된 서버 세션에서 파생한다.
 - 현재 RLS가 꺼진 `building_external_refs`를 포함해 building 패밀리 전체의 기존 전역 ADMIN policy와 `authenticated USING (true)` SELECT policy를 제거한다.
-- RPC는 `SECURITY INVOKER`, 고정 `search_path=''`, 완전 수식 객체명을 사용한다. 함수 생성 직후 `REVOKE EXECUTE ... FROM PUBLIC, anon, authenticated`와 `GRANT EXECUTE ... TO service_role`을 같은 migration에 둔다.
+- W1~W3P의 operation·relation·observation writer는 W1에서 확정한 sealed 경계를 따른다. 신규 테이블의 `PUBLIC`, `anon`, `authenticated`, `service_role` 직접 권한을 모두 회수하고, entrypoint RPC만 `SECURITY DEFINER`, 고정 `search_path=''`, 완전 수식 객체명으로 만든다. 함수 생성 직후 `REVOKE EXECUTE ... FROM PUBLIC, anon, authenticated`와 entrypoint에 한한 `GRANT EXECUTE ... TO service_role`을 같은 migration에 둔다. 내부 helper는 `service_role`에도 직접 공개하지 않는다.
+- `SECURITY DEFINER` entrypoint는 `union_id`, operation/command 복합 identity, actor/source allowlist, input PNU scope를 함수 내부에서 다시 검증한다. 함수 owner 외 table DML 경로가 없음을 실제 ACL query로 확인하고, 직접 table grant를 RPC 권한의 대체물로 사용하지 않는다.
 - FK와 역조회 인덱스를 함께 생성하고 Supabase Security Advisor와 실제 `anon/authenticated/service_role` ACL query로 검증한다.
 
 역할별 최종 권한은 다음으로 고정한다.
 
 | 객체 | `anon` | `authenticated` | `service_role` |
 | --- | --- | --- | --- |
-| relation/override/unresolved/scan/operation | 없음 | 테이블 직접 접근 없음 | 필요한 SELECT·INSERT·UPDATE |
+| relation/override/unresolved/scan/operation | 없음 | 테이블 직접 접근 없음 | 테이블 직접 접근 없음, sealed RPC만 EXECUTE |
 | projection·unit-link events | 없음 | 테이블 직접 접근 없음 | SELECT·INSERT만 |
 | 기존 `building_*` | 없음 | 테이블 직접 접근 없음 | RPC와 scoped server read에 필요한 권한 |
 | canonical RPC | EXECUTE 없음 | EXECUTE 없음 | EXECUTE 허용 |
 | scoped server API | 서버를 통해 역할별 제공 | 서버를 통해 역할별 제공 | 내부 호출 |
 
-`service_role`은 RLS를 우회하므로 서버의 조합 scope 검증과 writer allowlist가 실질적인 보안 경계다. `SECURITY INVOKER` RPC도 service role의 직접 DML을 물리적으로 막지는 못하므로 두 저장소의 직접 DML 0건을 CI manifest로 강제한다. 전용 non-login writer role을 도입하기 전에는 canonical RPC adapter 외 service-role building DML을 배포 차단 위반으로 취급한다.
+`service_role`은 일반적으로 RLS를 우회하므로 서버의 조합 scope 검증과 writer allowlist가 실질적인 보안 경계다. W1~W3P evidence 원장은 직접 table grant를 0건으로 유지해 한 단계 더 봉인하고, 기존 building 패밀리는 W5 전까지 두 저장소의 직접 DML 0건을 CI manifest로 강제한다. 전용 non-login writer role을 도입하기 전에는 canonical RPC adapter 외 service-role building DML을 배포 차단 위반으로 취급한다.
 
 #### 6.5.1 server-only building read API
 
@@ -1585,7 +1594,7 @@ step 10이 재사용하는 `linkPropertyUnitsToBuildingUnits`(`supabase.service.
 - **bylotCnt 게이트 false-zero(M)**: bylotCnt null/누락 시 부속 API 미호출로 실관계 누락. 명시 숫자 0만 skip, null은 호출. distinct 비교는 블록/self 제외.
 - **역조회 완결성 구멍(M)**: 자체 표제부를 가진 부속-only PNU가 독립 base로 분류돼 signal 없이 누락. `REVERSE_LOOKUP_PENDING`/검토 flag 유지.
 - **platGbCd 요청동작 변화(L)**: 기존 호출은 platGbCd 미전송 → 명시 전송으로 대지 결과가 바뀔 수 있어 회귀 확인. 신규 클라이언트에 408 재시도 포함(기존 `isRetryableVworldError`는 408 제외).
-- **service_role EXECUTE(L)**: §6.5 REVOKE 후 `GRANT EXECUTE ... TO service_role` 미기재 시 RPC 호출 불가. SECURITY INVOKER 유지.
+- **service_role EXECUTE(L)**: §6.5 REVOKE 후 entrypoint의 `GRANT EXECUTE ... TO service_role` 미기재 시 RPC 호출 불가. sealed `SECURITY DEFINER` entrypoint와 service-role 비공개 internal helper를 구분한다.
 - **link_status/mapping_source CHECK 부재(L)**: enum CHECK 추가로 오타 무음 저장 방지.
 - **resolveMergedPnu 제거 타이밍(M)**: §9.3가 fallback 없이 Phase 1에서 제거하나 보상 land_lots는 Phase 4 backfill(승인 게이트)에서 생성 → 그 사이 재업로드가 land_lots 없는 real PNU 물건지를 만들어 추정분담금 join 공백. 조합별 GIS 재수집을 같은 릴리스에 선행하거나 `MISSING_LAND_LOT` 게이트.
 
@@ -1648,7 +1657,7 @@ step 10이 재사용하는 `linkPropertyUnitsToBuildingUnits`(`supabase.service.
 | O3 | 운영 | Phase 6 사전 drain | `max(24h, timeout×2)`, legacy reader/writer 0, final ACL change set 승인 |
 | W5 | `tonghari-web` | O3 뒤 생성하는 final ACL migration | anon/auth SELECT/DML/RPC/sequence 거부, scoped server read와 service-role RPC만 성공, Security Advisor 통과 |
 
-W1~W3P의 pre-cutover active migration 파일은 pinned CLI로 생성한 timestamp 순서대로 다음 DAG를 따른다. 각 migration은 자신이 생성하는 public table에 즉시 RLS/REVOKE를, 함수에 즉시 PUBLIC/anon/auth EXECUTE 회수와 service_role GRANT를 적용한다. public view와 identity/serial sequence도 CREATE와 같은 transaction에서 PUBLIC/anon/auth 권한을 회수하고 필요한 service-role 최소 권한만 부여한다.
+W1~W3P의 pre-cutover active migration 파일은 pinned CLI로 생성한 timestamp 순서대로 다음 DAG를 따른다. 각 migration은 자신이 생성하는 public table에 즉시 RLS를 켜고 `PUBLIC/anon/auth/service_role` 직접 권한을 모두 회수한다. 외부 entrypoint 함수는 즉시 PUBLIC/anon/auth EXECUTE를 회수하고 service_role EXECUTE만 부여하며, internal helper는 service_role EXECUTE도 회수한다. public view와 identity/serial sequence도 CREATE와 같은 transaction에서 불필요한 권한을 회수하고, server read가 필요한 경우 별도 scoped entrypoint만 노출한다.
 
 1. `sync_job_operation_foundation`: `sync_jobs` preflight·composite identity·archive, `building_write_operations` canonical request manifest, append-only `building_write_operation_input_pnus`, `building_write_operation_commands`
 2. `building_registry_relation_foundation`: API relation과 manual override, 각 `(id,union_id)` unique

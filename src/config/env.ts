@@ -1,4 +1,5 @@
 import dotenv from 'dotenv';
+import type { DatabaseTarget } from '../types/database.types';
 
 // .env 파일 로드
 dotenv.config();
@@ -18,6 +19,27 @@ function getEnvNumber(key: string, defaultValue: number): number {
     if (!value) return defaultValue;
     const parsed = parseInt(value, 10);
     return isNaN(parsed) ? defaultValue : parsed;
+}
+
+export function parseBuildingWriteOperationTargets(value: string): ReadonlySet<DatabaseTarget> {
+    const targets = value
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean);
+
+    for (const target of targets) {
+        if (target !== 'production' && target !== 'development') {
+            throw new Error(
+                'BUILDING_WRITE_OPERATION_TARGETS는 production, development만 허용합니다.'
+            );
+        }
+    }
+
+    if (new Set(targets).size !== targets.length) {
+        throw new Error('BUILDING_WRITE_OPERATION_TARGETS에 중복 target이 있습니다.');
+    }
+
+    return new Set(targets as DatabaseTarget[]);
 }
 
 export interface DevelopmentApiEnvironmentInput {
@@ -79,6 +101,9 @@ const hasDevelopmentDatabase = validateDevelopmentApiEnvironment({
     developmentSupabaseUrl: devSupabaseUrl,
     developmentSupabaseServiceRoleKey: devSupabaseServiceRoleKey,
 });
+const buildingWriteOperationTargets = parseBuildingWriteOperationTargets(
+    process.env.BUILDING_WRITE_OPERATION_TARGETS || ''
+);
 
 export const env = {
     // 서버 설정
@@ -104,6 +129,7 @@ export const env = {
     DEV_SUPABASE_URL: devSupabaseUrl,
     DEV_SUPABASE_SERVICE_ROLE_KEY: devSupabaseServiceRoleKey,
     hasDevelopmentDatabase,
+    BUILDING_WRITE_OPERATION_TARGETS: buildingWriteOperationTargets,
 
     // 큐 설정
     QUEUE_CONCURRENCY: getEnvNumber('QUEUE_CONCURRENCY', 5),

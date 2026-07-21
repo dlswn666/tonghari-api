@@ -224,6 +224,16 @@ jobs:
               fi
             done
 
+            operation_target_count="$(grep -c '^BUILDING_WRITE_OPERATION_TARGETS=' .env || true)"
+            if [[ "${operation_target_count}" != "1" ]]; then
+              echo "Runtime .env must contain exactly one BUILDING_WRITE_OPERATION_TARGETS entry."
+              false
+            fi
+            if ! grep -qx 'BUILDING_WRITE_OPERATION_TARGETS=development' .env; then
+              echo "Runtime .env BUILDING_WRITE_OPERATION_TARGETS must be exactly development."
+              false
+            fi
+
             logout_registry() {
               if [[ "${registry_logged_in}" -eq 1 ]]; then
                 docker logout ghcr.io >/dev/null 2>&1 || true

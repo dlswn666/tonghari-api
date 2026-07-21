@@ -156,31 +156,16 @@ router.post('/sync-official-prices', authMiddleware, gisSystemAdminMiddleware, a
     }
 
     try {
-        const [landResult, apartmentResult, individualHousingResult] = await Promise.all([
-            gisQueueService.addLandPriceSyncJob({
-                unionId,
-                actorUserId: req.user!.actorUserId!,
-                databaseTarget: req.user!.databaseTarget,
-            }),
-            gisQueueService.addApartmentPriceSyncJob({
-                unionId,
-                actorUserId: req.user!.actorUserId!,
-                databaseTarget: req.user!.databaseTarget,
-            }),
-            gisQueueService.addIndividualHousingPriceSyncJob({
-                unionId,
-                actorUserId: req.user!.actorUserId!,
-                databaseTarget: req.user!.databaseTarget,
-            }),
-        ]);
+        const result = await gisQueueService.addOfficialPriceSyncJobs({
+            unionId,
+            actorUserId: req.user!.actorUserId!,
+            databaseTarget: req.user!.databaseTarget,
+        });
 
         return res.json({
-            land: { jobId: landResult.jobId, totalPnu: landResult.totalPnu },
-            apartment: { jobId: apartmentResult.jobId, totalPnu: apartmentResult.totalPnu },
-            individualHousing: {
-                jobId: individualHousingResult.jobId,
-                totalPnu: individualHousingResult.totalPnu,
-            },
+            land: result.land,
+            apartment: result.apartment,
+            individualHousing: result.individualHousing,
             status: 'pending',
         });
     } catch (error: any) {

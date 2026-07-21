@@ -78,4 +78,16 @@ test('sync_jobs 영속 실패는 모든 route에서 503과 안정된 오류 코�
         code: 'TEST_QUEUE_FAILED',
         message: 'queue failed',
     });
+
+    for (const code of [
+        'BUILDING_OPERATION_ADMISSION_FINALIZE_FAILED',
+        'DEFERRED_QUEUE_ADMISSION_FINALIZE_FAILED',
+    ]) {
+        const error = Object.assign(new Error(`${code} message`), { code });
+        assert.deepEqual(toSyncJobRouteFailure(error), {
+            status: 503,
+            code,
+            message: `${code} message`,
+        });
+    }
 });

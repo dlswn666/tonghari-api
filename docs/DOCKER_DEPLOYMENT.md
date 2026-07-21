@@ -53,6 +53,15 @@ DEV_SUPABASE_URL
 DEV_SUPABASE_SERVICE_ROLE_KEY
 ```
 
+기준지번/부속지번 W1 operation 원장이 적용된 target은 비밀값이 아닌 아래 allowlist로 명시한다.
+
+```text
+BUILDING_WRITE_OPERATION_TARGETS=development
+```
+
+운영 DB에 W1을 적용하기 전에는 `production`을 추가하지 않는다. 이 값이 없으면 개발 GIS의
+building-family queue producer는 `BUILDING_OPERATION_CAPABILITY_DISABLED`로 fail-closed한다.
+
 값을 출력하지 않고 항목 수만 확인한다.
 
 ```bash
