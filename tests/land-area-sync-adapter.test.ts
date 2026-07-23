@@ -295,6 +295,38 @@ test('retry: HTTP 429 후 성공, Retry-After 상한 내 준수', async () => {
     assert.equal(sleeps[0], 2000);
 });
 
+test('retry: HTTP 429 + Retry-After 상한 초과(120초) → 30초로 클램프', async () => {
+    let attempt = 0;
+    const { httpClient, sleep, sleeps } = scripted(() => {
+        attempt += 1;
+        if (attempt === 1) return { status: 429, data: {}, headers: { 'retry-after': '120' } };
+        return ok(hubBody(1, rowsOf(1)));
+    });
+    const res = await makeAdapter(httpClient, sleep).scanTitle(PNU, HUB_AUTH);
+    assert.equal(res.state, 'COMPLETE');
+    assert.equal(sleeps.length, 1);
+    // Retry-After 120초(120000ms)를 요청했으나 상한 30s(30000ms)로 클램프
+    assert.equal(sleeps[0], 30000);
+});
+
+test('retry: HTTP 429 + Retry-After HTTP-date 형식(상한 초과) → 30초로 클램프', async () => {
+    let attempt = 0;
+    const now = Date.now();
+    const futureDate = new Date(now + 120 * 1000).toUTCString(); // 현재시각 + 120초
+    const { httpClient, sleep, sleeps } = scripted(() => {
+        attempt += 1;
+        if (attempt === 1) return { status: 429, data: {}, headers: { 'retry-after': futureDate } };
+        return ok(hubBody(1, rowsOf(1)));
+    });
+    const res = await makeAdapter(httpClient, sleep).scanTitle(PNU, HUB_AUTH);
+    assert.equal(res.state, 'COMPLETE');
+    assert.equal(sleeps.length, 1);
+    // Retry-After HTTP-date가 120초 뒤인데 상한 30s(30000ms)로 클램프됨
+    // 부동소수점 오차를 고려하여 ±100ms 범위 허용
+    assert.ok(sleeps[0] <= 30000, `Expected sleep <= 30000ms, got ${sleeps[0]}ms`);
+    assert.ok(sleeps[0] >= 29900, `Expected sleep >= 29900ms, got ${sleeps[0]}ms`);
+});
+
 test('retry: HTTP 503 최대 3회 소진 후 FAILED', async () => {
     const { httpClient, sleep, calls, sleeps } = scripted(() => ({ status: 503, data: {}, headers: {} }));
     const res = await makeAdapter(httpClient, sleep).scanTitle(PNU, HUB_AUTH);
