@@ -10,6 +10,7 @@ const GIS_JOB_TYPES = [
     'APARTMENT_PRICE_SYNC',
     'INDIVIDUAL_HOUSING_PRICE_SYNC',
     'LAND_PRICE_SYNC',
+    'LAND_AREA_SYNC',
 ] as const;
 
 /**
