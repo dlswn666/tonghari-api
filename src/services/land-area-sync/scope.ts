@@ -348,7 +348,10 @@ export function verifySinglePnuConfirmation(
     current: { scopeHash: string; propertyMembership: unknown }
 ): SinglePnuConfirmationResult {
     const hashOk = prior.scopeHash.length > 0 && prior.scopeHash === current.scopeHash;
-    const membershipOk = canonicalStableStringify(prior.propertyMembership) === canonicalStableStringify(current.propertyMembership);
+    // propertyMembership 정렬 정규화 후 비교 (비결정적 DB 행 순서 제거).
+    const membershipOk =
+        canonicalStableStringify(normalizePropertyMembershipOrder(prior.propertyMembership)) ===
+        canonicalStableStringify(normalizePropertyMembershipOrder(current.propertyMembership));
     if (hashOk && membershipOk) return { state: 'SINGLE_PNU_CONFIRMED' };
     return { state: 'REVIEW_REQUIRED', issue: 'LAND_SCOPE_CONFIRMATION_MISMATCH' };
 }
@@ -373,6 +376,30 @@ function sortKeys(value: unknown): unknown {
         return out;
     }
     return value;
+}
+
+/**
+ * propertyMembership 배열 순서 정규화.
+ * 비결정적 DB row 순서(조회할 때마다 다를 수 있음)를 안정적으로 정렬한다.
+ * 정렬 기준: propertyUnitId 오름차순, 동일 시 buildingUnitId 오름차순.
+ * 해시 계산에 참여하므로 정렬이 결정론성의 일부가 된다.
+ */
+function normalizePropertyMembershipOrder(membership: unknown): unknown {
+    if (!Array.isArray(membership)) return membership;
+    const items = membership.filter((item) => item && typeof item === 'object');
+    return items.sort((a, b) => {
+        const aObj = a as Record<string, unknown>;
+        const bObj = b as Record<string, unknown>;
+        const aUnitId = String(aObj.propertyUnitId ?? '');
+        const bUnitId = String(bObj.propertyUnitId ?? '');
+        // propertyUnitId 기준 정렬
+        const unitCmp = aUnitId.localeCompare(bUnitId);
+        if (unitCmp !== 0) return unitCmp;
+        // 동일하면 buildingUnitId 기준
+        const aBuildingId = String(aObj.buildingUnitId ?? '');
+        const bBuildingId = String(bObj.buildingUnitId ?? '');
+        return aBuildingId.localeCompare(bBuildingId);
+    });
 }
 
 /** 집합류 배열을 canonical string 기준으로 정렬(결정론). */
@@ -463,7 +490,9 @@ export function computeScopeHash(input: ScopeHashInput): string {
         v: SCOPE_HASH_VERSION,
         strategy: input.strategy,
         candidatePropertyIds: [...input.candidatePropertyIds].sort(),
-        propertyMembership: input.propertyMembership,
+        // propertyMembership 정렬 정규화 (비결정적 DB 행 순서 → 안정적 기준).
+        // 해시 결정론에 참여하므로 배열 순서를 propertyUnitId/buildingUnitId 기준으로 정렬.
+        propertyMembership: normalizePropertyMembershipOrder(input.propertyMembership),
         currentLandTuples: sortedByCanonical(input.currentLandTuples),
         proposedAreas: sortedByCanonical(input.proposedAreas),
         componentMatchDigest: sortedByCanonical(input.componentMatchDigest),
