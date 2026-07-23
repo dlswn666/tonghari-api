@@ -109,7 +109,7 @@
 | --- | --- | --- |
 | V-World 대지권등록목록 | `ldaregList`, 최대 1,000건/page, `pageNo`, `totalCount`, `ldaQotaRate`, `clsSeCode`, 인증·한도 오류 제공 | 전 페이지 strict scan, 비율 원문 저장, 현재/말소 분리 |
 | 공공데이터포털 대지권등록정보 | 집합건물의 건축물 정보와 대지권 지분비율 제공 | 다세대 집합건물 분기에만 사용 |
-| 건축HUB 건축물대장정보 | 2026-07-10 공식 Swagger 기준 `getBrTitleInfo` 78개 필드와 `getBrBasisOulnInfo` 32개 필드에 문자열 `bylotCnt`가 있고 `getBrAtchJibunInfo` 34개 필드에는 없음 | title을 `bylotCnt` 1차 원천으로 사용하고, 동일 관리 PK의 basis는 Phase 0 교차검증 및 조건부 fallback에만 사용. attached `atch*`는 same-run outgoing 기준→부속 관계 교차검증이며 역관계 부재는 증명하지 않음 |
+| 건축HUB 건축물대장정보 | 작성 시점 관찰(2026-07-10 Swagger)로는 `getBrTitleInfo` 78개 필드와 `getBrBasisOulnInfo` 32개 필드에 문자열 `bylotCnt`가 있고 `getBrAtchJibunInfo` 34개 필드에는 없다고 봤으나, 표제부 존재는 아래 미러와 상충하는 **미확정 관찰**이다 | title을 `bylotCnt` 1차 원천 후보로 두되 원천 확정은 Phase 0 실호출에 위임. 동일 관리 PK의 basis는 Phase 0 교차검증 및 조건부 fallback에만 사용. attached `atch*`는 same-run outgoing 기준→부속 관계 교차검증이며 역관계 부재는 증명하지 않음 |
 | 건축물대장 규칙 | 일반건축물대장과 집합건축물대장을 구분 | 단독·다가구와 다세대의 업무 분기 근거 |
 | 현행 API | `e1e7ba7`부터 `gis-inspect.service.ts`가 main에 있으나 page 1 raw 진단·continue-on-error 계약이고, 적재용 strict adapter는 없음 | 검증된 순수 helper만 공용 모듈로 추출하고 inspector orchestration은 재사용하지 않음 |
 | 현행 DB | `land_lots.area`는 필지 전체, `property_units.land_area`는 물건지 소비값, `sync_jobs` 존재. `building_land_lot_positive_cache`는 `security_invoker` VIEW이며 `PENDING`과 `LINKED`만 포함 | 신규 로그 테이블 없이 현재 상태 1개 테이블 + job 요약. VIEW는 positive evidence로만 쓰고, 숨겨진 review/conflict/stale/OPEN evidence는 원천 ledger에서 별도 차단 |
@@ -123,7 +123,7 @@
 - [건축물대장의 기재 및 관리 등에 관한 규칙](https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq=273103)
 - [다가구주택은 공동주택이 아닌 단독주택의 한 종류라는 법제처 해석](https://opinion.lawmaking.go.kr/nl4li/lsItptEmp/355270)
 
-보조 명세 미러인 [PublicDataReader 건축물대장 가이드](https://github.com/WooilJeong/PublicDataReader/blob/main/assets/docs/portal/BuildingLedger.md)도 기본개요와 표제부 양쪽에 `bylotCnt`를 기재한다. 다만 Swagger 속성 존재가 모든 실응답의 값 존재·형식·정합성을 보장하지 않으므로, 최종 원천 계약은 Phase 0의 승인된 실호출 fixture로 고정한다.
+보조 명세 미러인 [PublicDataReader 건축물대장 가이드](https://github.com/WooilJeong/PublicDataReader/blob/main/assets/docs/portal/BuildingLedger.md)는 2026-07-23 재확인 기준 **기본개요에만** `bylotCnt`(외필지수)를 기재하고 표제부 출력 명세에는 기재하지 않는다. 즉 표제부 `bylotCnt` 존재는 원천 간 상충이 있는 검증 대상 관찰이며 확정 사실이 아니다. Phase 0 실측에서 표제부에 필드가 없다고 판명되면 `TITLE_WITH_BASIS_FALLBACK`이 기대 정책이 되고 사실상 basis가 1차 원천으로 동작한다(§10.4 계약은 이 경우에도 관리 PK 단위로 그대로 성립한다). Swagger 속성 존재가 실응답의 값 존재·형식·정합성을 보장하지도 않으므로, 최종 원천 계약은 Phase 0의 승인된 실호출 fixture로 고정한다.
 
 단독·다가구에 필지 전체면적을 적용하는 것은 위 법적 분류와 현재 조합온의 `property_unit` 단위 동의율 규칙을 결합한 **이번 업무 정책**이다. 모든 부동산의 법률상 권리관계를 일반화한 선언은 아니다. 일반대장인데 같은 PNU에 활성 `property_unit`이 둘 이상이면 자동 적용하지 않는 이유도 여기에 있다.
 
