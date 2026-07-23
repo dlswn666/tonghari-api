@@ -5,8 +5,9 @@
  * union·scope 범위로 조회한다. 전부 inline `.select()` read 이며 write 는 하지 않는다(오직 apply
  * RPC 만 property_units·property_unit_land_rights 를 변경한다 — writer-guard).
  *
- * fail-safe: 조회 실패는 빈 결과로 처리한다. 후보가 비면 matcher 가 NO_CHANGE 로 끝나 property
- * tuple 을 그대로 유지하므로(잘못된 투영 없음) 안전하게 under-match 된다.
+ * 오류/0건 구분(§2.2): DB 조회 error 는 fatal 로 throw 한다(→ queue fatal catch → job FAILED).
+ * error 를 빈 결과로 삼키면 "조회 실패"가 "후보 0건"으로 오인돼 잘못된 under-match(NO_CHANGE)로
+ * silently 종결되므로 금지한다. error 가 없는 진짜 0건만 빈 배열로 반환한다.
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -17,6 +18,14 @@ function str(v: unknown): string | null {
     if (v == null) return null;
     const s = String(v);
     return s.length === 0 ? null : s;
+}
+
+/** 조회 error 를 fatal 로 승격한다(§2.2 — queue fatal catch 가 job 을 FAILED 로 기록). */
+function throwReadFailure(what: string, error: { message?: string } | null): never {
+    throw Object.assign(new Error(`LAND_AREA_SYNC ${what} 조회 실패`), {
+        code: 'LAND_AREA_SYNC_READ_FAILED',
+        cause: error ?? undefined,
+    });
 }
 
 /**
@@ -38,7 +47,8 @@ export async function readPropertyUnitCandidates(
         .select('id, unionId:union_id, buildingUnitId:building_unit_id, pnu, isDeleted:is_deleted, dong, ho')
         .eq('union_id', unionId)
         .in('pnu', scopePnus);
-    if (error || !Array.isArray(data)) return [];
+    if (error) throwReadFailure('property_unit 후보', error);
+    if (!Array.isArray(data)) return [];
     // DB 응답이 이미 matcher 계약(camelCase) shape 다. 링크 field 를 코드에서 재기록하지 않는다.
     return data as unknown as PropertyUnitCandidate[];
 }
@@ -54,7 +64,8 @@ export async function readBuildingUnitCandidates(
         .from('building_land_lots')
         .select('building_id')
         .in('pnu', scopePnus);
-    if (linkError || !Array.isArray(links)) return [];
+    if (linkError) throwReadFailure('building_land_lots', linkError);
+    if (!Array.isArray(links)) return [];
     const buildingIds = [...new Set(links.map((l: Record<string, unknown>) => String(l.building_id)).filter(Boolean))];
     if (buildingIds.length === 0) return [];
 
@@ -62,7 +73,8 @@ export async function readBuildingUnitCandidates(
         .from('building_units')
         .select('id, building_id, dong, floor, ho, registry_external_id')
         .in('building_id', buildingIds);
-    if (error || !Array.isArray(data)) return [];
+    if (error) throwReadFailure('building_unit 후보', error);
+    if (!Array.isArray(data)) return [];
     return data.map((r: Record<string, unknown>) => ({
         id: String(r.id),
         buildingId: str(r.building_id),
@@ -85,7 +97,8 @@ export async function readCurrentLandTuples(
         .select('id, land_area, land_area_source')
         .eq('union_id', unionId)
         .in('id', propertyUnitIds);
-    if (error || !Array.isArray(data)) return [];
+    if (error) throwReadFailure('current land tuple', error);
+    if (!Array.isArray(data)) return [];
     return data.map((r: Record<string, unknown>) => ({
         propertyUnitId: String(r.id),
         landArea: r.land_area == null ? '' : String(r.land_area),
