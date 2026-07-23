@@ -1,5 +1,6 @@
 import dotenv from 'dotenv';
 import type { DatabaseTarget } from '../types/database.types';
+import { parseExactTrueFeatureFlag } from './feature-flags';
 
 // .env 파일 로드
 dotenv.config();
@@ -145,6 +146,7 @@ export const env = {
     VWORLD_API_DOMAIN: process.env.VWORLD_API_DOMAIN || process.env.VWORLD_DOMAIN || 'www.tonghari.kr',
     VWORLD_ATTR_REQUEST_INTERVAL_MS: getEnvNumber('VWORLD_ATTR_REQUEST_INTERVAL_MS', 300),
     DATA_PORTAL_API_KEY: process.env.DATA_PORTAL_API_KEY || '',
+    LAND_AREA_SYNC_ENABLED: parseExactTrueFeatureFlag(process.env.LAND_AREA_SYNC_ENABLED),
 
     // 헬퍼
     isDevelopment: process.env.NODE_ENV === 'development',

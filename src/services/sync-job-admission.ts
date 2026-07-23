@@ -42,6 +42,7 @@ export function toSyncJobRouteFailure(
             'BUILDING_OPERATION_CAPABILITY_DISABLED',
             'BUILDING_OPERATION_ADMISSION_FINALIZE_FAILED',
             'DEFERRED_QUEUE_ADMISSION_FINALIZE_FAILED',
+            'LAND_AREA_SYNC_DISABLED',
         ].includes(code) ? 503 : 500,
         code,
         message: error instanceof Error ? error.message : 'Internal server error.',

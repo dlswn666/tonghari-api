@@ -234,6 +234,17 @@ jobs:
               false
             fi
 
+            land_area_sync_flag_count="$(grep -Ec '^[[:space:]]*LAND_AREA_SYNC_ENABLED[[:space:]]*=' .env || true)"
+            if [[ "${land_area_sync_flag_count}" -gt 1 ]]; then
+              echo "Runtime .env may contain at most one LAND_AREA_SYNC_ENABLED entry."
+              false
+            fi
+            if [[ "${land_area_sync_flag_count}" -eq 1 ]] \
+              && ! grep -qx 'LAND_AREA_SYNC_ENABLED=false' .env; then
+              echo "Runtime .env LAND_AREA_SYNC_ENABLED must be exactly false when present."
+              false
+            fi
+
             logout_registry() {
               if [[ "${registry_logged_in}" -eq 1 ]]; then
                 docker logout ghcr.io >/dev/null 2>&1 || true
@@ -378,7 +389,8 @@ jobs:
                             const valid = health.status === "ok"
                               && health.gitSha === process.env.EXPECTED_GIT_SHA
                               && health.buildTime === process.env.EXPECTED_BUILD_TIME
-                              && health.imageTag === process.env.EXPECTED_IMAGE_TAG;
+                              && health.imageTag === process.env.EXPECTED_IMAGE_TAG
+                              && health.features?.landAreaSyncEnabled === false;
                             process.exit(valid ? 0 : 1);
                           } catch {
                             process.exit(1);

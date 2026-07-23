@@ -34,6 +34,7 @@ const server = app.listen(env.PORT, () => {
     logger.info(`GIS Config - VWORLD_API_KEY: ${env.VWORLD_API_KEY ? 'SET' : 'NOT SET'}`);
     logger.info(`GIS Config - VWORLD_API_DOMAIN: ${env.VWORLD_API_DOMAIN}`);
     logger.info(`GIS Config - DATA_PORTAL_API_KEY: ${env.DATA_PORTAL_API_KEY ? 'SET' : 'NOT SET'}`);
+    logger.info(`GIS Config - LAND_AREA_SYNC: ${env.LAND_AREA_SYNC_ENABLED ? 'ENABLED' : 'DISABLED'}`);
 
     // KG이니시스 통합인증 환경 변수 상태 로깅
     const kgInicisConfigured = env.KG_INICIS_MID && env.KG_INICIS_API_KEY;

@@ -6,6 +6,7 @@ import { getSupabaseService } from '../services/supabase.service';
 import { databaseTargetAuthMiddleware as authMiddleware } from '../middleware/auth';
 import { gisSystemAdminMiddleware } from '../middleware/gis-system-admin';
 import { gisAddressReadRateLimitMiddleware } from '../middleware/gis-address-rate-limit';
+import { landAreaSyncEnabledMiddleware } from '../middleware/land-area-sync-enabled';
 import { toSyncJobRouteFailure } from '../services/sync-job-admission';
 import { landAreaSyncQueueService } from '../services/land-area-sync/queue';
 import {
@@ -730,7 +731,7 @@ router.post('/inspect', authMiddleware, gisSystemAdminMiddleware, async (req, re
  * body: { unionId: uuid, anchorPnu: 19자리 }
  * SYSTEM_ADMIN 재검증(gis-system-admin) 후 durable INSERT 성공 시 202. admission 실패 시 503.
  */
-router.post('/land-area-sync', authMiddleware, gisSystemAdminMiddleware, async (req, res) => {
+router.post('/land-area-sync', authMiddleware, gisSystemAdminMiddleware, landAreaSyncEnabledMiddleware, async (req, res) => {
     const { unionId, anchorPnu } = req.body ?? {};
 
     if (!isUuid(unionId)) {
@@ -758,7 +759,7 @@ router.post('/land-area-sync', authMiddleware, gisSystemAdminMiddleware, async (
  * discovery 확인 → confirmation admission RPC → 새 apply job 생성·재실행 (DESIGN §14.1)
  * 확인자·확인 시각은 body 에서 받지 않는다. API 는 현재 SYSTEM_ADMIN id 만 RPC 에 전달한다.
  */
-router.post('/land-area-sync/:discoveryJobId/confirm', authMiddleware, gisSystemAdminMiddleware, async (req, res) => {
+router.post('/land-area-sync/:discoveryJobId/confirm', authMiddleware, gisSystemAdminMiddleware, landAreaSyncEnabledMiddleware, async (req, res) => {
     const { discoveryJobId } = req.params;
     const body = (req.body ?? {}) as Record<string, unknown>;
     const {

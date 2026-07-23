@@ -314,11 +314,12 @@ test('consent만 target-aware allowlist에 추가하고 외부 운영 부작용 
 });
 
 test('배포 workflow는 GHCR digest와 EC2 env 단일 원본으로 안전하게 배포한다', async () => {
-    const [workflow, packageJson, legacyBuildScript, legacyDeployScript] = await Promise.all([
+    const [workflow, packageJson, legacyBuildScript, legacyDeployScript, envExample] = await Promise.all([
         readFile('.github/workflows/docker-build.yml', 'utf8'),
         readFile('package.json', 'utf8'),
         readFile('scripts/build-and-push.sh', 'utf8'),
         readFile('scripts/deploy-to-ec2.sh', 'utf8'),
+        readFile('.env.example', 'utf8'),
     ]);
     assert.match(workflow, /build-and-push:[\s\S]*permissions:\s+contents: read\s+packages: write/);
     assert.match(workflow, /deploy:[\s\S]*permissions:\s+contents: read\s+packages: read/);
@@ -353,6 +354,14 @@ test('배포 workflow는 GHCR digest와 EC2 env 단일 원본으로 안전하게
     );
     assert.match(workflow, /"\$\{operation_target_count\}" != "1"/);
     assert.match(workflow, /grep -qx 'BUILDING_WRITE_OPERATION_TARGETS=development' \.env/);
+    assert.ok(workflow.includes(
+        "land_area_sync_flag_count=\"$(grep -Ec '^[[:space:]]*LAND_AREA_SYNC_ENABLED[[:space:]]*=' .env || true)\""
+    ));
+    assert.match(workflow, /"\$\{land_area_sync_flag_count\}" -gt 1/);
+    assert.match(workflow, /"\$\{land_area_sync_flag_count\}" -eq 1/);
+    assert.match(workflow, /grep -qx 'LAND_AREA_SYNC_ENABLED=false' \.env/);
+    assert.ok(workflow.includes('health.features?.landAreaSyncEnabled === false'));
+    assert.match(envExample, /^LAND_AREA_SYNC_ENABLED=false$/m);
     const operationTargetGuard = workflow.indexOf('operation_target_count="$(');
     const candidateStart = workflow.indexOf('docker run -d \\\n              --name "${CANDIDATE_CONTAINER}"');
     const productionReplacement = workflow.indexOf('docker stop "${CONTAINER_NAME}"');

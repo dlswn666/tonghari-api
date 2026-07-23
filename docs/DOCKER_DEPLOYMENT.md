@@ -62,6 +62,16 @@ BUILDING_WRITE_OPERATION_TARGETS=development
 운영 DB에 W1을 적용하기 전에는 `production`을 추가하지 않는다. 이 값이 없으면 개발 GIS의
 building-family queue producer는 `BUILDING_OPERATION_CAPABILITY_DISABLED`로 fail-closed한다.
 
+적용 토지면적 동기화는 별도 canary allowlist가 구현·승인되기 전까지 전역 OFF를 유지한다.
+
+```text
+LAND_AREA_SYNC_ENABLED=false
+```
+
+이 항목은 누락되어도 서버가 OFF로 해석한다. 항목을 넣는 경우 배포 workflow는 정확히 한 줄
+`LAND_AREA_SYNC_ENABLED=false`만 허용한다. `true`는 현재 배포 계약에서 거부하며, 후보·최종
+컨테이너의 `/health`도 `features.landAreaSyncEnabled=false`를 반환해야 한다.
+
 값을 출력하지 않고 항목 수만 확인한다.
 
 ```bash
@@ -82,7 +92,7 @@ done
 3. push 결과의 digest 형식을 검증한다.
 4. EC2 접속 비밀과 EC2 `.env` 소유자·권한·필수 항목을 검사한다.
 5. `repo@sha256:digest` 형식으로 정확한 이미지를 pull한다.
-6. 후보 컨테이너를 `127.0.0.1:13100`에 띄워 SHA, build time, image tag를 검증한다.
+6. 후보 컨테이너를 `127.0.0.1:13100`에 띄워 SHA, build time, image tag와 LAND_AREA_SYNC OFF를 검증한다.
 7. 후보가 통과한 경우에만 기존 `3100` 컨테이너를 rollback 이름으로 보존하고 새 컨테이너로 교체한다.
 8. 최종 `3100` health 검증에 실패하면 직전 컨테이너를 복구한다.
 

@@ -82,6 +82,7 @@ test('sync_jobs 영속 실패는 모든 route에서 503과 안정된 오류 코�
     for (const code of [
         'BUILDING_OPERATION_ADMISSION_FINALIZE_FAILED',
         'DEFERRED_QUEUE_ADMISSION_FINALIZE_FAILED',
+        'LAND_AREA_SYNC_DISABLED',
     ]) {
         const error = Object.assign(new Error(`${code} message`), { code });
         assert.deepEqual(toSyncJobRouteFailure(error), {

@@ -6,12 +6,17 @@ async function gisRoute(): Promise<string> {
     return readFile('src/routes/gis.ts', 'utf8');
 }
 
-test('4개 LAND_AREA_SYNC route 가 인증·SYSTEM_ADMIN 미들웨어와 함께 등록된다', async () => {
+test('LAND_AREA_SYNC POST는 인증·SYSTEM_ADMIN 뒤 fail-closed gate를 거치고 GET은 조회 가능하다', async () => {
     const s = await gisRoute();
-    assert.match(s, /router\.post\('\/land-area-sync',\s*authMiddleware,\s*gisSystemAdminMiddleware/);
-    assert.match(s, /router\.post\('\/land-area-sync\/:discoveryJobId\/confirm',\s*authMiddleware,\s*gisSystemAdminMiddleware/);
+    assert.match(s, /router\.post\('\/land-area-sync',\s*authMiddleware,\s*gisSystemAdminMiddleware,\s*landAreaSyncEnabledMiddleware/);
+    assert.match(s, /router\.post\('\/land-area-sync\/:discoveryJobId\/confirm',\s*authMiddleware,\s*gisSystemAdminMiddleware,\s*landAreaSyncEnabledMiddleware/);
     assert.match(s, /router\.get\('\/land-area-sync\/latest',\s*authMiddleware,\s*gisSystemAdminMiddleware/);
     assert.match(s, /router\.get\('\/land-area-sync\/:jobId',\s*authMiddleware,\s*gisSystemAdminMiddleware/);
+    const getRegistrations = s
+        .split('\n')
+        .filter((line) => line.includes("router.get('/land-area-sync/"));
+    assert.equal(getRegistrations.length, 2);
+    assert.ok(getRegistrations.every((line) => !line.includes('landAreaSyncEnabledMiddleware')));
     // latest 는 :jobId 보다 먼저 등록되어야 한다(literal 우선).
     assert.ok(s.indexOf("'/land-area-sync/latest'") < s.indexOf("'/land-area-sync/:jobId'"));
 });

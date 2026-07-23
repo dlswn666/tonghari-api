@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { env } from '../config/env';
 import { queueService } from '../services/queue.service';
 import { createBuildInfo } from '../utils/build-info';
 
@@ -24,6 +25,9 @@ router.get('/', (req: Request, res: Response) => {
         status: 'ok',
         timestamp: new Date().toISOString(),
         ...buildInfo,
+        features: {
+            landAreaSyncEnabled: env.LAND_AREA_SYNC_ENABLED,
+        },
         uptime: process.uptime(),
         memory: {
             heapUsed: formatMemoryUsage(memoryUsage.heapUsed),
@@ -56,6 +60,9 @@ router.get('/detailed', async (req: Request, res: Response) => {
         status: 'ok',
         timestamp: new Date().toISOString(),
         ...buildInfo,
+        features: {
+            landAreaSyncEnabled: env.LAND_AREA_SYNC_ENABLED,
+        },
         node: {
             version: process.version,
             platform: process.platform,
