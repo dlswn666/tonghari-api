@@ -147,7 +147,7 @@ test('freezeScopeSnapshot 은 status=PROCESSING 스코프에서만 CAS 한다', 
     assert.ok(update.filters.some((f) => f[0] === 'job_type' && f[1] === 'LAND_AREA_SYNC'));
 });
 
-test('markScopedFailed 은 id+union+type 로 FAILED 를 기록한다', async () => {
+test('markScopedFailed 은 id+union+type+status=PROCESSING 로 FAILED 를 기록한다(COMPLETED 뒤집기 차단, I3)', async () => {
     const { client, calls } = fakeClient({
         selectResult: { data: { preview_data: {} }, error: null },
         updateResult: { data: { id: JOB }, error: null },
@@ -158,5 +158,6 @@ test('markScopedFailed 은 id+union+type 로 FAILED 를 기록한다', async () 
     const value = update.value as { status: string; error_log: string };
     assert.equal(value.status, 'FAILED');
     assert.equal(value.error_log, 'boom');
-    assert.deepEqual(update.filters, [['id', JOB], ['union_id', UNION], ['job_type', 'LAND_AREA_SYNC']]);
+    // status=PROCESSING 스코프가 있어야 이미 COMPLETED 된 job 이 사후 조회 실패로 FAILED 로 뒤집히지 않는다.
+    assert.deepEqual(update.filters, [['id', JOB], ['union_id', UNION], ['job_type', 'LAND_AREA_SYNC'], ['status', 'PROCESSING']]);
 });

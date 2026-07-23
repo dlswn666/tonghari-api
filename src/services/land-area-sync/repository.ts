@@ -291,6 +291,10 @@ export async function writeAppliedIssues(
 /**
  * id+union+type 스코프 FAILED 기록. RPC EXCEPTION(rollback) 후 job 을 FAILED 로 남기거나
  * admission 실패 시 사용한다. scopeState=FAILED·outcome=FAILED 로 병합한다.
+ *
+ * status=PROCESSING 으로 스코프해 이미 terminal(COMPLETED)에 도달한 job 이 사후 조회 실패 등으로
+ * FAILED 로 뒤집히는 경로를 차단한다(I3 — apply RPC 성공 후 post-completion read throw → queue
+ * fatal catch → markScopedFailed 가 COMPLETED job 을 FAILED 로 만드는 것을 막는다).
  */
 export async function markScopedFailed(
     client: SupabaseClient,
@@ -314,6 +318,7 @@ export async function markScopedFailed(
         .eq('id', jobId)
         .eq('union_id', unionId)
         .eq('job_type', LAND_AREA_SYNC_JOB_TYPE)
+        .eq('status', 'PROCESSING')
         .select('id')
         .maybeSingle();
     if (error) return false;
