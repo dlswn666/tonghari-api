@@ -1,3 +1,5 @@
+import { isLandAreaUnchanged } from './member.land-area-canonical';
+
 export interface ExistingPropertyUnitValues {
     propertyAddressJibun: string | null;
     propertyAddressRoad: string | null;
@@ -59,7 +61,9 @@ export function buildExistingPropertyImportPatches(input: {
     if (incoming.buildingName && existingProperty.buildingName !== incoming.buildingName) {
         propertyUnitPatch.building_name = incoming.buildingName;
     }
-    if (incoming.landArea !== null && !sameNumeric(existingProperty.landArea, incoming.landArea)) {
+    // land_area는 canonical(소수 4자리) 비교로 실제 변경 여부를 판정한다(DESIGN §16).
+    // '19.70'과 '19.7'처럼 표현만 다른 값은 dirty로 취급하지 않는다.
+    if (incoming.landArea !== null && !isLandAreaUnchanged(existingProperty.landArea, incoming.landArea)) {
         propertyUnitPatch.land_area = incoming.landArea;
     }
     if (incoming.buildingArea !== null && !sameNumeric(existingProperty.buildingArea, incoming.buildingArea)) {

@@ -14,6 +14,7 @@ import { createLogger } from '../utils/logger';
 import { getAutoOwnershipRatio as calculateAutoOwnershipRatio } from './member.pre-register-ownership';
 import { buildPreRegisterCompletion } from './member.pre-register-result';
 import { buildExistingPropertyImportPatches } from './member.pre-register-existing-property';
+import { isLandAreaUnchanged } from './member.land-area-canonical';
 import { persistSyncJobOrThrow } from './sync-job-admission';
 import {
     MemberQueueExecutionOperation,
@@ -1132,9 +1133,11 @@ export class MemberQueueService {
             notes: string | null;
         }
     ): Promise<string> {
+        // land_area는 재조회한 현재 값과 canonical 비교(소수 4자리)해 dirty-only로 payload에
+        // 포함한다(DESIGN §16) — 별도 조회 없이 기존 existingUnit 조회에 land_area만 추가한다.
         let query = client
             .from('property_units')
-            .select('id')
+            .select('id, land_area')
             .eq('union_id', unionId)
             .eq('is_deleted', false);
 
@@ -1152,7 +1155,12 @@ export class MemberQueueService {
             if (input.propertyAddressJibun) updateData.property_address_jibun = input.propertyAddressJibun;
             if (input.propertyAddressRoad) updateData.property_address_road = input.propertyAddressRoad;
             if (input.buildingName) updateData.building_name = input.buildingName;
-            if (input.landArea !== null) updateData.land_area = input.landArea;
+            // land_area는 실제 명부 값이 canonical 기준으로 달라졌을 때만 payload에 포함한다.
+            // DB provenance trigger가 land_area 변경을 감시해 MANUAL로 전환하므로, 미변경
+            // 재업로드에서 no-op UPDATE로 트리거를 불필요하게 평가시키지 않는다(DESIGN §16).
+            if (input.landArea !== null && !isLandAreaUnchanged(existingUnit.land_area, input.landArea)) {
+                updateData.land_area = input.landArea;
+            }
             if (input.buildingArea !== null) updateData.building_area = input.buildingArea;
             if (input.officialPrice !== null) updateData.official_price = input.officialPrice;
             if (input.notes) updateData.notes = input.notes;
