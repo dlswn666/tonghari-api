@@ -106,12 +106,105 @@ export type EndpointZeroLabel =
     | 'LADFRL_COMPLETE_ZERO'
     | 'LDAREG_COMPLETE_ZERO';
 
+// ── 판정 계층 공통 타입 (DESIGN §9, §10.4, §11, §14.3) ──────────────
+//
+// bylot.ts / classifier.ts / scope.ts가 공유하는 상태값·issue code를 여기서 한 번만
+// 정의한다. 모든 상태값은 enum이 아니라 string union으로 관리한다.
+
+/**
+ * §14.3 주요 issue code. apply/REVIEW/FAILED 판정에서 원인을 식별하는 코드다.
+ * 설계서 §14.3 목록의 이름만 사용한다(임의 신설 금지).
+ */
+export type LandAreaSyncIssueCode =
+    | 'LDAREG_PERMISSION_REQUIRED'
+    | 'PROVIDER_PROTOCOL_ERROR'
+    | 'PAGINATION_INCOMPLETE'
+    | 'BUILDING_CLASSIFICATION_CONFLICT'
+    | 'UNSUPPORTED_HOUSING_TYPE'
+    | 'SCOPE_NOT_LINKED'
+    | 'SCOPE_PENDING'
+    | 'SCOPE_REVERSE_LOOKUP_UNPROVEN'
+    | 'SCOPE_BLOCKING_EVIDENCE'
+    | 'SCOPE_COMPONENT_TOO_LARGE'
+    | 'ATTACHED_SCAN_INCOMPLETE'
+    | 'ATTACHED_PNU_INVALID'
+    | 'BYLOT_COUNT_UNAVAILABLE'
+    | 'BYLOT_COUNT_SOURCE_CONFLICT'
+    | 'BYLOT_ATTACHED_COUNT_MISMATCH'
+    | 'SCOPE_CACHE_SCAN_CONFLICT'
+    | 'MULTI_PNU_GENERAL_BUILDING'
+    | 'LAND_OWNERSHIP_UNCONFIRMED'
+    | 'LAND_SCOPE_CONFIRMATION_MISMATCH'
+    | 'MANUAL_OVERWRITE_UNCONFIRMED'
+    | 'MANUAL_OVERWRITE_CONFIRMATION_REQUIRED'
+    | 'SCOPE_CHANGED_DURING_SYNC'
+    | 'RATIO_PARSE_FAILED'
+    | 'RATIO_DENOMINATOR_MISMATCH'
+    | 'LDAREG_IDENTITY_CONFLICT'
+    | 'UNIT_NORMALIZATION_COLLISION'
+    | 'PROPERTY_UNIT_NOT_FOUND'
+    | 'PROPERTY_UNIT_AMBIGUOUS'
+    | 'EXPECTED_PNU_COVERAGE_INCOMPLETE'
+    | 'ALL_COMPONENTS_CLOSED_REVIEW_REQUIRED'
+    | 'STALE_SCAN_REJECTED';
+
+/** 공통 parcel-scope completeness gate 반환 상태 5종 (DESIGN §11). */
+export type ParcelScopeState =
+    | 'SINGLE_SCOPE_CONFIRMATION_REQUIRED'
+    | 'SINGLE_PNU_CONFIRMED'
+    | 'LINKED_SCOPE_RESOLVED'
+    | 'REVIEW_REQUIRED'
+    | 'FAILED';
+
+/**
+ * `bylotCnt` 원천 정책 (DESIGN §10.4).
+ * Phase 0에서 검토 가능한 소스 상수/fixture로 확정한다. 환경변수로 조용히 바꾸지 않는다.
+ */
+export type BylotSourcePolicy = 'TITLE_ONLY' | 'TITLE_WITH_BASIS_FALLBACK';
+
+/**
+ * `bylotCnt` 교차검증 상태 (DESIGN §10.4).
+ * - `TITLE_ONLY`: title에서 확정, basis 미조회
+ * - `FALLBACK_RESOLVED`: title 유효값 0개라 basis fallback으로 확정
+ * - `MATCHED`: title 확정 + basis 교차검증 일치
+ * - `CROSS_CHECK_NOT_AVAILABLE`: title 확정, basis 조회했으나 해당 PK의 유효 basis 값 없음
+ * - `UNAVAILABLE`: 어느 원천에서도 유효값 미확정
+ * - `CONFLICT`: 유효값 충돌(서로 다른 값·title/basis 불일치)
+ */
+export type BylotCrossCheckState =
+    | 'TITLE_ONLY'
+    | 'FALLBACK_RESOLVED'
+    | 'MATCHED'
+    | 'CROSS_CHECK_NOT_AVAILABLE'
+    | 'UNAVAILABLE'
+    | 'CONFLICT';
+
+/** 관리 PK별 최종 `bylotCnt` 근거 (DESIGN §10.4). */
+export interface BylotEvidence {
+    mgmBldrgstPk: string;
+    /** 값을 확정한 원천. 미확정(UNAVAILABLE)·충돌(CONFLICT)이면 null */
+    source: 'TITLE' | 'BASIS_FALLBACK' | null;
+    /** 확정에 사용한 원본 문자열. 미확정이면 null */
+    rawValue: string | null;
+    /** 정규화된 외필지 수. 미확정·충돌이면 null */
+    count: number | null;
+    crossCheckState: BylotCrossCheckState;
+}
+
 // ── endpoint별 row 타입 (파서는 totalCount·rows만 검증하고 필드는 통과시킨다) ──
 
 /** 건축물대장 표제부 row (getBrTitleInfo) */
 export interface BrTitleRow {
     mgmBldrgstPk?: string;
+    /** 상위 관리 PK(root 관리번호 계열 판정 참고용) */
+    mgmUpBldrgstPk?: string;
     bylotCnt?: string;
+    /** 대장 구분: 1=일반, 2=집합 (DESIGN §9) */
+    regstrGbCd?: string;
+    /** 주용도 코드 */
+    mainPurpsCd?: string;
+    /** 주용도 명 */
+    mainPurpsCdNm?: string;
     [key: string]: unknown;
 }
 
