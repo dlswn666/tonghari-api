@@ -27,6 +27,7 @@ import {
     freezeScopeSnapshot,
     writeDiscoveryTerminal,
     writeScopeState,
+    writeAppliedIssues,
     markScopedFailed,
 } from './repository';
 import {
@@ -164,6 +165,7 @@ class LandAreaSyncQueueService {
                 freezeScopeSnapshot: (jobId, unionId, patch) => freezeScopeSnapshot(client, jobId, unionId, patch),
                 writeDiscoveryTerminal: (jobId, unionId, input) => writeDiscoveryTerminal(client, jobId, unionId, input),
                 writeScopeState: (jobId, unionId, scopeState) => writeScopeState(client, jobId, unionId, scopeState),
+                writeAppliedIssues: (jobId, unionId, patch) => writeAppliedIssues(client, jobId, unionId, patch),
                 markScopedFailed: (jobId, unionId, message) => markScopedFailed(client, jobId, unionId, message),
                 readBuildingUnits: (unionId, scopePnus) => readBuildingUnitCandidates(client, unionId, scopePnus),
                 readPropertyUnits: (unionId, scopePnus) => readPropertyUnitCandidates(client, unionId, scopePnus),

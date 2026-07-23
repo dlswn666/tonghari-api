@@ -255,6 +255,40 @@ export async function writeScopeState(
 }
 
 /**
+ * apply RPC 가 terminal(status=COMPLETED)을 이미 기록한 뒤, scopeState 와 함께 병합된 terminal
+ * issues(discovery extraIssues 포함)를 반영한다(Finding 3). status 는 건드리지 않고 보호 대상 6키도
+ * mergeLandAreaSync 로 보존한다(snapshot guard 통과). id+union+type 스코프.
+ */
+export async function writeAppliedIssues(
+    client: SupabaseClient,
+    jobId: string,
+    unionId: string,
+    patch: {
+        scopeState: LandAreaSyncScopeState;
+        issues: LandAreaSyncIssue[];
+        issuesTotal: number;
+        issuesTruncated: boolean;
+    }
+): Promise<boolean> {
+    const previewData = await mergeLandAreaSync(client, jobId, unionId, {
+        scopeState: patch.scopeState,
+        issues: patch.issues,
+        issuesTotal: patch.issuesTotal,
+        issuesTruncated: patch.issuesTruncated,
+    });
+    const { data, error } = await client
+        .from('sync_jobs')
+        .update({ preview_data: previewData, updated_at: new Date().toISOString() })
+        .eq('id', jobId)
+        .eq('union_id', unionId)
+        .eq('job_type', LAND_AREA_SYNC_JOB_TYPE)
+        .select('id')
+        .maybeSingle();
+    if (error) return false;
+    return data?.id === jobId;
+}
+
+/**
  * id+union+type 스코프 FAILED 기록. RPC EXCEPTION(rollback) 후 job 을 FAILED 로 남기거나
  * admission 실패 시 사용한다. scopeState=FAILED·outcome=FAILED 로 병합한다.
  */

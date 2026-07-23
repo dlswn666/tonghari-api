@@ -7,6 +7,7 @@ import {
     getLatestScopedJob,
     freezeScopeSnapshot,
     writeDiscoveryTerminal,
+    writeAppliedIssues,
     markScopedFailed,
     type LandAreaSyncJobRow,
 } from '../src/services/land-area-sync/repository';
@@ -100,6 +101,36 @@ test('writeDiscoveryTerminal 은 status=PROCESSING 에서만 전이한다(id+uni
     assert.equal(ok, true);
     const update = calls.find((c) => c.op === 'update')!;
     assert.deepEqual(update.filters, [['id', JOB], ['union_id', UNION], ['job_type', 'LAND_AREA_SYNC'], ['status', 'PROCESSING']]);
+});
+
+test('writeAppliedIssues 는 status 를 건드리지 않고 id+union+type 스코프로 병합 issues 를 반영한다', async () => {
+    const { client, calls } = fakeClient({
+        // 보호 대상 6키가 이미 있는 preview 를 읽어 병합(guard 키 보존 확인).
+        selectResult: {
+            data: { preview_data: { landAreaSync: { schemaVersion: 2, anchorPnu: 'x', branch: 'LDAREG', scopeSnapshot: { scopeHash: 'h' } } } },
+            error: null,
+        },
+        updateResult: { data: { id: JOB }, error: null },
+    });
+    const ok = await writeAppliedIssues(client, JOB, UNION, {
+        scopeState: 'LINKED_SCOPE_RESOLVED',
+        issues: [{ code: 'PROPERTY_UNIT_NOT_FOUND', targetPnu: '1168010100107360024' }],
+        issuesTotal: 1,
+        issuesTruncated: false,
+    });
+    assert.equal(ok, true);
+    const update = calls.find((c) => c.op === 'update')!;
+    // apply RPC 가 이미 COMPLETED 로 만들었으므로 status=PROCESSING 필터를 걸지 않는다.
+    assert.deepEqual(update.filters, [['id', JOB], ['union_id', UNION], ['job_type', 'LAND_AREA_SYNC']]);
+    const value = update.value as { preview_data: { landAreaSync: Record<string, unknown> } };
+    const land = value.preview_data.landAreaSync;
+    assert.equal(land.scopeState, 'LINKED_SCOPE_RESOLVED');
+    assert.equal(land.issuesTotal, 1);
+    assert.equal(land.issuesTruncated, false);
+    assert.deepEqual(land.issues, [{ code: 'PROPERTY_UNIT_NOT_FOUND', targetPnu: '1168010100107360024' }]);
+    // 보호 대상 키는 병합으로 보존된다.
+    assert.equal(land.branch, 'LDAREG');
+    assert.deepEqual(land.scopeSnapshot, { scopeHash: 'h' });
 });
 
 test('freezeScopeSnapshot 은 status=PROCESSING 스코프에서만 CAS 한다', async () => {

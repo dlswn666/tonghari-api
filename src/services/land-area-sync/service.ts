@@ -18,7 +18,7 @@ import {
 } from './scope';
 import { BYLOT_SOURCE_POLICY, bylotBasisFallbackPlan } from './bylot';
 import { assembleAttachedPnus, type AtchJibunRowInput } from '../gis-shared/pnu';
-import { buildScopeEvidence, buildScopeSnapshot, capIssues, emptyCounts } from './preview';
+import { buildScopeEvidence, buildScopeSnapshot, capIssues, sanitizeIssue, emptyCounts, type CappedIssues } from './preview';
 import { assembleLdaregApply, type LdaregPnuScan } from './ldareg-branch';
 import { readLandAreaSync, type LandAreaSyncJobRow } from './repository';
 import type {
@@ -45,6 +45,7 @@ import type {
     LandAreaSyncLandTuple,
     LandAreaSyncProposedArea,
     LandAreaSyncScopeSnapshot,
+    LandAreaSyncConfirmation,
     LandAreaSyncApplyLadfrlItem,
     LandAreaSyncApplyLdaregItem,
     ApplyPropertyLandAreaSyncParams,
@@ -91,6 +92,21 @@ export interface LandAreaSyncDbDeps {
     ): Promise<boolean>;
     writeDiscoveryTerminal(jobId: string, unionId: string, input: LandAreaSyncTerminalInput): Promise<boolean>;
     writeScopeState(jobId: string, unionId: string, scopeState: LandAreaSyncScopeState): Promise<boolean>;
+    /**
+     * apply RPC 성공 뒤(terminal=COMPLETED 은 RPC 가 이미 기록) scopeState 와 함께 병합된
+     * terminal issues 를 반영한다(Finding 3). RPC 가 알 수 없는 discovery 단계 extraIssues 를
+     * 보존하기 위한 경로. status 는 건드리지 않는다.
+     */
+    writeAppliedIssues(
+        jobId: string,
+        unionId: string,
+        patch: {
+            scopeState: LandAreaSyncScopeState;
+            issues: LandAreaSyncIssue[];
+            issuesTotal: number;
+            issuesTruncated: boolean;
+        }
+    ): Promise<boolean>;
     markScopedFailed(jobId: string, unionId: string, message: string): Promise<boolean>;
     readBuildingUnits(unionId: string, scopePnus: string[]): Promise<BuildingUnitCandidate[]>;
     readPropertyUnits(unionId: string, scopePnus: string[]): Promise<PropertyUnitCandidate[]>;
@@ -260,6 +276,7 @@ export async function runLandAreaSyncJob(args: RunLandAreaSyncArgs): Promise<voi
         anchorPnu,
         isApplyJob,
         overwriteManualConfirmed,
+        confirmation: (land.confirmation as LandAreaSyncConfirmation | null | undefined) ?? null,
         scanStartedAt,
         dbScope,
         scopeEvidence,
@@ -290,6 +307,8 @@ interface BranchContext {
     anchorPnu: string;
     isApplyJob: boolean;
     overwriteManualConfirmed: boolean;
+    /** apply job(=확인 후속 job)의 immutable confirmation. discovery/LINKED apply 는 null. */
+    confirmation: LandAreaSyncConfirmation | null;
     scanStartedAt: string;
     dbScope: DbScopeResolution;
     scopeEvidence: ReturnType<typeof buildScopeEvidence>;
@@ -461,7 +480,15 @@ async function runLdaregBranch(ctx: BranchContext): Promise<void> {
     };
 
     if (ctx.gateState === 'SINGLE_SCOPE_CONFIRMATION_REQUIRED') {
-        // no-cache single LDAREG — 확인 대기.
+        // 확인된 apply job 을 confirmation 재제안보다 먼저 처리한다(LADFRL 패턴 미러).
+        // 재실행 시 DB evidence 는 불변이라 gate 가 다시 SINGLE 을 반환하는데, 여기서 순서가 뒤바뀌면
+        // 이미 snapshot 이 고정된 apply job 에 재freeze 를 시도하다가 migration [6] snapshot guard 에
+        // 거부돼 job 이 FAILED 로 죽는다. apply 경로는 재freeze 없이 §13.4 barrier 를 거쳐 RPC 로 간다.
+        if (ctx.isApplyJob) {
+            await callApplyAndRecord(ctx, 'LDAREG', snapshot, items, counts, assembled.issues);
+            return;
+        }
+        // no-cache single LDAREG discovery — snapshot 고정 후 확인 대기.
         await freezeAndOfferConfirmation(ctx, 'LDAREG', 'SINGLE_SCOPE_CONFIRMATION_REQUIRED', snapshot, counts, assembled.issues);
         return;
     }
@@ -529,7 +556,10 @@ async function freezeAndOfferConfirmation(
 /**
  * write barrier(§13.1) 충족 시 apply RPC 를 정확히 1회 호출한다. terminal/fatal 후 늦은 callback 은
  * AbortSignal 로 0회. RPC EXCEPTION(rollback) 은 job 을 FAILED 로 기록한다. 성공 시 RPC 가
- * terminal 을 이미 썼으므로 scopeState 만 반영한다.
+ * terminal 을 이미 썼으므로 scopeState(+병합 issues)만 반영한다.
+ *
+ * §13.4 barrier: 확인된 apply job 은 재실행 결과(membership+scopeHash)가 discovery 확인 시점과
+ * 정확히 일치할 때만 RPC 를 호출한다. 어긋나면 기존값을 유지하고 REVIEW_REQUIRED 로 종결(apply 0).
  */
 async function callApplyAndRecord(
     ctx: BranchContext,
@@ -537,10 +567,30 @@ async function callApplyAndRecord(
     snapshot: LandAreaSyncScopeSnapshot,
     items: LandAreaSyncApplyLadfrlItem[] | LandAreaSyncApplyLdaregItem[],
     counts: LandAreaSyncCounts,
-    _extraIssues: LandAreaSyncIssue[] = []
+    extraIssues: LandAreaSyncIssue[] = []
 ): Promise<void> {
     const { deps, jobId, unionId, signal } = ctx;
     if (aborted(signal)) return; // terminal/fatal 이후 apply 금지
+
+    // §13.4 barrier — 확인된 apply job 은 재실행 scope 가 discovery 확인 시점과 exact 일치해야 apply.
+    // DB apply RPC 도 동일 lineage 를 재검증하지만(이중 방어), 여기서 먼저 걸러 재실행 scope 가 바뀐
+    // 경우 불필요한 write transaction 을 열지 않고 apply RPC 를 0회로 만든다.
+    if (ctx.isApplyJob && ctx.confirmation) {
+        const scopeMatches = snapshot.scopeHash === ctx.confirmation.confirmedDiscoveryScopeHash;
+        const membershipMatches =
+            snapshot.propertyMembershipHash === ctx.confirmation.confirmedPropertyMembershipHash;
+        if (!scopeMatches || !membershipMatches) {
+            // 확인 대상·재실행 scope 불일치 → 기존값 유지, apply 0, REVIEW_REQUIRED.
+            await finalizeDiscoveryTerminal(deps, jobId, unionId, {
+                status: 'COMPLETED',
+                scopeState: 'REVIEW_REQUIRED',
+                outcome: 'REVIEW_REQUIRED',
+                issues: [{ code: 'LAND_SCOPE_CONFIRMATION_MISMATCH' }, ...extraIssues],
+                counts,
+            });
+            return;
+        }
+    }
 
     const scanCompleteness: LandAreaSyncScanCompleteness = 'COMPLETE';
     const res = await deps.db.applyRpc({
@@ -563,14 +613,61 @@ async function callApplyAndRecord(
         return;
     }
 
+    const rpcIssues = parseRpcIssues(res.data);
     const outcome = str((res.data as { outcome?: unknown })?.outcome) as LandAreaSyncOutcome;
-    const issueCodes = new Set(
-        Array.isArray((res.data as { issues?: unknown })?.issues)
-            ? ((res.data as { issues: Array<{ code?: string }> }).issues.map((i) => str(i.code)))
-            : []
-    );
+    const issueCodes = new Set(rpcIssues.map((i) => i.code as string));
     const scopeState = deriveApplyScopeState(ctx, outcome, issueCodes);
+
+    // Finding 3 — discovery 단계 extraIssues(component 단위 RATIO_PARSE_FAILED·matcher NO_CHANGE·
+    // dedup conflict 등)는 RPC 가 재계산할 수 없다(해당 component 는 p_items 에서 이미 제외). RPC 가
+    // 쓴 terminal issues 에 병합해 유실을 막는다. extraIssues 가 없으면 기존 경로(scopeState 만) 유지.
+    if (extraIssues.length > 0) {
+        const merged = mergeTerminalIssues(rpcIssues, extraIssues);
+        await deps.db.writeAppliedIssues(jobId, unionId, {
+            scopeState,
+            issues: merged.issues,
+            issuesTotal: merged.issuesTotal,
+            issuesTruncated: merged.issuesTruncated,
+        });
+        return;
+    }
     await deps.db.writeScopeState(jobId, unionId, scopeState);
+}
+
+/** apply RPC 반환 issues 를 §17.3 allowlist 로 정제해 뽑는다(임의 필드 유입 방지). */
+function parseRpcIssues(data: unknown): LandAreaSyncIssue[] {
+    const arr = (data as { issues?: unknown })?.issues;
+    if (!Array.isArray(arr)) return [];
+    return arr
+        .filter((x): x is Record<string, unknown> => !!x && typeof x === 'object')
+        .map((x) =>
+            sanitizeIssue({
+                code: str(x.code) as LandAreaSyncIssueCode,
+                propertyUnitId: typeof x.propertyUnitId === 'string' ? x.propertyUnitId : undefined,
+                targetPnu: typeof x.targetPnu === 'string' ? x.targetPnu : undefined,
+                dong: typeof x.dong === 'string' ? x.dong : undefined,
+                ho: typeof x.ho === 'string' ? x.ho : undefined,
+            })
+        );
+}
+
+/**
+ * RPC terminal issues 와 discovery extraIssues 를 병합한다(Finding 3). sanitize 후 (code·
+ * propertyUnitId·targetPnu·dong·ho) 정체성 기준으로 중복을 제거하고, capIssues 로 200건 상한·
+ * truncated 규칙을 SINGLE 경로(finalizeDiscoveryTerminal)와 동일하게 적용한다. RPC issues 를 앞에
+ * 두어 상한 절단 시 RPC 결과가 우선 보존된다.
+ */
+function mergeTerminalIssues(rpcIssues: LandAreaSyncIssue[], extraIssues: LandAreaSyncIssue[]): CappedIssues {
+    const seen = new Set<string>();
+    const deduped: LandAreaSyncIssue[] = [];
+    for (const issue of [...rpcIssues, ...extraIssues]) {
+        const s = sanitizeIssue(issue);
+        const key = `${s.code}|${s.propertyUnitId ?? ''}|${s.targetPnu ?? ''}|${s.dong ?? ''}|${s.ho ?? ''}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        deduped.push(s);
+    }
+    return capIssues(deduped);
 }
 
 function deriveApplyScopeState(
