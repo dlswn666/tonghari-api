@@ -140,15 +140,37 @@ function aborted(signal?: AbortSignal): boolean {
     return signal?.aborted === true;
 }
 
-/** title rows → 정렬된 distinct root 관리 PK(mgmUpBldrgstPk 우선). */
+/**
+ * 한 title scan → 정렬된 distinct root 관리 PK. 계열 grouping 목적이므로 up-PK 우선
+ * (`mgmUpBldrgstPk` 있으면 그 값, 없으면 `mgmBldrgstPk`). anchor title 로 뽑은 결과가
+ * resolver 호출 입력(`p_root_mgm_bldrgst_pks`)이자 snapshot.resolverRootPks 로 고정된다(C1).
+ * ⚠️ up-PK/self-PK 축 선택은 Phase 0 실측 확정 항목이며, matcher 2단계·expos root 비교와
+ * 동일 축(up 우선)을 쓴다. bylot reduce 는 이와 별개로 정확 PK(self) 축을 유지한다.
+ */
 function deriveRootPks(scan: StrictScan<BrTitleRow>): string[] {
-    if (scan.state !== 'COMPLETE') return [];
+    return collectRootPks([scan]);
+}
+
+/**
+ * gate 입력으로 채택된 전 base title 의 계열 root 를 통일 유도한다(C1). matcher 의 scopeRootIdentity
+ * 는 anchor title 단독이 아니라 전 base title 계열 기준(up-PK 우선)으로 뽑아 anchor 가 up-PK 를
+ * 누락한 component 여도 계열 root 가 흔들리지 않게 한다.
+ */
+function deriveSeriesRootPks(baseScans: BasePnuScan[]): string[] {
+    return collectRootPks(baseScans.map((b) => b.title));
+}
+
+/** title scan 묶음에서 up-PK 우선 root 를 정렬·dedup 수집한다. */
+function collectRootPks(scans: StrictScan<BrTitleRow>[]): string[] {
     const set = new Set<string>();
-    for (const r of scan.rows) {
-        const up = str(r.mgmUpBldrgstPk).trim();
-        const self = str(r.mgmBldrgstPk).trim();
-        const root = up.length > 0 ? up : self;
-        if (root.length > 0) set.add(root);
+    for (const scan of scans) {
+        if (scan.state !== 'COMPLETE') continue;
+        for (const r of scan.rows) {
+            const up = str(r.mgmUpBldrgstPk).trim();
+            const self = str(r.mgmBldrgstPk).trim();
+            const root = up.length > 0 ? up : self;
+            if (root.length > 0) set.add(root);
+        }
     }
     return [...set].sort();
 }
@@ -286,7 +308,10 @@ export async function runLandAreaSyncJob(args: RunLandAreaSyncArgs): Promise<voi
         bylot: gate.bylot,
         dbScopeHash: gate.dbScopeHash,
         externalScopeDigest: gate.externalScopeDigest,
-        rootPk: rootPks[0] ?? '',
+        // matcher scopeRootIdentity: 전 base title 계열 root(up-PK 우선, C1).
+        rootPk: deriveSeriesRootPks(baseScans)[0] ?? '',
+        // resolver 호출 입력(anchor title 계열 root) — snapshot.resolverRootPks 로 고정한다(C1 계약).
+        resolverRootPks: rootPks,
         baseScans,
     };
 
@@ -317,7 +342,10 @@ interface BranchContext {
     bylot: import('./bylot').BylotResolution;
     dbScopeHash: string;
     externalScopeDigest: string;
+    /** matcher scopeRootIdentity(전 base title 계열 root, up-PK 우선). */
     rootPk: string;
+    /** resolver 호출에 실제 쓴 root 식별자(anchor title 계열, 정렬·dedup). snapshot 고정 대상(C1). */
+    resolverRootPks: string[];
     baseScans: BasePnuScan[];
 }
 
@@ -366,6 +394,7 @@ async function runLadfrlBranch(ctx: BranchContext): Promise<void> {
         strategy: 'LADFRL',
         frozenAt: deps.now().toISOString(),
         scannedPnus: ctx.scannedPnus,
+        resolverRootPks: ctx.resolverRootPks,
         bylot: ctx.bylot,
         dbScopeHash: ctx.dbScopeHash,
         externalScopeDigest: ctx.externalScopeDigest,
@@ -432,7 +461,15 @@ async function runLdaregBranch(ctx: BranchContext): Promise<void> {
             }
         }
         ldaregRegistryRows += rows(ldareg).length;
-        perPnu.push({ pnu, ldaregRows: rows(ldareg), exposRows: rows(expos) });
+        // I2: 같은 실행의 LADFRL 필지면적을 추출해 component 분모 대조(§12.1·§7.5)에 연결한다.
+        const ladfrlAreaStr = extractLadfrlArea(ladfrl, pnu);
+        const ladfrlAreaNum = ladfrlAreaStr != null ? Number(ladfrlAreaStr) : null;
+        perPnu.push({
+            pnu,
+            ldaregRows: rows(ldareg),
+            exposRows: rows(expos),
+            ladfrlArea: ladfrlAreaNum != null && Number.isFinite(ladfrlAreaNum) ? ladfrlAreaNum : null,
+        });
     }
 
     const buildingUnits = await deps.db.readBuildingUnits(unionId, scannedPnus);
@@ -460,6 +497,7 @@ async function runLdaregBranch(ctx: BranchContext): Promise<void> {
         strategy: 'LDAREG',
         frozenAt: deps.now().toISOString(),
         scannedPnus,
+        resolverRootPks: ctx.resolverRootPks,
         bylot: ctx.bylot,
         dbScopeHash: ctx.dbScopeHash,
         externalScopeDigest: ctx.externalScopeDigest,
@@ -616,7 +654,7 @@ async function callApplyAndRecord(
     const rpcIssues = parseRpcIssues(res.data);
     const outcome = str((res.data as { outcome?: unknown })?.outcome) as LandAreaSyncOutcome;
     const issueCodes = new Set(rpcIssues.map((i) => i.code as string));
-    const scopeState = deriveApplyScopeState(ctx, outcome, issueCodes);
+    const scopeState = deriveApplyScopeState(ctx, strategy, outcome, issueCodes);
 
     // Finding 3 — discovery 단계 extraIssues(component 단위 RATIO_PARSE_FAILED·matcher NO_CHANGE·
     // dedup conflict 등)는 RPC 가 재계산할 수 없다(해당 component 는 p_items 에서 이미 제외). RPC 가
@@ -672,6 +710,7 @@ function mergeTerminalIssues(rpcIssues: LandAreaSyncIssue[], extraIssues: LandAr
 
 function deriveApplyScopeState(
     ctx: BranchContext,
+    strategy: LandAreaSyncStrategy,
     outcome: LandAreaSyncOutcome,
     issueCodes: Set<string>
 ): LandAreaSyncScopeState {
@@ -683,8 +722,12 @@ function deriveApplyScopeState(
     }
     // APPLIED / PARTIAL / NO_DATA
     if (ctx.isApplyJob) {
-        // MANUAL overwrite(LINKED) 확인 apply 는 LINKED, 그 외 확인 apply 는 SINGLE_PNU_CONFIRMED.
-        return ctx.overwriteManualConfirmed ? 'LINKED_SCOPE_RESOLVED' : 'SINGLE_PNU_CONFIRMED';
+        // MANUAL overwrite(LINKED)는 LDAREG(다중 PNU 계열) 확인 apply 에만 해당한다. LADFRL 은
+        // 단일 PNU 전략이라 overwrite 확인 apply 여도 SINGLE_PNU_CONFIRMED 로 표기한다(원장 승격 —
+        // 기존엔 overwriteManualConfirmed=true 인 LADFRL 을 LINKED_SCOPE_RESOLVED 로 오표기했다).
+        return strategy !== 'LADFRL' && ctx.overwriteManualConfirmed
+            ? 'LINKED_SCOPE_RESOLVED'
+            : 'SINGLE_PNU_CONFIRMED';
     }
     return 'LINKED_SCOPE_RESOLVED';
 }

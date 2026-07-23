@@ -53,8 +53,10 @@ interface Spy {
     scopeStateCalls: string[];
     failedCalls: string[];
     lastApplyParams: unknown;
-    /** freezeScopeSnapshot 로 고정된 snapshot 의 scope/membership hash. */
-    frozenSnapshots: Array<{ scopeHash: string; propertyMembershipHash: string }>;
+    /** resolveScope 로 넘어간 params(p_root_mgm_bldrgst_pks 검증용). */
+    resolverParams: Array<{ p_root_mgm_bldrgst_pks: string[] }>;
+    /** freezeScopeSnapshot 로 고정된 snapshot 의 scope/membership hash + resolverRootPks. */
+    frozenSnapshots: Array<{ scopeHash: string; propertyMembershipHash: string; resolverRootPks: string[] }>;
     /** writeAppliedIssues(Finding 3 병합 경로) 호출 인자. */
     appliedIssuesCalls: Array<{ scopeState: string; issues: LandAreaSyncIssue[]; issuesTotal: number; issuesTruncated: boolean }>;
 }
@@ -82,7 +84,10 @@ function makeDeps(opts: {
         now: () => new Date('2026-07-23T00:00:00.000Z'),
         scans: { ...defaultScans, ...opts.scans },
         db: {
-            resolveScope: async () => ({ data: opts.resolver, error: null }),
+            resolveScope: async (params) => {
+                spy.resolverParams.push({ p_root_mgm_bldrgst_pks: params.p_root_mgm_bldrgst_pks });
+                return { data: opts.resolver, error: null };
+            },
             applyRpc: async (params) => {
                 spy.applyCalls += 1;
                 spy.lastApplyParams = params;
@@ -101,6 +106,7 @@ function makeDeps(opts: {
                 spy.frozenSnapshots.push({
                     scopeHash: patch.scopeSnapshot.scopeHash,
                     propertyMembershipHash: patch.scopeSnapshot.propertyMembershipHash,
+                    resolverRootPks: patch.scopeSnapshot.resolverRootPks,
                 });
                 return true;
             },
@@ -136,6 +142,7 @@ function emptySpy(): Spy {
         scopeStateCalls: [],
         failedCalls: [],
         lastApplyParams: null,
+        resolverParams: [],
         frozenSnapshots: [],
         appliedIssuesCalls: [],
     };
@@ -376,4 +383,59 @@ test('LINKED LDAREG 즉시적용: discovery extraIssue 가 terminal issues 에 �
     assert.ok(codes.includes('PROPERTY_UNIT_NOT_FOUND'), 'discovery extraIssue(유실되던 값) 보존');
     assert.ok(codes.includes('LDAREG_IDENTITY_CONFLICT'), 'RPC 반환 issue 보존');
     assert.equal(codes.filter((c) => c === 'PROPERTY_UNIT_NOT_FOUND').length, 1, 'RPC 반환 issue 와 중복 dedup');
+});
+
+// ── C1: resolverRootPks 계약(up-PK ≠ self-PK) ─────────────────────────
+
+/** anchor title 이 up-PK(계열 root)와 self-PK(동별)를 모두 갖는 총괄표제부 집합건물 케이스. */
+function titleUpVsSelf(pair: typeof DETACHED, up: string, self: string): StrictScan<BrTitleRow> {
+    return {
+        state: 'COMPLETE',
+        rows: [{ mgmBldrgstPk: self, mgmUpBldrgstPk: up, bylotCnt: '0', regstrGbCd: pair.regstrGbCd, mainPurpsCd: pair.mainPurpsCd, mainPurpsCdNm: pair.mainPurpsCdNm }],
+        totalCount: 1,
+        pagesFetched: 1,
+    };
+}
+
+test('C1: mgmUpBldrgstPk ≠ mgmBldrgstPk 일 때 resolver 는 up-PK 로 호출되고 snapshot.resolverRootPks == resolver 입력', async () => {
+    const spy = emptySpy();
+    const deps = makeDeps({
+        resolver: noEvidence(MEMBER),
+        scans: { scanTitle: async () => titleUpVsSelf(DETACHED, 'UP-ROOT', 'SELF-A') },
+        spy,
+    });
+    await runLandAreaSyncJob({ jobId: 'job-1', unionId: 'union-1', deps });
+
+    // resolver 는 up-PK 우선으로 유도된 root 로 호출된다(self-PK 아님).
+    assert.deepEqual(spy.resolverParams[0].p_root_mgm_bldrgst_pks, ['UP-ROOT']);
+    // 고정 snapshot 의 resolverRootPks 는 resolver 호출 입력과 정확히 일치해야 한다(웹 [5.3] 재검증 계약).
+    assert.equal(spy.freezeCalls, 1);
+    assert.deepEqual(spy.frozenSnapshots[0].resolverRootPks, spy.resolverParams[0].p_root_mgm_bldrgst_pks);
+    assert.deepEqual(spy.frozenSnapshots[0].resolverRootPks, ['UP-ROOT']);
+});
+
+// ── 원장 승격: LADFRL manual-overwrite apply → SINGLE_PNU_CONFIRMED ───
+
+test('원장 승격: LADFRL overwrite 확인 apply 완료는 SINGLE_PNU_CONFIRMED(LINKED_SCOPE_RESOLVED 오표기 회귀 가드)', async () => {
+    // discovery 로 고정될 scope/membership hash 캡처.
+    const disc = emptySpy();
+    await runLandAreaSyncJob({ jobId: 'job-1', unionId: 'union-1', deps: makeDeps({ resolver: noEvidence(MEMBER), spy: disc }) });
+    const frozen = disc.frozenSnapshots[0];
+
+    // overwriteManualConfirmed=true 인 LADFRL 확인 apply job. 수정 전에는 LINKED_SCOPE_RESOLVED 로
+    // 오표기됐다. LADFRL 은 단일 PNU 전략이므로 SINGLE_PNU_CONFIRMED 여야 한다.
+    const spy = emptySpy();
+    const deps = makeDeps({
+        resolver: noEvidence(MEMBER),
+        applyResult: { data: { outcome: 'APPLIED', issues: [] }, error: null },
+        jobPreviewData: applyJobPreview({
+            confirmedDiscoveryScopeHash: frozen.scopeHash,
+            confirmedPropertyMembershipHash: frozen.propertyMembershipHash,
+            overwriteManualConfirmed: true,
+        }),
+        spy,
+    });
+    await runLandAreaSyncJob({ jobId: 'job-1', unionId: 'union-1', deps });
+    assert.equal(spy.applyCalls, 1, 'overwrite 확인 apply RPC 1회');
+    assert.deepEqual(spy.scopeStateCalls, ['SINGLE_PNU_CONFIRMED'], 'LADFRL 은 overwrite 여도 SINGLE_PNU_CONFIRMED');
 });

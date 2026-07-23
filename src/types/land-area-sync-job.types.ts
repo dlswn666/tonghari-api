@@ -76,6 +76,17 @@ export interface LandAreaSyncScopeSnapshot {
     frozenAt: string;
     strategy: LandAreaSyncStrategy;
     scannedPnus: string[];
+    /**
+     * DB resolver(`resolve_land_area_sync_scope_v1`) 호출에 실제 사용한 root 관리번호 식별자
+     * 배열(정렬·dedup). up-PK 우선(`mgmUpBldrgstPk` 있으면 그 값, 없으면 `mgmBldrgstPk`)으로
+     * anchor PNU 표제부에서 유도한 `p_root_mgm_bldrgst_pks` 그대로다.
+     *
+     * ⚠️ 계약(웹 [5.3] apply RPC 재검증 대상): apply RPC 는 dbScopeHash 재검증 시 이 필드로
+     * resolver 를 재호출해야 한다. bylotEvidence.mgmBldrgstPk(정확 PK)로 재유도하면
+     * `mgmUpBldrgstPk ≠ mgmBldrgstPk` 필지에서 dbScopeHash 가 결정적으로 달라져
+     * SCOPE_CHANGED_DURING_SYNC 로 오탈락한다. 위조는 dbScopeHash 재검증이 방어한다.
+     */
+    resolverRootPks: string[];
     bylotSourcePolicy: BylotSourcePolicy;
     bylotEvidence: LandAreaSyncBylotEvidence[];
     dbScopeHash: string;

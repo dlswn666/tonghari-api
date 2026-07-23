@@ -30,6 +30,7 @@ test('buildScopeSnapshot: 3층 hash·정렬 candidate·정렬 bylotEvidence 를 
         strategy: 'LDAREG',
         frozenAt: '2026-07-23T00:00:00.000Z',
         scannedPnus: [PNU],
+        resolverRootPks: ['PK-UP', 'PK-UP', 'PK-A'],
         bylot,
         dbScopeHash: 'db-hash',
         externalScopeDigest: 'ext-digest',
@@ -47,6 +48,8 @@ test('buildScopeSnapshot: 3층 hash·정렬 candidate·정렬 bylotEvidence 를 
     assert.equal(snapshot.externalScopeDigest, 'ext-digest');
     assert.deepEqual(snapshot.candidatePropertyUnitIds, [UUID_A]); // distinct + sorted
     assert.deepEqual(snapshot.bylotEvidence.map((e) => e.mgmBldrgstPk), ['PKA', 'PKB']); // sorted
+    // C1: resolverRootPks 는 정렬·dedup 되어 고정된다(웹 [5.3] 재검증 계약 입력).
+    assert.deepEqual(snapshot.resolverRootPks, ['PK-A', 'PK-UP']);
     assert.equal(snapshot.canonicalVersion, 1);
 });
 

@@ -47,6 +47,16 @@ export interface LdaregObservationInput {
     observedAt?: string | null;
     /** provider가 준 상태. clsSeCode→sourceState 매핑은 호출측(Task 10) 책임. 기본 CURRENT. */
     sourceState?: LdaregSourceState;
+    /**
+     * clsSeCode→sourceState 매핑이 불명확(자동 말소/유효 판정 불가)이었는지. dedup 대표 record 로
+     * 운반해 호출측이 component 단위 review issue 를 push 하도록 한다(§13.4 "CURRENT 유지 + 표시").
+     */
+    sourceStateAmbiguous?: boolean;
+    /**
+     * 원본 scan row 인덱스(호출측 `ldaregRows[i]`). dedup 이 대표 record 로 이 인덱스를 운반해,
+     * 호출측이 정확한 raw row 에서 §7.3 source_record 를 추출하게 한다(FALLBACK 오염 방지, I1).
+     */
+    sourceIndex?: number;
     /** 사전 해소된 property_unit 링크(있으면 property×PNU 모호성 검사 대상). */
     propertyUnitId?: string | null;
 }
@@ -69,6 +79,15 @@ export interface LdaregSourceRecord {
     /** 대표 variable payload(다운스트림 참고용, identity 아님). */
     ldaQotaRateRaw: string | null;
     propertyUnitId: string | null;
+    /**
+     * 대표 관측의 원본 scan row 인덱스(호출측 `ldaregRows[sourceRowIndex]`). §7.3 source_record 를
+     * fragile 한 find 대신 이 인덱스로 정확히 추출한다(I1). 운반값 없으면 -1.
+     */
+    sourceRowIndex: number;
+    /** 대표 관측의 agbldgSn(별도 필드 운반 — identity 문자열 파싱 복원 제거, M5). */
+    agbldgSn: string | null;
+    /** clsSeCode 매핑 불명확 여부(§13.4 review 표시용). */
+    sourceStateAmbiguous: boolean;
 }
 
 /** dedup/모호성 issue 1건. */
@@ -243,6 +262,9 @@ function buildRecord(c: Candidate, state: LdaregSourceState): LdaregSourceRecord
         normalized: c.normalized,
         ldaQotaRateRaw: c.input.ldaQotaRate ?? null,
         propertyUnitId: c.input.propertyUnitId ?? null,
+        sourceRowIndex: typeof c.input.sourceIndex === 'number' ? c.input.sourceIndex : -1,
+        agbldgSn: nfkcTrim(c.input.agbldgSn) || null,
+        sourceStateAmbiguous: c.input.sourceStateAmbiguous === true,
     };
 }
 

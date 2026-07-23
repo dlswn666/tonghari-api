@@ -63,6 +63,8 @@ export interface ScopeSnapshotInput {
     strategy: LandAreaSyncStrategy;
     frozenAt: string;
     scannedPnus: string[];
+    /** DB resolver 호출에 실제 사용한 root 관리번호 식별자(정렬·dedup, up-PK 우선). CAS 로 함께 고정. */
+    resolverRootPks: string[];
     bylot: BylotResolution;
     dbScopeHash: string;
     externalScopeDigest: string;
@@ -118,6 +120,8 @@ export function buildScopeSnapshot(input: ScopeSnapshotInput): LandAreaSyncScope
         frozenAt: input.frozenAt,
         strategy: input.strategy,
         scannedPnus: [...input.scannedPnus],
+        // resolver 호출 입력을 그대로 고정한다(정렬·dedup 는 이미 deriveRootPks 가 보장하나 방어적 정규화).
+        resolverRootPks: [...new Set(input.resolverRootPks)].sort(),
         bylotSourcePolicy: BYLOT_SOURCE_POLICY.policy,
         bylotEvidence: toBylotEvidence(input.bylot),
         dbScopeHash: input.dbScopeHash,

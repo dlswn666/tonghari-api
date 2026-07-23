@@ -76,7 +76,9 @@ test('LINKED LDAREG discovery: preview_data(snapshot)·scopeState·로그에 pro
             getBrTitleInfo: () => hubEnv([titleRow(PK, '0', MULTIPLEX, CANARY_TITLE_EXTRA)]),
             getBrAtchJibunInfo: () => hubEnv([]),
             ldaregList: () => ldaregEnv([ldaregRow(ANCHOR, {}, CANARY_LDAREG_EXTRA)]),
-            ladfrlList: () => ladfrlEnv([ladfrlRow(ANCHOR, '100.5', { ownerNm: OWNER })]),
+            // I2: 같은 실행의 LADFRL 면적을 ldaregRow 기본 비율 분모(15622.1)와 일치시켜야 CURRENT
+            // component 가 §12.1 분모 대조를 통과해 apply 된다(양성 대조 대상). canary(ownerNm)는 유지.
+            ladfrlList: () => ladfrlEnv([ladfrlRow(ANCHOR, '15622.1', { ownerNm: OWNER })]),
             getBrExposInfo: () => hubEnv([{ ...exposRow(), ownerNm: OWNER, ownerTelno: PHONE }]),
         },
         propertyUnits: [LDAREG_PROPERTY],

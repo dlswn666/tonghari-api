@@ -129,6 +129,9 @@ export function matchLdaregUnit(input: MatchInput): MatchDecision {
     const expos = exposMatches[0];
 
     // 2) 전유부 root identity == scope root identity
+    // 두 축 모두 up-PK 우선(`mgmUpBldrgstPk ?? mgmBldrgstPk`)으로 통일한다: scopeRootIdentity 는
+    // 전 base title 계열 root, expos.rootIdentity 는 toExposCandidate 가 같은 축으로 뽑는다(C1).
+    // ⚠️ expos row 의 root 식별 필드(up vs self)는 Phase 0 실측 확정 항목이다.
     if (nonEmpty(expos.rootIdentity) !== nonEmpty(scopeRootIdentity) || nonEmpty(scopeRootIdentity) === '') {
         return noChange('ROOT_IDENTITY', 'ROOT_MISMATCH', 'LDAREG_IDENTITY_CONFLICT');
     }
