@@ -64,6 +64,19 @@ export class GisInspectService {
     }
 
     /** 외부 API 1회 호출을 InspectStep으로 감싼다 — 실패해도 throw하지 않는다 */
+    /**
+     * VWorld는 호출량 제한(레이트리밋)에 걸리면 정상 요청에도 본문에
+     * INCORRECT_KEY 에러를 돌려준다 (HTTP 200). 재시도·실패 표시 대상으로 판별한다.
+     */
+    private hasIncorrectKeyBody(data: unknown): boolean {
+        if (!data || typeof data !== 'object') return false;
+        try {
+            return JSON.stringify(data).includes('INCORRECT_KEY');
+        } catch {
+            return false;
+        }
+    }
+
     private async callStep(
         id: string,
         endpoint: string,
@@ -71,11 +84,41 @@ export class GisInspectService {
     ): Promise<InspectStep> {
         const meta = this.stepMeta(id);
         const startedAt = Date.now();
+        // 레이트리밋 추정 상황에서 연사 증폭을 피하기 위해 재시도는 1회만, 충분히 쉬고 한다
+        const maxBodyErrorAttempts = 2;
+        const bodyErrorRetryDelayMs = 1500;
+        let bodyErrorRetries = 0;
+
         try {
-            const { data } = await this.httpGet(endpoint, { params, timeout: REQUEST_TIMEOUT_MS });
+            let data: unknown;
+            for (let attempt = 1; attempt <= maxBodyErrorAttempts; attempt++) {
+                const response = await this.httpGet(endpoint, { params, timeout: REQUEST_TIMEOUT_MS });
+                data = response.data;
+                if (!this.hasIncorrectKeyBody(data)) break;
+                if (attempt < maxBodyErrorAttempts) {
+                    bodyErrorRetries += 1;
+                    logger.warn(`inspect step ${id}: INCORRECT_KEY 응답(레이트리밋 추정) — ${bodyErrorRetryDelayMs}ms 후 재시도`);
+                    await this.sleep(bodyErrorRetryDelayMs);
+                }
+            }
+
+            const requestParams = {
+                ...maskSecretParams(params),
+                ...(bodyErrorRetries > 0 ? { bodyErrorRetries } : {}),
+            };
+
+            if (this.hasIncorrectKeyBody(data)) {
+                return {
+                    id, name: meta.name, provider: meta.provider, endpoint,
+                    requestParams,
+                    status: 'ERROR', durationMs: Date.now() - startedAt, rawJson: data,
+                    error: 'VWorld 인증키 오류 응답 — 연속 호출 제한(레이트리밋)으로 추정됩니다. 1분 정도 후 다시 검색해 보세요.',
+                };
+            }
+
             return {
                 id, name: meta.name, provider: meta.provider, endpoint,
-                requestParams: maskSecretParams(params),
+                requestParams,
                 status: 'SUCCESS', durationMs: Date.now() - startedAt, rawJson: data,
             };
         } catch (error) {

@@ -1044,7 +1044,7 @@ jobId + unionId + jobType=LAND_AREA_SYNC + databaseTarget
 
 `scopeSnapshot.bylotEvidence`는 expected 관리 PK를 모두 포함하는 `mgmBldrgstPk` 오름차순 bounded 배열이며 `scopeSnapshot`과 함께 CAS·trigger 보호를 받는다. `TITLE_ONLY`는 basis 미호출 title 정상값, `FALLBACK_RESOLVED`는 title 유효값 없이 basis로 확정, `MATCHED`는 호출된 basis와 title 유효값 일치, `CROSS_CHECK_NOT_AVAILABLE`은 다른 PK 때문에 basis를 호출했지만 현재 title-valid PK의 basis 유효값은 관측되지 않은 상태다. 값을 확정하지 못한 PK도 `source/rawValue/count=null`, `crossCheckState=UNAVAILABLE|CONFLICT`로 남기며 첫 row나 0으로 축약하지 않는다.
 
-discovery job과 확인이 필요 없는 LINKED apply job의 `confirmation`은 `null`이다. single LDAREG 확인은 필지 범위 필드만 요구하고 토지 소유 필드는 `null`, LADFRL은 필지 범위·토지 소유를 모두 요구한다. LINKED LDAREG의 MANUAL 충돌은 필지 범위 재확인 없이 `overwriteManualConfirmed`만 요구한다. `sourceDiscoveryJobId`, `scopeSnapshot`, `confirmation`은 최초 CAS 뒤 수정할 수 없고 terminal 결과는 별도 `outcome/counts/issues` 필드에만 기록한다.
+discovery job과 확인이 필요 없는 LINKED apply job의 `confirmation`은 `null`이다. single LDAREG 확인은 필지 범위 필드만 요구하고 토지 소유 필드는 `null`, LADFRL은 필지 범위·토지 소유를 모두 요구한다. LINKED LDAREG의 MANUAL 충돌은 다른 confirmation과 동일하게 필지 범위 확인·근거를 요구하고, 거기에 `overwriteManualConfirmed`를 추가로 요구한다(admission RPC [5.2]가 모든 confirmation 상태에서 `parcelScopeConfirmed`와 필지 범위 근거를 무조건 검증한다 — 구현이 권위). `sourceDiscoveryJobId`, `scopeSnapshot`, `confirmation`은 최초 CAS 뒤 수정할 수 없고 terminal 결과는 별도 `outcome/counts/issues` 필드에만 기록한다.
 
 제한:
 
