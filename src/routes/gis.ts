@@ -1,6 +1,7 @@
 import { Response, Router } from 'express';
 import { gisQueueService } from '../services/gis.queue.service';
 import { gisService } from '../services/gis.service';
+import { gisInspectService } from '../services/gis-inspect.service';
 import { getSupabaseService } from '../services/supabase.service';
 import { databaseTargetAuthMiddleware as authMiddleware } from '../middleware/auth';
 import { gisSystemAdminMiddleware } from '../middleware/gis-system-admin';
@@ -645,5 +646,45 @@ function parseWktToGeoJson(wkt: string): GeoJSON.Geometry | null {
         return null;
     }
 }
+
+/**
+ * 토지·건물 외부 API 일괄 검수 (인스펙터 전용)
+ * - 13스텝 외부 API를 일괄 호출해 원본 JSON을 그대로 반환한다
+ * - DB 읽기/쓰기 없음 (조회 전용)
+ * body: { unionId: string, address: { roadAddress, jibunAddress, bcode, mainNo, subNo, mountainYn } }
+ */
+router.post('/inspect', authMiddleware, gisSystemAdminMiddleware, async (req, res) => {
+    const { address } = req.body ?? {};
+
+    const isValidAddress =
+        address &&
+        typeof address === 'object' &&
+        typeof address.roadAddress === 'string' &&
+        typeof address.jibunAddress === 'string' &&
+        typeof address.bcode === 'string' &&
+        (address.jibunAddress.trim() || address.roadAddress.trim());
+
+    if (!isValidAddress) {
+        return res.status(400).json({
+            success: false,
+            error: 'address(카카오 주소 검색 결과)가 필요합니다.',
+        });
+    }
+
+    try {
+        const result = await gisInspectService.inspect({
+            roadAddress: address.roadAddress,
+            jibunAddress: address.jibunAddress,
+            bcode: address.bcode,
+            mainNo: typeof address.mainNo === 'string' ? address.mainNo : '',
+            subNo: typeof address.subNo === 'string' ? address.subNo : '',
+            mountainYn: address.mountainYn === 'Y' ? 'Y' : 'N',
+        });
+        return res.json({ success: true, ...result });
+    } catch (error) {
+        logger.error('GIS inspect request failed', error);
+        return res.status(500).json({ success: false, error: 'API 검수 조회에 실패했습니다.' });
+    }
+});
 
 export default router;
