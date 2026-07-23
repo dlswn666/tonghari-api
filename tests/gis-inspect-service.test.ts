@@ -217,6 +217,52 @@ test('inspect: 좌표 없으면 좌표 의존 스텝(coord_to_pnu·reverse_geoco
     assert.equal(result.steps.find((s) => s.id === 'land_registry')?.status, 'SUCCESS');
 });
 
+test('inspect: 본문 INCORRECT_KEY는 1회 재시도 후 성공하면 SUCCESS로 기록한다', async () => {
+    const { GisInspectService } = await serviceModule;
+    const { httpGet: baseHttpGet } = createStubHttpGet();
+    let ladfrlCalls = 0;
+    const httpGet = async (url: string, config: { params: Record<string, unknown>; timeout: number }) => {
+        if (url.includes('ladfrlList')) {
+            ladfrlCalls += 1;
+            if (ladfrlCalls === 1) {
+                return {
+                    data: { ladfrlVOList: { error: 'INCORRECT_KEY', message: '인증키 정보가 올바르지 않습니다.' } },
+                };
+            }
+        }
+        return baseHttpGet(url, config);
+    };
+
+    const result = await new GisInspectService(httpGet).inspect(VALID_ADDRESS);
+    const step = result.steps.find((s) => s.id === 'land_registry');
+
+    assert.equal(step?.status, 'SUCCESS');
+    assert.equal(step?.requestParams.bodyErrorRetries, 1);
+    assert.equal(ladfrlCalls, 2);
+});
+
+test('inspect: INCORRECT_KEY가 재시도 후에도 지속되면 ERROR로 표시한다', async () => {
+    const { GisInspectService } = await serviceModule;
+    const { httpGet: baseHttpGet } = createStubHttpGet();
+    let ladfrlCalls = 0;
+    const flakeBody = { ladfrlVOList: { error: 'INCORRECT_KEY', message: '인증키 정보가 올바르지 않습니다.' } };
+    const httpGet = async (url: string, config: { params: Record<string, unknown>; timeout: number }) => {
+        if (url.includes('ladfrlList')) {
+            ladfrlCalls += 1;
+            return { data: flakeBody };
+        }
+        return baseHttpGet(url, config);
+    };
+
+    const result = await new GisInspectService(httpGet).inspect(VALID_ADDRESS);
+    const step = result.steps.find((s) => s.id === 'land_registry');
+
+    assert.equal(step?.status, 'ERROR');
+    assert.match(step?.error ?? '', /레이트리밋/);
+    assert.deepEqual(step?.rawJson, flakeBody);
+    assert.equal(ladfrlCalls, 2);
+});
+
 test('inspect: 공동주택가격은 빈 연도를 건너뛰고 이전 연도로 폴백한다', async () => {
     const { GisInspectService } = await serviceModule;
     const { httpGet, calls } = createStubHttpGet();
