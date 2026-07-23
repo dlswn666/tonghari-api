@@ -1,5 +1,5 @@
 /**
- * 적용 토지면적·대지권 자동 동기화 — strict API adapter 타입.
+ * 대지권면적 자동 동기화 — strict API adapter 타입.
  *
  * 권위 스펙: docs/2026-07-23-land-area-sync-design.md §10.
  * 상태값은 enum이 아니라 string union으로 관리한다.

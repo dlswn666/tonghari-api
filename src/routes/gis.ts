@@ -727,7 +727,7 @@ router.post('/inspect', authMiddleware, gisSystemAdminMiddleware, async (req, re
 });
 
 /**
- * 적용 토지면적·대지권 자동 동기화 discovery 시작 (DESIGN §14.1)
+ * 대지권면적 자동 동기화 discovery 시작 (DESIGN §14.1)
  * body: { unionId: uuid, anchorPnu: 19자리 }
  * SYSTEM_ADMIN 재검증(gis-system-admin) 후 durable INSERT 성공 시 202. admission 실패 시 503.
  */

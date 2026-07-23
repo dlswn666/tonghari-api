@@ -1,5 +1,5 @@
 /**
- * 적용 토지면적·대지권 자동 동기화 — strict API adapter 엔진 + 6 endpoint adapter.
+ * 대지권면적 자동 동기화 — strict API adapter 엔진 + 6 endpoint adapter.
  *
  * 권위 스펙: docs/2026-07-23-land-area-sync-design.md §10.1~10.3, §10.5, §10.7.
  *

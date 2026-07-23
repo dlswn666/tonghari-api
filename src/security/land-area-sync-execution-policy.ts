@@ -1,6 +1,6 @@
 export const LAND_AREA_SYNC_DISABLED_CODE = 'LAND_AREA_SYNC_DISABLED';
 export const LAND_AREA_SYNC_DISABLED_MESSAGE =
-    '적용 토지면적 동기화는 현재 비활성화되어 있습니다.';
+    '대지권면적 동기화는 현재 비활성화되어 있습니다.';
 
 export class LandAreaSyncDisabledError extends Error {
     readonly code = LAND_AREA_SYNC_DISABLED_CODE;

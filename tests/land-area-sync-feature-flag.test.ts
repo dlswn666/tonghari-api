@@ -28,6 +28,13 @@ Object.assign(process.env, {
 const middlewareModule = import('../src/middleware/land-area-sync-enabled');
 const queueModule = import('../src/services/land-area-sync/queue');
 
+test('비활성화 메시지는 사용자 화면 용어인 대지권면적을 사용한다', () => {
+    assert.equal(
+        LAND_AREA_SYNC_DISABLED_MESSAGE,
+        '대지권면적 동기화는 현재 비활성화되어 있습니다.'
+    );
+});
+
 test('feature flag parser는 정확한 소문자 true만 활성화한다', () => {
     assert.equal(parseExactTrueFeatureFlag('true'), true);
 

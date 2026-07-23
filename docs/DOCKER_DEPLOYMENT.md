@@ -62,7 +62,7 @@ BUILDING_WRITE_OPERATION_TARGETS=development
 운영 DB에 W1을 적용하기 전에는 `production`을 추가하지 않는다. 이 값이 없으면 개발 GIS의
 building-family queue producer는 `BUILDING_OPERATION_CAPABILITY_DISABLED`로 fail-closed한다.
 
-적용 토지면적 동기화는 별도 canary allowlist가 구현·승인되기 전까지 전역 OFF를 유지한다.
+대지권면적 동기화는 별도 canary allowlist가 구현·승인되기 전까지 전역 OFF를 유지한다.
 
 ```text
 LAND_AREA_SYNC_ENABLED=false
