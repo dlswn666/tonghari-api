@@ -4,6 +4,11 @@ import { AlimtalkLogInput, AlimtalkTemplate, PricingMap } from '../types/alimtal
 import { SmsSendLogInput } from '../types/sms.types';
 import { createLogger } from '../utils/logger';
 import { DatabaseTarget } from '../types/database.types';
+import type {
+    ResolveScopeParams,
+    CreateConfirmationJobParams,
+    ApplyPropertyLandAreaSyncParams,
+} from '../types/land-area-sync-job.types';
 
 const logger = createLogger('SUPABASE');
 
@@ -1416,6 +1421,75 @@ export class SupabaseService {
             logger.error(`sync_jobs update error (${jobId}): ${error?.message || JSON.stringify(error)}`);
             return false;
         }
+    }
+
+    /**
+     * LAND_AREA_SYNC parcel-scope resolver RPC (migration [5.1], service_role 전용, read-only).
+     * bounded connected component + evidence 를 §11 JSON·dbScopeHash 로 반환한다.
+     */
+    async resolveLandAreaSyncScope(
+        params: ResolveScopeParams
+    ): Promise<{ data: unknown; error: { message: string } | null }> {
+        const { data, error } = await this.client.rpc('resolve_land_area_sync_scope_v1', {
+            p_union_id: params.p_union_id,
+            p_anchor_pnu: params.p_anchor_pnu,
+            p_root_mgm_bldrgst_pks: params.p_root_mgm_bldrgst_pks,
+        });
+        return { data, error: error ? { message: error.message } : null };
+    }
+
+    /**
+     * LAND_AREA_SYNC confirmation-job admission RPC (migration [5.2]). actor SYSTEM_ADMIN·discovery
+     * lineage 를 재검증하고 sourceDiscoveryJobId 를 가진 새 PROCESSING apply job id 를 돌려준다.
+     */
+    async createLandAreaSyncConfirmationJob(
+        params: CreateConfirmationJobParams
+    ): Promise<{ data: string | null; error: { message: string; code?: string } | null }> {
+        const { data, error } = await this.client.rpc('create_land_area_sync_confirmation_job_v1', {
+            p_union_id: params.p_union_id,
+            p_discovery_job_id: params.p_discovery_job_id,
+            p_actor_user_id: params.p_actor_user_id,
+            p_expected_scope_hash: params.p_expected_scope_hash,
+            p_property_unit_ids: params.p_property_unit_ids,
+            p_parcel_scope_confirmed: params.p_parcel_scope_confirmed,
+            p_land_ownership_confirmed: params.p_land_ownership_confirmed,
+            p_overwrite_manual_confirmed: params.p_overwrite_manual_confirmed,
+            p_parcel_scope_evidence_kind: params.p_parcel_scope_evidence_kind,
+            p_parcel_scope_evidence_ref: params.p_parcel_scope_evidence_ref,
+            p_land_ownership_evidence_kind: params.p_land_ownership_evidence_kind,
+            p_land_ownership_evidence_ref: params.p_land_ownership_evidence_ref,
+        });
+        return {
+            data: typeof data === 'string' ? data : null,
+            error: error ? { message: error.message, code: (error as { code?: string }).code } : null,
+        };
+    }
+
+    /**
+     * LAND_AREA_SYNC 원자 적용 RPC (migration [5.3]). write barrier·3층 hash·resolver 재해시·
+     * freshness·lineage 를 재검증하고 lifecycle upsert + property_units projection 을 수행한다.
+     * RPC 가 EXCEPTION 을 던지면 rollback 되므로 error 를 그대로 전달한다.
+     */
+    async applyPropertyLandAreaSync(
+        params: ApplyPropertyLandAreaSyncParams
+    ): Promise<{ data: unknown; error: { message: string; code?: string } | null }> {
+        const { data, error } = await this.client.rpc('apply_property_land_area_sync_v1', {
+            p_union_id: params.p_union_id,
+            p_sync_job_id: params.p_sync_job_id,
+            p_strategy: params.p_strategy,
+            p_scan_started_at: params.p_scan_started_at,
+            p_scan_completeness: params.p_scan_completeness,
+            p_db_scope_hash: params.p_db_scope_hash,
+            p_external_scope_digest: params.p_external_scope_digest,
+            p_scope_hash: params.p_scope_hash,
+            p_scanned_pnus: params.p_scanned_pnus,
+            p_items: params.p_items,
+            p_result_summary: params.p_result_summary,
+        });
+        return {
+            data,
+            error: error ? { message: error.message, code: (error as { code?: string }).code } : null,
+        };
     }
 
     /**

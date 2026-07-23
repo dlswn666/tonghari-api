@@ -378,13 +378,30 @@ function sortKeys(value: unknown): unknown {
     return value;
 }
 
+/** propertyMembership hash 버전(§14.2 propertyMembershipHash). */
+export const PROPERTY_MEMBERSHIP_HASH_VERSION = 'land-area-sync/property-membership@1';
+
+/**
+ * DB `propertyMembership` 의 order-invariant hash (§14.1·§14.2).
+ * discovery snapshot 과 후속 apply job 재실행이 같은 membership 이면 (DB row 순서와 무관하게)
+ * 반드시 같은 hash 를 내야 confirmation lineage 재검증이 성립한다. 뒤섞인 순서 → 동일 hash.
+ */
+export function computePropertyMembershipHash(membership: unknown): string {
+    return sha256Hex(
+        canonicalStableStringify({
+            v: PROPERTY_MEMBERSHIP_HASH_VERSION,
+            membership: normalizePropertyMembershipOrder(membership),
+        })
+    );
+}
+
 /**
  * propertyMembership 배열 순서 정규화.
  * 비결정적 DB row 순서(조회할 때마다 다를 수 있음)를 안정적으로 정렬한다.
  * 정렬 기준: propertyUnitId 오름차순, 동일 시 buildingUnitId 오름차순.
  * 해시 계산에 참여하므로 정렬이 결정론성의 일부가 된다.
  */
-function normalizePropertyMembershipOrder(membership: unknown): unknown {
+export function normalizePropertyMembershipOrder(membership: unknown): unknown {
     if (!Array.isArray(membership)) return membership;
     const items = membership.filter((item) => item && typeof item === 'object');
     return items.sort((a, b) => {
