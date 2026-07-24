@@ -10,7 +10,6 @@
  */
 
 import PQueue from 'p-queue';
-import { v4 as uuidv4 } from 'uuid';
 import { env } from '../../config/env';
 import type { DatabaseTarget } from '../../types/database.types';
 import { assertLandAreaSyncEnabled } from '../../security/land-area-sync-execution-policy';
@@ -30,19 +29,27 @@ import {
 import {
     insertDiscoveryJob,
     getScopedJob,
+    readLandAreaSync,
     freezeScopeSnapshot,
-    writeDiscoveryTerminal,
-    writeScopeState,
-    writeAppliedIssues,
-    markScopedFailed,
+    type LandAreaSyncJobRow,
 } from './repository';
 import {
     readPropertyUnitCandidates,
     readBuildingUnitCandidates,
     readCurrentLandTuples,
 } from './readers';
-import { runLandAreaSyncJob, type LandAreaSyncDeps } from './service';
-import type { LandAreaSyncDiscoveryRequest, LandAreaSyncJobInfo } from '../../types/land-area-sync-job.types';
+import {
+    runLandAreaSyncJob,
+    type LandAreaSyncDeps,
+} from './service';
+import {
+    markScopedFailed,
+    writeDiscoveryTerminal,
+} from './finalizer';
+import type {
+    LandAreaSyncDiscoveryRequest,
+    LandAreaSyncJobInfo,
+} from '../../types/land-area-sync-job.types';
 
 const logger = createLogger('LAND-AREA-SYNC-QUEUE');
 
@@ -80,22 +87,46 @@ class LandAreaSyncQueueService {
             request.anchorPnu
         );
 
-        const jobId = uuidv4();
+        // discovery는 caller가 미리 정한 admission UUID를 durable job id로 사용한다.
+        // confirmation은 DB v2가 별도 job id를 만들며 admissionKey로 exact 조회한다.
+        const jobId = request.admissionKey;
         const database = getSupabaseService(request.databaseTarget);
 
-        await persistSyncJobOrThrow(jobId, request.unionId, () =>
-            insertDiscoveryJob(database.getClient(), jobId, {
-                unionId: request.unionId,
-                anchorPnu: request.anchorPnu,
-                actorUserId: request.actorUserId,
-            })
-        );
+        let existing: LandAreaSyncJobRow | null = null;
+        try {
+            await persistSyncJobOrThrow(jobId, request.unionId, () =>
+                insertDiscoveryJob(database.getClient(), jobId, {
+                    unionId: request.unionId,
+                    anchorPnu: request.anchorPnu,
+                    actorUserId: request.actorUserId,
+                })
+            );
+        } catch (error) {
+            // response-loss replay만 복구한다. exact id+union+type+admission+anchor가
+            // 이미 durable할 때만 기존 job을 재사용하고 다른 insert 실패는 보존한다.
+            existing = await getScopedJob(
+                database.getClient(),
+                jobId,
+                request.unionId
+            ).catch(() => null);
+            const land = existing ? readLandAreaSync(existing) : null;
+            if (
+                !existing ||
+                land?.admissionKey !== request.admissionKey ||
+                land.anchorPnu !== request.anchorPnu ||
+                land.sourceDiscoveryJobId !== null
+            ) {
+                throw error;
+            }
+        }
 
         try {
-            this.admit(jobId, request.unionId, request.databaseTarget);
+            if (!existing || existing.status === 'PROCESSING') {
+                this.admit(jobId, request.unionId, request.databaseTarget);
+            }
         } catch (admissionError) {
             await markScopedFailed(
-                database.getClient(),
+                database,
                 jobId,
                 request.unionId,
                 'queue admission 실패로 작업을 시작하지 못했습니다.'
@@ -137,9 +168,12 @@ class LandAreaSyncQueueService {
         logger.info(`LAND_AREA_SYNC apply job admitted: ${jobId}`);
     }
 
-    private admit(jobId: string, unionId: string, databaseTarget: DatabaseTarget): void {
+    private admit(jobId: string, unionId: string, databaseTarget: DatabaseTarget): boolean {
         const controller = new AbortController();
         const key = this.key(databaseTarget, jobId);
+        if (this.jobs.has(key)) {
+            return false;
+        }
         this.jobs.set(key, { unionId, databaseTarget, controller });
 
         this.queue
@@ -162,10 +196,11 @@ class LandAreaSyncQueueService {
                 this.jobs.delete(key);
                 const message = err instanceof Error ? err.message : 'LAND_AREA_SYNC 워커 오류';
                 logger.error(`LAND_AREA_SYNC job ${jobId} fatal error: ${message}`);
-                await markScopedFailed(getSupabaseService(databaseTarget).getClient(), jobId, unionId, message).catch(
+                await markScopedFailed(getSupabaseService(databaseTarget), jobId, unionId, message).catch(
                     () => undefined
                 );
             });
+        return true;
     }
 
     /** databaseTarget 별 orchestration deps 를 조립한다(adapter + supabase + repository + readers). */
@@ -197,10 +232,20 @@ class LandAreaSyncQueueService {
                 applyRpc: (params) => database.applyPropertyLandAreaSync(params),
                 getScopedJob: (jobId, unionId) => getScopedJob(client, jobId, unionId),
                 freezeScopeSnapshot: (jobId, unionId, patch) => freezeScopeSnapshot(client, jobId, unionId, patch),
-                writeDiscoveryTerminal: (jobId, unionId, input) => writeDiscoveryTerminal(client, jobId, unionId, input),
-                writeScopeState: (jobId, unionId, scopeState) => writeScopeState(client, jobId, unionId, scopeState),
-                writeAppliedIssues: (jobId, unionId, patch) => writeAppliedIssues(client, jobId, unionId, patch),
-                markScopedFailed: (jobId, unionId, message) => markScopedFailed(client, jobId, unionId, message),
+                writeDiscoveryTerminal: (jobId, unionId, input) =>
+                    writeDiscoveryTerminal(
+                        database,
+                        jobId,
+                        unionId,
+                        input
+                    ),
+                markScopedFailed: (jobId, unionId, message) =>
+                    markScopedFailed(
+                        database,
+                        jobId,
+                        unionId,
+                        message
+                    ),
                 readBuildingUnits: (unionId, scopePnus) => readBuildingUnitCandidates(client, unionId, scopePnus),
                 readPropertyUnits: (unionId, scopePnus) => readPropertyUnitCandidates(client, unionId, scopePnus),
                 readCurrentLandTuples: (unionId, ids) => readCurrentLandTuples(client, unionId, ids),

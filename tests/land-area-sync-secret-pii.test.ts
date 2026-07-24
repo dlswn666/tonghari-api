@@ -12,6 +12,7 @@ import test from 'node:test';
 import { runLandAreaSyncJob } from '../src/services/land-area-sync/service';
 import { LandAreaSyncAdapter } from '../src/services/land-area-sync/adapter';
 import type { HttpRequest, HttpResponse, StrictScan, BrTitleRow } from '../src/types/land-area-sync.types';
+import type { LandAreaSyncIssue } from '../src/types/land-area-sync-job.types';
 import {
     ANCHOR,
     PK,
@@ -44,12 +45,15 @@ const CANARIES = [API_KEY, OWNER, PHONE, JWT, RAW, STACK, 'CANARY'];
 
 /** 감시 표면(preview_data + 로그)만 직렬화한다. apply RPC payload 는 별도로 검사. */
 function previewLogSurface(spy: Spy): string {
+    const applyParams = spy.lastApplyParams as {
+        p_result_summary?: { extraIssues?: LandAreaSyncIssue[] };
+    } | null;
     return JSON.stringify({
         frozenSnapshots: spy.frozenSnapshots,
         terminalCalls: spy.terminalCalls,
         terminalIssues: spy.terminalIssues,
-        scopeStateCalls: spy.scopeStateCalls,
-        appliedIssuesCalls: spy.appliedIssuesCalls,
+        applyExtraIssues:
+            applyParams?.p_result_summary?.extraIssues ?? [],
         failedCalls: spy.failedCalls,
     });
 }
@@ -122,8 +126,16 @@ test('매칭 실패로 issue 가 preview 에 실릴 때도 issue 는 code·PNU·
     });
     await runLandAreaSyncJob({ jobId: 'job-1', unionId: 'union-1', deps });
 
-    // extraIssue 병합 경로(appliedIssuesCalls)에 issue 가 실렸는지 확인 후 canary 스윕.
-    assert.ok(spy.appliedIssuesCalls.length + spy.terminalIssues.flat().length > 0, 'issue 표면이 존재해야 스윕이 의미 있다');
+    const params = spy.lastApplyParams as {
+        p_result_summary: { extraIssues: LandAreaSyncIssue[] };
+    } | null;
+    // extraIssue가 DB 원자 병합 입력에 실렸는지 확인 후 canary 스윕.
+    assert.ok(
+        (params?.p_result_summary.extraIssues.length ?? 0) +
+            spy.terminalIssues.flat().length >
+            0,
+        'issue 표면이 존재해야 스윕이 의미 있다'
+    );
     assertNoCanary(previewLogSurface(spy), 'issue 표면');
 });
 

@@ -30,6 +30,7 @@ import type {
     LandAreaSyncCounts,
 } from '../../types/land-area-sync-job.types';
 import { LAND_AREA_SYNC_MAX_ISSUES } from '../../types/land-area-sync-job.types';
+import { LAND_AREA_SYNC_ISSUE_CODES } from '../../types/land-area-sync.types';
 import type { LdaregSourceState } from './identity';
 
 /** snapshot canonical 버전. 직렬화가 바뀌면 올린다. */
@@ -178,6 +179,9 @@ export function buildScopeSnapshot(input: ScopeSnapshotInput): LandAreaSyncScope
 
 const PNU_RE = /^[0-9]{19}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ISSUE_CODE_SET = new Set<string>(
+    LAND_AREA_SYNC_ISSUE_CODES
+);
 
 /**
  * issue 를 §17.3 allowlist 필드만 남기도록 정제한다.
@@ -209,12 +213,104 @@ export interface CappedIssues {
 
 /** issue 목록을 정제·중복 제거 없이 상한(200) 절단한다. total·truncated 도 함께 반환. */
 export function capIssues(issues: LandAreaSyncIssue[]): CappedIssues {
-    const sanitized = issues.map(sanitizeIssue);
+    const sanitized = issues
+        .filter(
+            (issue) =>
+                !!issue &&
+                typeof issue === 'object' &&
+                typeof issue.code === 'string' &&
+                ISSUE_CODE_SET.has(issue.code)
+        )
+        .map(sanitizeIssue);
     const total = sanitized.length;
     if (total > LAND_AREA_SYNC_MAX_ISSUES) {
         return { issues: sanitized.slice(0, LAND_AREA_SYNC_MAX_ISSUES), issuesTotal: total, issuesTruncated: true };
     }
     return { issues: sanitized, issuesTotal: total, issuesTruncated: false };
+}
+
+const ISSUE_KEYS = new Set([
+    'code',
+    'propertyUnitId',
+    'targetPnu',
+    'dong',
+    'ho',
+]);
+
+function isStrictStoredIssue(
+    value: unknown
+): value is LandAreaSyncIssue {
+    if (!value || typeof value !== 'object') return false;
+    const issue = value as Record<string, unknown>;
+    if (
+        typeof issue.code !== 'string' ||
+        !ISSUE_CODE_SET.has(issue.code) ||
+        Object.keys(issue).some((key) => !ISSUE_KEYS.has(key))
+    ) {
+        return false;
+    }
+    if (
+        Object.hasOwn(issue, 'propertyUnitId') &&
+        (typeof issue.propertyUnitId !== 'string' ||
+            !UUID_RE.test(issue.propertyUnitId))
+    ) {
+        return false;
+    }
+    if (
+        Object.hasOwn(issue, 'targetPnu') &&
+        (typeof issue.targetPnu !== 'string' ||
+            !PNU_RE.test(issue.targetPnu))
+    ) {
+        return false;
+    }
+    for (const key of ['dong', 'ho'] as const) {
+        if (
+            Object.hasOwn(issue, key) &&
+            (typeof issue[key] !== 'string' ||
+                issue[key].length === 0 ||
+                issue[key].length > 20)
+        ) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * persisted preview의 strict capped summary는 total/truncated까지 보존한다.
+ * 누락·불일치·미승인 code/필드는 fixed allowlist로 재정제하고 metadata를 재계산한다.
+ */
+export function normalizeStoredIssues(
+    value: unknown,
+    issuesTotal?: unknown,
+    issuesTruncated?: unknown
+): CappedIssues {
+    if (
+        Array.isArray(value) &&
+        value.length <= LAND_AREA_SYNC_MAX_ISSUES &&
+        value.every(isStrictStoredIssue) &&
+        Number.isSafeInteger(issuesTotal) &&
+        (issuesTotal as number) >= value.length &&
+        typeof issuesTruncated === 'boolean' &&
+        issuesTruncated ===
+            ((issuesTotal as number) > value.length)
+    ) {
+        return {
+            issues: value,
+            issuesTotal: issuesTotal as number,
+            issuesTruncated,
+        };
+    }
+    const candidates = Array.isArray(value)
+        ? value.filter(
+              (issue): issue is LandAreaSyncIssue =>
+                  !!issue &&
+                  typeof issue === 'object' &&
+                  typeof (issue as { code?: unknown }).code ===
+                      'string'
+          )
+        : [];
+    return capIssues(candidates);
 }
 
 /** counts 골격(0 초기화). */
@@ -235,6 +331,40 @@ export function emptyCounts(): LandAreaSyncCounts {
         unchangedPropertyUnits: 0,
         skippedRows: 0,
     };
+}
+
+const COUNT_KEYS = Object.keys(
+    emptyCounts()
+) as Array<keyof LandAreaSyncCounts>;
+
+/** persisted preview의 counts가 exact key/nonnegative integer shape가 아니면 zero 골격으로 닫는다. */
+export function normalizeStoredCounts(
+    value: unknown
+): LandAreaSyncCounts {
+    if (
+        !value ||
+        typeof value !== 'object' ||
+        Array.isArray(value)
+    ) {
+        return emptyCounts();
+    }
+    const record = value as Record<string, unknown>;
+    const keys = Object.keys(record).sort();
+    const expectedKeys = [...COUNT_KEYS].sort();
+    if (
+        keys.length !== expectedKeys.length ||
+        keys.some((key, index) => key !== expectedKeys[index]) ||
+        COUNT_KEYS.some(
+            (key) =>
+                !Number.isSafeInteger(record[key]) ||
+                (record[key] as number) < 0
+        )
+    ) {
+        return emptyCounts();
+    }
+    return Object.fromEntries(
+        COUNT_KEYS.map((key) => [key, record[key]])
+    ) as unknown as LandAreaSyncCounts;
 }
 
 // ── clsSeCode → sourceState 매핑(§13.4) ────────────────────────────

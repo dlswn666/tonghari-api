@@ -14,6 +14,7 @@ import { toSyncJobRouteFailure } from '../services/sync-job-admission';
 import { landAreaSyncQueueService } from '../services/land-area-sync/queue';
 import {
     getScopedJob,
+    getScopedAdmissionJob,
     getLatestScopedJob,
     readLandAreaSync,
     type LandAreaSyncJobRow,
@@ -25,6 +26,7 @@ import {
 } from '../security/land-area-sync-canary-policy';
 import { env } from '../config/env';
 import { createLogger } from '../utils/logger';
+import type { LandAreaSyncPreview } from '../types/land-area-sync-job.types';
 
 const router = Router();
 const logger = createLogger('GIS-ROUTE');
@@ -45,14 +47,40 @@ function isPnu(v: unknown): v is string {
     return typeof v === 'string' && PNU_RE.test(v);
 }
 
+function hasWorkerFinalization(
+    landAreaSync: Partial<LandAreaSyncPreview> | null
+): boolean {
+    const receipt = landAreaSync?.workerFinalization;
+    return (
+        !!receipt &&
+        receipt.version === 1 &&
+        typeof receipt.finalizedAt === 'string' &&
+        !Number.isNaN(Date.parse(receipt.finalizedAt))
+    );
+}
+
 /** LAND_AREA_SYNC job row 를 조회 응답 형태로 투영한다. */
 function presentLandAreaSyncJob(row: LandAreaSyncJobRow) {
+    const landAreaSync = readLandAreaSync(row);
+    const finalized = hasWorkerFinalization(landAreaSync);
+    // apply RPC가 status를 먼저 썼던 구/부분 terminal은 외부에 terminal로 공개하지 않는다.
+    // immutable receipt와 terminal payload가 함께 존재할 때만 완료 상태를 노출한다.
+    const status =
+        row.status === 'PROCESSING' || finalized ? row.status : 'PROCESSING';
     return {
         jobId: row.id,
         unionId: row.union_id,
-        status: row.status,
-        progress: row.progress,
-        landAreaSync: readLandAreaSync(row),
+        status,
+        progress:
+            status === 'PROCESSING' ? Math.min(row.progress, 99) : row.progress,
+        landAreaSync: landAreaSync
+            ? {
+                  ...landAreaSync,
+                  ...(finalized
+                      ? { workerFinalization: landAreaSync.workerFinalization }
+                      : { workerFinalization: undefined }),
+              }
+            : null,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
     };
@@ -741,7 +769,7 @@ router.post('/inspect', authMiddleware, gisSystemAdminMiddleware, async (req, re
  * SYSTEM_ADMIN 재검증(gis-system-admin) 후 durable INSERT 성공 시 202. admission 실패 시 503.
  */
 router.post('/land-area-sync', authMiddleware, gisSystemAdminMiddleware, landAreaSyncEnabledMiddleware, landAreaSyncDiscoveryCanaryMiddleware, async (req, res) => {
-    const { unionId, anchorPnu } = req.body ?? {};
+    const { unionId, anchorPnu, admissionKey } = req.body ?? {};
 
     if (!isUuid(unionId)) {
         return res.status(400).json({ success: false, code: 'INVALID_UNION_ID', error: 'unionId(UUID)가 필요합니다.' });
@@ -749,11 +777,15 @@ router.post('/land-area-sync', authMiddleware, gisSystemAdminMiddleware, landAre
     if (!isPnu(anchorPnu)) {
         return res.status(400).json({ success: false, code: 'INVALID_PNU', error: 'anchorPnu는 19자리 숫자여야 합니다.' });
     }
+    if (!isUuid(admissionKey)) {
+        return res.status(400).json({ success: false, code: 'INVALID_ADMISSION_KEY', error: 'admissionKey(UUID)가 필요합니다.' });
+    }
 
     try {
         const info = await landAreaSyncQueueService.addDiscoveryJob({
             unionId,
             anchorPnu,
+            admissionKey,
             actorUserId: req.user!.actorUserId!,
             databaseTarget: req.user!.databaseTarget,
         });
@@ -773,6 +805,7 @@ router.post('/land-area-sync/:discoveryJobId/confirm', authMiddleware, gisSystem
     const body = (req.body ?? {}) as Record<string, unknown>;
     const {
         unionId,
+        admissionKey,
         expectedScopeHash,
         propertyUnitIds,
         parcelScopeConfirmed,
@@ -789,6 +822,9 @@ router.post('/land-area-sync/:discoveryJobId/confirm', authMiddleware, gisSystem
     }
     if (!isUuid(unionId)) {
         return res.status(400).json({ success: false, code: 'INVALID_UNION_ID', error: 'unionId(UUID)가 필요합니다.' });
+    }
+    if (!isUuid(admissionKey)) {
+        return res.status(400).json({ success: false, code: 'INVALID_ADMISSION_KEY', error: 'admissionKey(UUID)가 필요합니다.' });
     }
     // 확인자·확인 시각은 body 금지(§14.1) — 서버 세션·DB clock 으로만 결정한다.
     if ('confirmedByUserId' in body || 'confirmedAt' in body) {
@@ -877,6 +913,7 @@ router.post('/land-area-sync/:discoveryJobId/confirm', authMiddleware, gisSystem
         const { data: newJobId, error } = await database.createLandAreaSyncConfirmationJob({
             p_union_id: unionId,
             p_discovery_job_id: discoveryJobId,
+            p_admission_key: admissionKey,
             p_actor_user_id: req.user!.actorUserId!,
             p_expected_scope_hash: expectedScopeHash,
             p_property_unit_ids: propertyUnitIds as string[],
@@ -896,15 +933,32 @@ router.post('/land-area-sync/:discoveryJobId/confirm', authMiddleware, gisSystem
         if (!newJobId) {
             return res.status(500).json({ success: false, code: 'CONFIRMATION_JOB_MISSING', error: '확인 작업을 생성하지 못했습니다.' });
         }
-
-        // admission RPC 가 durable INSERT 한 apply job 을 재실행 admission 한다.
-        landAreaSyncQueueService.admitApplyJob(
-            newJobId,
-            discoveryJob.union_id,
-            discoveryAnchorPnu as string,
-            req.user!.databaseTarget
+        // v2 replay는 기존 terminal job id도 반환할 수 있다. exact admission row를
+        // 재검증하고 PROCESSING일 때만 idempotent memory admission 한다.
+        const applyJob = await getScopedAdmissionJob(
+            database.getClient(),
+            admissionKey,
+            discoveryJob.union_id
         );
-        return res.status(202).json({ success: true, jobId: newJobId, unionId, sourceDiscoveryJobId: discoveryJobId, status: 'pending' });
+        const applyLand = applyJob ? readLandAreaSync(applyJob) : null;
+        if (
+            !applyJob ||
+            applyJob.id !== newJobId ||
+            applyLand?.admissionKey?.toLowerCase() !==
+                admissionKey.toLowerCase() ||
+            applyLand.sourceDiscoveryJobId !== discoveryJobId
+        ) {
+            return res.status(500).json({ success: false, code: 'CONFIRMATION_ADMISSION_MISMATCH', error: '확인 작업 admission lineage가 일치하지 않습니다.' });
+        }
+        if (applyJob.status === 'PROCESSING') {
+            landAreaSyncQueueService.admitApplyJob(
+                applyJob.id,
+                discoveryJob.union_id,
+                discoveryAnchorPnu as string,
+                req.user!.databaseTarget
+            );
+        }
+        return res.status(202).json({ success: true, jobId: applyJob.id, unionId, sourceDiscoveryJobId: discoveryJobId, status: 'pending' });
     } catch (error) {
         logger.error(`LAND_AREA_SYNC confirmation failed (${discoveryJobId})`, error);
         return res.status(500).json({ success: false, code: 'CONFIRMATION_ERROR', error: '확인 처리에 실패했습니다.' });
@@ -938,6 +992,49 @@ router.get('/land-area-sync/latest', authMiddleware, gisSystemAdminMiddleware, a
     } catch (error) {
         logger.error(`LAND_AREA_SYNC latest lookup failed (${unionId}/${pnu})`, error);
         return res.status(503).json({ success: false, code: 'JOB_LOOKUP_FAILED', error: '작업을 조회할 수 없습니다.' });
+    }
+});
+
+/**
+ * POST 응답 유실 복구용 exact admission 조회.
+ * query: ?unionId=uuid&sourceDiscoveryJobId=uuid|none
+ */
+router.get('/land-area-sync/admissions/:admissionKey', authMiddleware, gisSystemAdminMiddleware, async (req, res) => {
+    const { admissionKey } = req.params;
+    const unionId = req.query.unionId;
+    const sourceDiscoveryJobId = req.query.sourceDiscoveryJobId;
+    if (!isUuid(admissionKey)) {
+        return res.status(400).json({ success: false, code: 'INVALID_ADMISSION_KEY', error: 'admissionKey(UUID)가 필요합니다.' });
+    }
+    if (!isUuid(unionId)) {
+        return res.status(400).json({ success: false, code: 'INVALID_UNION_ID', error: 'unionId(UUID)가 필요합니다.' });
+    }
+    if (sourceDiscoveryJobId !== 'none' && !isUuid(sourceDiscoveryJobId)) {
+        return res.status(400).json({ success: false, code: 'INVALID_SOURCE_DISCOVERY_JOB_ID', error: 'sourceDiscoveryJobId(UUID 또는 none)가 필요합니다.' });
+    }
+    if (req.user!.unionId !== 'system' && req.user!.unionId !== unionId) {
+        return res.status(403).json({ success: false, code: 'UNION_SCOPE_MISMATCH', error: '정비사업 범위가 토큰과 일치하지 않습니다.' });
+    }
+
+    try {
+        const client = getSupabaseService(req.user!.databaseTarget).getClient();
+        const row = await getScopedAdmissionJob(client, admissionKey, unionId);
+        const land = row ? readLandAreaSync(row) : null;
+        const expectedSource =
+            sourceDiscoveryJobId === 'none'
+                ? null
+                : sourceDiscoveryJobId;
+        if (
+            !row ||
+            land?.admissionKey?.toLowerCase() !== admissionKey.toLowerCase() ||
+            land.sourceDiscoveryJobId !== expectedSource
+        ) {
+            return res.status(404).json({ success: false, code: 'JOB_NOT_FOUND', error: 'LAND_AREA_SYNC admission 작업을 찾을 수 없습니다.' });
+        }
+        return res.json({ success: true, ...presentLandAreaSyncJob(row) });
+    } catch (error) {
+        logger.error(`LAND_AREA_SYNC admission lookup failed (${admissionKey})`, error);
+        return res.status(503).json({ success: false, code: 'JOB_LOOKUP_FAILED', error: 'admission 작업을 조회할 수 없습니다.' });
     }
 });
 

@@ -775,7 +775,7 @@ parsed ratio, CURRENT/CLOSED와 ambiguity, 정규화 unit tuple, 공개 source a
 고정한다. `exactReplica` boolean만 신뢰하지 않고 compared PNU set, count, digest를 함께
 검증한다. 모든 PNU가 `LDAREG_COMPLETE_ZERO`인 경우에만 `rowCount=0`을 허용한다.
 
-API는 apply 직전에 DB/external/combined hash, strategy, scanned PNU, property membership을 모두 `PROCESSING` job의 `preview_data.landAreaSync.scopeSnapshot` 안에 compare-and-set으로 한 번 고정한다. discovery terminal snapshot도 confirmation 전에 같은 형태로 고정한다. Migration B의 job guard는 LAND_AREA_SYNC 행에서 한 번 채워진 `schemaVersion`, `anchorPnu`, `branch`, `sourceDiscoveryJobId`, `scopeSnapshot`, `confirmation`의 제거·수정·교체를 거부한다. 다른 job type의 기존 preview update에는 개입하지 않는다. Apply RPC는 apply job과 원본 discovery job을 함께 잠그고 두 행이 같은 union·anchor PNU·job type인지, 원본이 terminal discovery인지, discovery의 정렬 property membership·scope hash와 confirmation이 일치하는지 확인한다. 그 뒤 전달된 digest를 고정 snapshot과 대조하고 DB evidence와 membership만 다시 해시한다. DB는 외부 API digest를 재계산할 수 없으므로 이를 API 신뢰 경계의 불변 snapshot으로 취급한다. DB hash가 바뀌거나 lineage·job snapshot과 인자가 다르면 `SCOPE_CHANGED_DURING_SYNC`로 전체 rollback한다.
+API는 apply 직전에 DB/external/combined hash, strategy, scanned PNU, property membership을 모두 `PROCESSING` job의 `preview_data.landAreaSync.scopeSnapshot` 안에 compare-and-set으로 한 번 고정한다. discovery terminal snapshot도 confirmation 전에 같은 형태로 고정한다. Migration B의 job guard는 LAND_AREA_SYNC 행에서 한 번 채워진 `schemaVersion`, `anchorPnu`, `branch`, `sourceDiscoveryJobId`, `admissionKey`, `scopeSnapshot`, `confirmation`의 제거·수정·교체를 거부한다. terminal transition에서 생성되는 `workerFinalization` subtree도 이후 변경할 수 없다. 다른 job type의 기존 preview update에는 개입하지 않는다. Apply RPC는 apply job과 원본 discovery job을 함께 잠그고 두 행이 같은 union·anchor PNU·job type인지, 원본이 finalized terminal discovery인지, discovery의 정렬 property membership·scope hash와 confirmation이 일치하는지 확인한다. 그 뒤 전달된 digest를 고정 snapshot과 대조하고 DB evidence와 membership만 다시 해시한다. DB는 외부 API digest를 재계산할 수 없으므로 이를 API 신뢰 경계의 불변 snapshot으로 취급한다. DB hash가 바뀌거나 lineage·job snapshot과 인자가 다르면 `SCOPE_CHANGED_DURING_SYNC`로 전체 rollback한다.
 
 직접 view grant는 추가하지 않는다.
 
@@ -951,7 +951,15 @@ apply_property_land_area_sync_v1(
 5. 영향 `property_units` UUID 오름차순
 6. 기존 rights `(property_unit_id, target_pnu)` 오름차순
 
-그 뒤 job의 external snapshot 대조, DB scope hash 재검증, freshness 검증, lifecycle 적용, projection, job terminal summary를 한 transaction에서 수행한다.
+그 뒤 job의 external snapshot 대조, DB scope hash 재검증, freshness 검증, lifecycle 적용, projection을 수행한다. `p_result_summary={counts,extraIssues}`의 extra issue는 DB allowlist로 다시 정제하고 RPC 산출 issue와 dedup/cap한다. 최종 `scopeState/outcome/counts/issues/issuesTotal/issuesTruncated/workerFinalization`과 `status/progress`는 같은 transaction의 한 UPDATE에서 확정한다. API worker는 성공 뒤 별도 preview UPDATE를 하지 않는다.
+
+discovery/review/failed terminal은
+`public.finalize_land_area_sync_job_v1(uuid,uuid,text,text,text,jsonb,jsonb,integer,boolean,text)`
+한 경로로만 종결한다. API는 union/job/status/scopeState/outcome/counts/issues/total/truncated/errorLog를
+전달하고 DB가 PROCESSING row lock, phase/outcome·fixed counts·issue allowlist 검증,
+transaction timestamp receipt와 terminal payload의 원자 UPDATE를 담당한다. `APPLIED`/`PARTIAL`은
+이 finalizer에서 금지하며 기존 atomic apply RPC만 생성할 수 있다. API repository의 direct
+`sync_jobs` terminal UPDATE는 사용하지 않는다.
 
 ### 13.3 LADFRL
 
@@ -1006,9 +1014,10 @@ STALE 평가도 `last_evaluated_sync_job_id/status_evaluated_at`을 갱신하므
 confirmation job은 API의 임의 INSERT가 아니라 canonical DB admission RPC로 만든다.
 
 ```sql
-create_land_area_sync_confirmation_job_v1(
+create_land_area_sync_confirmation_job_v2(
   p_union_id uuid,
   p_discovery_job_id uuid,
+  p_admission_key uuid,
   p_actor_user_id varchar,
   p_expected_scope_hash text,
   p_property_unit_ids uuid[],
@@ -1022,7 +1031,7 @@ create_land_area_sync_confirmation_job_v1(
 ) returns uuid
 ```
 
-RPC는 actor의 현재 SYSTEM_ADMIN 상태와 discovery의 union·PNU·type·terminal 상태를 재검증하고, 정렬된 확인 대상 hash/property membership을 discovery snapshot에서 복사한다. LADFRL 배열은 정확히 1건, LDAREG는 discovery와 exact 일치하는 전체 대상 집합이어야 한다. `confirmed_at` 인자는 받지 않고 DB transaction clock을 사용한다.
+RPC는 actor의 현재 SYSTEM_ADMIN 상태와 discovery의 union·PNU·type·finalized terminal 상태를 재검증하고, 정렬된 확인 대상 hash/property membership을 discovery snapshot에서 복사한다. LADFRL 배열은 정확히 1건, LDAREG는 discovery와 exact 일치하는 전체 대상 집합이어야 한다. `confirmed_at` 인자는 받지 않고 DB transaction clock을 사용한다. `p_admission_key` advisory transaction lock과 union+key unique 경계를 사용하며 canonical request digest가 같은 replay는 기존 job id를, 다른 replay는 오류를 반환한다.
 
 ```text
 POST /api/gis/land-area-sync
@@ -1034,9 +1043,10 @@ GET  /api/gis/land-area-sync/latest?unionId=...&pnu=...
 실행:
 
 - UUID와 19자리 PNU exact 검증
+- POST 전에 생성한 admission UUID를 body에 포함하고 immutable admissionKey로 저장한다. confirmation apply의 실제 job id는 별도 UUID일 수 있다.
 - Web server와 API에서 SYSTEM_ADMIN 재검증
 - `databaseTarget`은 JWT claim만 사용
-- durable `sync_jobs` INSERT 성공 후에만 `202`
+- durable `sync_jobs` INSERT 또는 same-key/same-digest replay 성공 후에만 `202`
 - queue admission 실패 시 job을 FAILED로 만들고 `503`
 
 전역 실행 gate:
@@ -1050,8 +1060,8 @@ GET  /api/gis/land-area-sync/latest?unionId=...&pnu=...
 confirmation route:
 
 - terminal discovery job이 같은 `unionId+anchorPnu+LAND_AREA_SYNC`이고 `SINGLE_SCOPE_CONFIRMATION_REQUIRED` 또는 `MANUAL_OVERWRITE_CONFIRMATION_REQUIRED`인지 확인
-- body의 `expectedScopeHash`, 정렬된 `propertyUnitIds`, 필지 범위 확인, LADFRL이면 토지 소유 확인, 필요 시 MANUAL 덮어쓰기 확인을 exact 검증
-- 확인자와 확인 시각은 body에서 받지 않는다. API는 현재 SYSTEM_ADMIN ID만 confirmation-job admission RPC에 전달하고, RPC가 사용자·조합·discovery lineage를 검증한 뒤 `confirmedAt=pg_catalog.transaction_timestamp()`로 새 job을 생성
+- body의 `admissionKey`, `expectedScopeHash`, 정렬된 `propertyUnitIds`, 필지 범위 확인, LADFRL이면 토지 소유 확인, 필요 시 MANUAL 덮어쓰기 확인을 exact 검증
+- 확인자와 확인 시각은 body에서 받지 않는다. API는 현재 SYSTEM_ADMIN ID와 명시적 admission UUID를 confirmation-job admission RPC에 전달하고, RPC가 사용자·조합·discovery lineage를 검증한 뒤 `confirmedAt=pg_catalog.transaction_timestamp()`로 새 job을 생성
 - 근거는 allowlist 종류와 최대 200자의 비식별 내부 참조만 허용하며 원문 문서·소유자 정보는 저장하지 않음
 - 기존 terminal job을 되살리지 않고 `sourceDiscoveryJobId`를 가진 새 PROCESSING apply job을 생성
 - 후속 job에서 title, 선택된 경우 basis fallback, attached, resolver와 해당 전략의 모든 scan·매칭을 다시 실행
@@ -1157,13 +1167,17 @@ jobId + unionId + jobType=LAND_AREA_SYNC + databaseTarget
   },
   "issues": [],
   "issuesTotal": 0,
-  "issuesTruncated": false
+  "issuesTruncated": false,
+  "workerFinalization": {
+    "version": 1,
+    "finalizedAt": "2026-07-25T00:00:00.000Z"
+  }
 }
 ```
 
 `scopeSnapshot.bylotEvidence`는 expected 관리 PK를 모두 포함하는 `mgmBldrgstPk` 오름차순 bounded 배열이며 `scopeSnapshot`과 함께 CAS·trigger 보호를 받는다. `TITLE_ONLY`는 basis 미호출 title 정상값, `FALLBACK_RESOLVED`는 title 유효값 없이 basis로 확정, `MATCHED`는 호출된 basis와 title 유효값 일치, `CROSS_CHECK_NOT_AVAILABLE`은 다른 PK 때문에 basis를 호출했지만 현재 title-valid PK의 basis 유효값은 관측되지 않은 상태다. 값을 확정하지 못한 PK도 `source/rawValue/count=null`, `crossCheckState=UNAVAILABLE|CONFLICT`로 남기며 첫 row나 0으로 축약하지 않는다.
 
-discovery job과 확인이 필요 없는 LINKED apply job의 `confirmation`은 `null`이다. single LDAREG 확인은 필지 범위 필드만 요구하고 토지 소유 필드는 `null`, LADFRL은 필지 범위·토지 소유를 모두 요구한다. LINKED LDAREG의 MANUAL 충돌은 다른 confirmation과 동일하게 필지 범위 확인·근거를 요구하고, 거기에 `overwriteManualConfirmed`를 추가로 요구한다(admission RPC [5.2]가 모든 confirmation 상태에서 `parcelScopeConfirmed`와 필지 범위 근거를 무조건 검증한다 — 구현이 권위). `sourceDiscoveryJobId`, `scopeSnapshot`, `confirmation`은 최초 CAS 뒤 수정할 수 없고 terminal 결과는 별도 `outcome/counts/issues` 필드에만 기록한다.
+discovery job과 확인이 필요 없는 LINKED apply job의 `confirmation`은 `null`이다. single LDAREG 확인은 필지 범위 필드만 요구하고 토지 소유 필드는 `null`, LADFRL은 필지 범위·토지 소유를 모두 요구한다. LINKED LDAREG의 MANUAL 충돌은 다른 confirmation과 동일하게 필지 범위 확인·근거를 요구하고, 거기에 `overwriteManualConfirmed`를 추가로 요구한다(admission RPC [5.2]가 모든 confirmation 상태에서 `parcelScopeConfirmed`와 필지 범위 근거를 무조건 검증한다 — 구현이 권위). `sourceDiscoveryJobId`, `admissionKey`, `scopeSnapshot`, `confirmation`은 최초 CAS 뒤 수정할 수 없고 `workerFinalization`이 생긴 뒤 terminal subtree 전체도 immutable이다.
 
 제한:
 

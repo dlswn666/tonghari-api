@@ -58,15 +58,12 @@ interface Spy {
     terminalCalls: Array<{ status: string; scopeState: string; outcome: string }>;
     /** writeDiscoveryTerminal 로 넘어간 issues(terminalCalls 와 index 대응). */
     terminalIssues: LandAreaSyncIssue[][];
-    scopeStateCalls: string[];
     failedCalls: string[];
     lastApplyParams: unknown;
     /** resolveScope 로 넘어간 params(p_root_mgm_bldrgst_pks 검증용). */
     resolverParams: Array<{ p_root_mgm_bldrgst_pks: string[] }>;
     /** freezeScopeSnapshot 로 고정된 snapshot 의 scope/membership hash + resolverRootPks. */
     frozenSnapshots: Array<{ scopeHash: string; propertyMembershipHash: string; resolverRootPks: string[] }>;
-    /** writeAppliedIssues(Finding 3 병합 경로) 호출 인자. */
-    appliedIssuesCalls: Array<{ scopeState: string; issues: LandAreaSyncIssue[]; issuesTotal: number; issuesTruncated: boolean }>;
 }
 
 function makeDeps(opts: {
@@ -79,6 +76,7 @@ function makeDeps(opts: {
     /** getScopedJob 이 돌려줄 preview_data 오버라이드(apply job 시나리오용). */
     jobPreviewData?: Record<string, unknown>;
     assertCanaryScopeAllowed?: LandAreaSyncDeps['assertCanaryScopeAllowed'];
+    writeDiscoveryTerminalResult?: boolean;
     spy: Spy;
 }): LandAreaSyncDeps {
     const { spy } = opts;
@@ -125,17 +123,7 @@ function makeDeps(opts: {
             writeDiscoveryTerminal: async (_j, _u, input) => {
                 spy.terminalCalls.push({ status: input.status, scopeState: input.scopeState, outcome: input.outcome });
                 spy.terminalIssues.push(input.issues);
-                return true;
-            },
-            writeScopeState: async (_j, _u, s) => { spy.scopeStateCalls.push(s); return true; },
-            writeAppliedIssues: async (_j, _u, patch) => {
-                spy.appliedIssuesCalls.push({
-                    scopeState: patch.scopeState,
-                    issues: patch.issues,
-                    issuesTotal: patch.issuesTotal,
-                    issuesTruncated: patch.issuesTruncated,
-                });
-                return true;
+                return opts.writeDiscoveryTerminalResult ?? true;
             },
             markScopedFailed: async (_j, _u, m) => { spy.failedCalls.push(m); return true; },
             readBuildingUnits: async () => [],
@@ -154,12 +142,10 @@ function emptySpy(): Spy {
         applyCalls: 0,
         terminalCalls: [],
         terminalIssues: [],
-        scopeStateCalls: [],
         failedCalls: [],
         lastApplyParams: null,
         resolverParams: [],
         frozenSnapshots: [],
-        appliedIssuesCalls: [],
     };
 }
 
@@ -205,6 +191,25 @@ test('gate FAILED(title 실패)는 job 을 FAILED 로 종결하고 apply RPC 를
     assert.deepEqual(spy.terminalCalls, [{ status: 'FAILED', scopeState: 'FAILED', outcome: 'FAILED' }]);
 });
 
+test('discovery finalizer RPC가 false면 worker finalization 성공으로 반환하지 않는다', async () => {
+    const spy = emptySpy();
+    const deps = makeDeps({
+        resolver: noEvidence(MEMBER),
+        scans: { scanTitle: async () => failed<BrTitleRow>() },
+        writeDiscoveryTerminalResult: false,
+        spy,
+    });
+    await assert.rejects(
+        runLandAreaSyncJob({
+            jobId: 'job-1',
+            unionId: 'union-1',
+            deps,
+        }),
+        /discovery worker finalization/
+    );
+    assert.equal(spy.terminalCalls.length, 1);
+});
+
 test('LADFRL discovery(no-cache single)는 snapshot 을 CAS 고정하고 확인 대기(REVIEW), apply 0회', async () => {
     const spy = emptySpy();
     const deps = makeDeps({ resolver: noEvidence(MEMBER), spy });
@@ -227,7 +232,10 @@ test('LDAREG LINKED discovery 는 snapshot 을 1회 고정하고 apply RPC 를 �
     await runLandAreaSyncJob({ jobId: 'job-1', unionId: 'union-1', deps });
     assert.equal(spy.freezeCalls, 1, 'CAS 는 1회');
     assert.equal(spy.applyCalls, 1, 'apply 는 정확히 1회');
-    assert.deepEqual(spy.scopeStateCalls, ['LINKED_SCOPE_RESOLVED']);
+    const params = spy.lastApplyParams as {
+        p_result_summary: { extraIssues: LandAreaSyncIssue[] };
+    };
+    assert.deepEqual(params.p_result_summary.extraIssues, []);
     assert.equal(spy.failedCalls.length, 0);
 });
 
@@ -276,7 +284,6 @@ test('apply RPC EXCEPTION(rollback)은 job 을 FAILED 로 기록한다', async (
     });
     await runLandAreaSyncJob({ jobId: 'job-1', unionId: 'union-1', deps });
     assert.equal(spy.applyCalls, 1);
-    assert.equal(spy.scopeStateCalls.length, 0);
     assert.equal(spy.failedCalls.length, 1);
     assert.match(spy.failedCalls[0], /apply RPC 실패/);
 });
@@ -297,7 +304,7 @@ test('terminal/fatal 후 늦은 callback(AbortSignal)은 apply RPC 를 호출하
 
 // ── apply-lineage 경로(확인 후속 job) — Finding 1·2 ─────────────────────────────
 
-test('LADFRL 확인 apply job: 재실행 scope 일치 → apply RPC 정확히 1회, 재freeze 0회, SINGLE_PNU_CONFIRMED', async () => {
+test('LADFRL 확인 apply job: 재실행 scope 일치 → apply RPC 정확히 1회, 후속 terminal UPDATE 0회', async () => {
     // 1) discovery 를 먼저 돌려 고정될 scopeHash/membershipHash 를 캡처한다(동일 deps → 결정적).
     const disc = emptySpy();
     await runLandAreaSyncJob({ jobId: 'job-1', unionId: 'union-1', deps: makeDeps({ resolver: noEvidence(MEMBER), spy: disc }) });
@@ -317,8 +324,7 @@ test('LADFRL 확인 apply job: 재실행 scope 일치 → apply RPC 정확히 1�
     await runLandAreaSyncJob({ jobId: 'job-1', unionId: 'union-1', deps });
     assert.equal(spy.applyCalls, 1, 'apply RPC 정확히 1회');
     assert.equal(spy.freezeCalls, 0, '이미 고정된 apply job 은 재freeze 하지 않는다');
-    assert.deepEqual(spy.scopeStateCalls, ['SINGLE_PNU_CONFIRMED']);
-    assert.equal(spy.terminalCalls.length, 0, 'terminal 은 apply RPC 가 기록(서비스는 scopeState 만)');
+    assert.equal(spy.terminalCalls.length, 0, 'terminal payload와 receipt는 apply RPC가 원자 기록');
     assert.equal(spy.failedCalls.length, 0);
 });
 
@@ -365,7 +371,6 @@ test('LDAREG(single 확인) apply job: 재실행 scope 일치 → apply RPC 정�
     await runLandAreaSyncJob({ jobId: 'job-1', unionId: 'union-1', deps });
     assert.equal(spy.applyCalls, 1, 'apply RPC 정확히 1회(재freeze 없이 barrier 통과)');
     assert.equal(spy.freezeCalls, 0, '이미 고정된 apply job 은 재freeze 하지 않는다');
-    assert.deepEqual(spy.scopeStateCalls, ['SINGLE_PNU_CONFIRMED']);
     assert.equal(spy.terminalCalls.length, 0);
 });
 
@@ -387,9 +392,9 @@ test('LDAREG(single 확인) apply job: 재실행 scopeHash 불일치 → apply R
     assert.ok(spy.terminalIssues[0].some((i) => i.code === 'LAND_SCOPE_CONFIRMATION_MISMATCH'), 'mismatch issue 기록');
 });
 
-// ── Finding 3: LINKED 즉시적용 경로에서 discovery extraIssue 병합 ───────────────
+// ── Finding 3: LINKED discovery extraIssue를 원자 apply RPC에 전달 ─────────────
 
-test('LINKED LDAREG 즉시적용: discovery extraIssue 가 terminal issues 에 병합되고 RPC 반환 issue 와 dedup 된다', async () => {
+test('LINKED LDAREG 즉시적용: discovery extraIssue를 apply RPC 입력으로 전달한다', async () => {
     const spy = emptySpy();
     const deps = makeDeps({
         resolver: linked(MEMBER),
@@ -429,14 +434,13 @@ test('LINKED LDAREG 즉시적용: discovery extraIssue 가 terminal issues 에 �
     await runLandAreaSyncJob({ jobId: 'job-1', unionId: 'union-1', deps });
 
     assert.equal(spy.applyCalls, 1, 'LINKED 즉시적용은 apply RPC 1회');
-    assert.equal(spy.appliedIssuesCalls.length, 1, 'extraIssue 가 있으면 병합 경로로 terminal issues 를 기록');
-    assert.equal(spy.scopeStateCalls.length, 0, '병합 경로는 writeScopeState 대신 writeAppliedIssues 사용');
-    const merged = spy.appliedIssuesCalls[0];
-    assert.equal(merged.scopeState, 'LINKED_SCOPE_RESOLVED');
-    const codes = merged.issues.map((i) => i.code);
-    assert.ok(codes.includes('LDAREG_IDENTITY_CONFLICT'), 'discovery extraIssue 보존');
-    assert.ok(codes.includes('STALE_SCAN_REJECTED'), 'RPC 반환 issue 보존');
-    assert.equal(codes.filter((c) => c === 'LDAREG_IDENTITY_CONFLICT').length, 1, 'RPC 반환 issue 와 중복 dedup');
+    const params = spy.lastApplyParams as {
+        p_result_summary: { extraIssues: LandAreaSyncIssue[] };
+    };
+    assert.deepEqual(
+        params.p_result_summary.extraIssues.map((issue) => issue.code),
+        ['LDAREG_IDENTITY_CONFLICT']
+    );
 });
 
 // ── C1: resolverRootPks 계약(up-PK ≠ self-PK) ─────────────────────────
@@ -468,9 +472,9 @@ test('C1: mgmUpBldrgstPk ≠ mgmBldrgstPk 일 때 resolver 는 up-PK 로 호출�
     assert.deepEqual(spy.frozenSnapshots[0].resolverRootPks, ['9001002003004']);
 });
 
-// ── 원장 승격: LADFRL manual-overwrite apply → SINGLE_PNU_CONFIRMED ───
+// ── LADFRL manual-overwrite apply atomic terminal ───────────────────
 
-test('원장 승격: LADFRL overwrite 확인 apply 완료는 SINGLE_PNU_CONFIRMED(LINKED_SCOPE_RESOLVED 오표기 회귀 가드)', async () => {
+test('LADFRL overwrite 확인 apply도 후속 preview UPDATE 없이 RPC 한 번으로 종결한다', async () => {
     // discovery 로 고정될 scope/membership hash 캡처.
     const disc = emptySpy();
     await runLandAreaSyncJob({ jobId: 'job-1', unionId: 'union-1', deps: makeDeps({ resolver: noEvidence(MEMBER), spy: disc }) });
@@ -491,5 +495,5 @@ test('원장 승격: LADFRL overwrite 확인 apply 완료는 SINGLE_PNU_CONFIRME
     });
     await runLandAreaSyncJob({ jobId: 'job-1', unionId: 'union-1', deps });
     assert.equal(spy.applyCalls, 1, 'overwrite 확인 apply RPC 1회');
-    assert.deepEqual(spy.scopeStateCalls, ['SINGLE_PNU_CONFIRMED'], 'LADFRL 은 overwrite 여도 SINGLE_PNU_CONFIRMED');
+    assert.equal(spy.terminalCalls.length, 0, 'apply 성공 뒤 JS terminal UPDATE는 없다');
 });

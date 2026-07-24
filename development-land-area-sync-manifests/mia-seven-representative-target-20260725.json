@@ -1,0 +1,13 @@
+{
+  "version": "land-area-development-target-manifest@1",
+  "databaseTarget": "development",
+  "unionId": "00f48b95-e9bc-4c92-a0e5-6b9a57adcfb9",
+  "pnus": [
+    "1130510100107912166"
+  ],
+  "targetCount": 1,
+  "manifestDigest": "423d4b2ef2df290fa1d168acf31c8ea38eb9816f2319fb34f4e11a23af48ff23",
+  "expectedPropertyUnitCount": 1,
+  "expectedUnionActivePropertyUnitCount": 429,
+  "expectedUnionActivePnuCount": 299
+}

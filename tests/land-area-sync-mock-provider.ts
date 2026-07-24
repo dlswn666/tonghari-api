@@ -229,13 +229,11 @@ export interface Spy {
     applyCalls: number;
     terminalCalls: Array<{ status: string; scopeState: string; outcome: string }>;
     terminalIssues: LandAreaSyncIssue[][];
-    scopeStateCalls: string[];
     failedCalls: string[];
     /** applyRpc 로 넘어간 마지막 params(p_items 등). */
     lastApplyParams: unknown;
     /** freezeScopeSnapshot 로 고정된 전체 snapshot·evidence(보안 스윕용). */
     frozenSnapshots: Array<{ scopeSnapshot: LandAreaSyncScopeSnapshot; scopeEvidence: LandAreaSyncScopeEvidence }>;
-    appliedIssuesCalls: Array<{ scopeState: string; issues: LandAreaSyncIssue[]; issuesTotal: number; issuesTruncated: boolean }>;
     /** read-model 호출 흔적(쓰기 경로 부재 검증용). */
     reads: string[];
 }
@@ -246,11 +244,9 @@ export function emptySpy(): Spy {
         applyCalls: 0,
         terminalCalls: [],
         terminalIssues: [],
-        scopeStateCalls: [],
         failedCalls: [],
         lastApplyParams: null,
         frozenSnapshots: [],
-        appliedIssuesCalls: [],
         reads: [],
     };
 }
@@ -344,16 +340,6 @@ export function buildIntegrationDeps(config: IntegrationConfig): {
             writeDiscoveryTerminal: async (_j, _u, input) => {
                 spy.terminalCalls.push({ status: input.status, scopeState: input.scopeState, outcome: input.outcome });
                 spy.terminalIssues.push(input.issues);
-                return true;
-            },
-            writeScopeState: async (_j, _u, s) => { spy.scopeStateCalls.push(s); return true; },
-            writeAppliedIssues: async (_j, _u, patch) => {
-                spy.appliedIssuesCalls.push({
-                    scopeState: patch.scopeState,
-                    issues: patch.issues,
-                    issuesTotal: patch.issuesTotal,
-                    issuesTruncated: patch.issuesTruncated,
-                });
                 return true;
             },
             markScopedFailed: async (_j, _u, m) => { spy.failedCalls.push(m); return true; },

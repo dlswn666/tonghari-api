@@ -173,6 +173,16 @@ export interface LandAreaSyncPreview {
     schemaVersion: number;
     anchorPnu: string;
     sourceDiscoveryJobId: string | null;
+    /** admission 응답 유실 시 exact job을 찾기 위한 UUID. PROCESSING부터 immutable이다. */
+    admissionKey?: string;
+    /**
+     * terminal payload와 같은 DB UPDATE에서만 생성되는 immutable receipt.
+     * PROCESSING 및 구 terminal job에는 key 자체가 없다.
+     */
+    workerFinalization?: {
+        version: 1;
+        finalizedAt: string;
+    };
     scopeState: LandAreaSyncScopeState;
     scopeEvidence: LandAreaSyncScopeEvidence;
     scopeSnapshot: LandAreaSyncScopeSnapshot | null;
@@ -195,6 +205,7 @@ export const LAND_AREA_SYNC_MAX_ISSUES = 200;
 export interface LandAreaSyncDiscoveryRequest {
     unionId: string;
     anchorPnu: string;
+    admissionKey: string;
     actorUserId: string;
     databaseTarget: DatabaseTarget;
 }
@@ -202,6 +213,7 @@ export interface LandAreaSyncDiscoveryRequest {
 /** confirmation route body(확인자·시각은 body 금지 — §14.1). */
 export interface LandAreaSyncConfirmBody {
     unionId: string;
+    admissionKey: string;
     expectedScopeHash: string;
     propertyUnitIds: string[];
     parcelScopeConfirmed: boolean;
@@ -265,13 +277,37 @@ export interface ApplyPropertyLandAreaSyncParams {
     p_scope_hash: string;
     p_scanned_pnus: string[];
     p_items: LandAreaSyncApplyLadfrlItem[] | LandAreaSyncApplyLdaregItem[];
-    p_result_summary: { counts?: Partial<LandAreaSyncCounts> };
+    p_result_summary: {
+        counts?: Partial<LandAreaSyncCounts>;
+        extraIssues?: LandAreaSyncIssue[];
+    };
+}
+
+/**
+ * discovery/review/failed terminal finalizer RPC 인자.
+ * APPLIED/PARTIAL은 이 RPC가 아니라 atomic apply RPC만 사용한다.
+ */
+export interface FinalizeLandAreaSyncJobParams {
+    p_union_id: string;
+    p_sync_job_id: string;
+    p_status: 'COMPLETED' | 'FAILED';
+    p_scope_state: LandAreaSyncScopeState;
+    p_outcome: Exclude<
+        LandAreaSyncOutcome,
+        'APPLIED' | 'PARTIAL'
+    >;
+    p_counts: LandAreaSyncCounts;
+    p_issues: LandAreaSyncIssue[];
+    p_issues_total: number;
+    p_issues_truncated: boolean;
+    p_error_log: string | null;
 }
 
 /** confirmation-job admission RPC 인자(migration [5.2]). */
 export interface CreateConfirmationJobParams {
     p_union_id: string;
     p_discovery_job_id: string;
+    p_admission_key: string;
     p_actor_user_id: string;
     p_expected_scope_hash: string;
     p_property_unit_ids: string[];

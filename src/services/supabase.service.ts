@@ -8,6 +8,7 @@ import type {
     ResolveScopeParams,
     CreateConfirmationJobParams,
     ApplyPropertyLandAreaSyncParams,
+    FinalizeLandAreaSyncJobParams,
 } from '../types/land-area-sync-job.types';
 
 const logger = createLogger('SUPABASE');
@@ -1439,15 +1440,16 @@ export class SupabaseService {
     }
 
     /**
-     * LAND_AREA_SYNC confirmation-job admission RPC (migration [5.2]). actor SYSTEM_ADMIN·discovery
-     * lineage 를 재검증하고 sourceDiscoveryJobId 를 가진 새 PROCESSING apply job id 를 돌려준다.
+     * LAND_AREA_SYNC confirmation-job admission RPC v2. actor SYSTEM_ADMIN·discovery
+     * lineage와 admission key request digest를 재검증하고, replay-safe apply job id를 돌려준다.
      */
     async createLandAreaSyncConfirmationJob(
         params: CreateConfirmationJobParams
     ): Promise<{ data: string | null; error: { message: string; code?: string } | null }> {
-        const { data, error } = await this.client.rpc('create_land_area_sync_confirmation_job_v1', {
+        const { data, error } = await this.client.rpc('create_land_area_sync_confirmation_job_v2', {
             p_union_id: params.p_union_id,
             p_discovery_job_id: params.p_discovery_job_id,
+            p_admission_key: params.p_admission_key,
             p_actor_user_id: params.p_actor_user_id,
             p_expected_scope_hash: params.p_expected_scope_hash,
             p_property_unit_ids: params.p_property_unit_ids,
@@ -1462,6 +1464,43 @@ export class SupabaseService {
         return {
             data: typeof data === 'string' ? data : null,
             error: error ? { message: error.message, code: (error as { code?: string }).code } : null,
+        };
+    }
+
+    /**
+     * LAND_AREA_SYNC discovery/review/failed terminal finalizer RPC.
+     * APPLIED/PARTIAL terminal은 이 경로가 아니라 atomic apply RPC만 사용한다.
+     */
+    async finalizeLandAreaSyncJob(
+        params: FinalizeLandAreaSyncJobParams
+    ): Promise<{
+        data: boolean;
+        error: { message: string; code?: string } | null;
+    }> {
+        const { data, error } = await this.client.rpc(
+            'finalize_land_area_sync_job_v1',
+            {
+                p_union_id: params.p_union_id,
+                p_sync_job_id: params.p_sync_job_id,
+                p_status: params.p_status,
+                p_scope_state: params.p_scope_state,
+                p_outcome: params.p_outcome,
+                p_counts: params.p_counts,
+                p_issues: params.p_issues,
+                p_issues_total: params.p_issues_total,
+                p_issues_truncated:
+                    params.p_issues_truncated,
+                p_error_log: params.p_error_log,
+            }
+        );
+        return {
+            data: data === true,
+            error: error
+                ? {
+                      message: error.message,
+                      code: (error as { code?: string }).code,
+                  }
+                : null,
         };
     }
 

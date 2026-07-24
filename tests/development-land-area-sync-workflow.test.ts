@@ -1,0 +1,184 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import test from 'node:test';
+
+const root = path.resolve(__dirname, '..');
+const workflow = fs.readFileSync(
+    path.join(
+        root,
+        '.github/workflows/development-land-area-sync-run.yml'
+    ),
+    'utf8'
+);
+const runner = fs.readFileSync(
+    path.join(root, 'src/operations/development-land-area-sync-runner.ts'),
+    'utf8'
+);
+const cli = fs.readFileSync(
+    path.join(root, 'src/cli/development-land-area-sync-runner.ts'),
+    'utf8'
+);
+const validatorCli = fs.readFileSync(
+    path.join(root, 'src/cli/development-land-area-sync-validate.ts'),
+    'utf8'
+);
+const dockerfile = fs.readFileSync(path.join(root, 'Dockerfile'), 'utf8');
+const guardian = fs.readFileSync(
+    path.join(
+        root,
+        'scripts/development-land-area-sync-remote-guardian.sh'
+    ),
+    'utf8'
+);
+
+test('workflow는 protected environment secret의 actor UUID만 내부 사용하고 공개 입력을 금지한다', () => {
+    const dispatchBlock = workflow.slice(
+        workflow.indexOf('workflow_dispatch:'),
+        workflow.indexOf('permissions:')
+    );
+    assert.match(workflow, /environment: land-area-sync-development-write/);
+    assert.match(workflow, /GITHUB_REF.*refs\/heads\/main/);
+    assert.match(workflow, /type: choice/);
+    assert.match(workflow, /mia-seven-representative-20260725/);
+    assert.match(
+        workflow,
+        /ACTOR_AUTH_USER_ID: \$\{\{ secrets\.DEV_GIS_SYSTEM_ADMIN_AUTH_UUID \}\}/
+    );
+    assert.doesNotMatch(dispatchBlock, /actor_auth_user_id|auth UUID/i);
+    assert.doesNotMatch(
+        dispatchBlock,
+        /[0-9a-f]{8}-[0-9a-f-]{27}|[0-9]{19}|secret/i
+    );
+    assert.doesNotMatch(workflow, /\$\{\{ inputs\.actor_auth_user_id \}\}/);
+    assert.doesNotMatch(workflow, /EXPECTED_ACTOR_AUTH_USER_ID/);
+    assert.doesNotMatch(
+        workflow,
+        /echo[^\n]*\$\{ACTOR_AUTH_USER_ID\}/
+    );
+});
+
+test('workflow는 full artifact를 로컬 gate에만 쓰고 strict 공개 artifact만 업로드한다', () => {
+    const uploadBlock = workflow.slice(
+        workflow.indexOf('- name: Upload sanitized run artifact'),
+        workflow.indexOf('- name: Enforce development run gate')
+    );
+    const gateBlock = workflow.slice(
+        workflow.indexOf('- name: Enforce development run gate')
+    );
+    assert.match(workflow, /--manifest-label "\$\{MANIFEST_LABEL\}"/);
+    assert.match(
+        workflow,
+        /--public-out "\.development-land-area-sync\/public-artifact\.json"/
+    );
+    assert.match(
+        uploadBlock,
+        /path: development-land-area-sync-output\/public-artifact\.json/
+    );
+    assert.doesNotMatch(
+        uploadBlock,
+        /path: development-land-area-sync-output\/artifact\.json/
+    );
+    assert.match(
+        gateBlock,
+        /artifact_file="development-land-area-sync-output\/artifact\.json"/
+    );
+    assert.match(
+        validatorCli,
+        /createDevelopmentPublicRunArtifact[\s\S]+validateDevelopmentPublicRunArtifact/
+    );
+    assert.match(validatorCli, /flag: 'wx'/);
+    assert.match(runner, /PUBLIC_RUN_ARTIFACT_INVALID/);
+});
+
+test('workflow는 SSH와 분리된 guardian이 공통 operation lock을 terminal drain과 cleanup까지 보유한다', () => {
+    assert.match(
+        guardian,
+        /application_root="\$\{HOME\}\/alimtalk-proxy"[\s\S]+operation_lock_path="\$\{application_root\}\/\.land-area-sync-operation\.lock"/
+    );
+    assert.match(guardian, /exec 8>>"\$\{operation_lock_path\}"/);
+    assert.match(guardian, /flock -w 900 8/);
+    assert.match(
+        workflow,
+        /nohup setsid env[\s\S]+bash "\$\{guardian\}"/
+    );
+    assert.match(workflow, /while \[\[ ! -f "\$\{status_file\}" \]\]/);
+    assert.match(workflow, /kill -0 "\$\{guardian_pid\}"/);
+    assert.match(workflow, /exec 7>>"\$\{operation_lock_path\}"/);
+    assert.match(workflow, /flock -w 30 7/);
+    assert.doesNotMatch(workflow, /timeout .*development-land-area-sync-runner/);
+    assert.doesNotMatch(
+        `${workflow}\n${guardian}`,
+        /production_lock_path|\.tonghari-api-production\.lock/
+    );
+});
+
+test('workflow와 runner는 raw JWT/secret/log를 artifact나 출력으로 내보내지 않는다', () => {
+    assert.doesNotMatch(workflow, /docker logs/);
+    assert.doesNotMatch(workflow, /DEV_API_JWT_SECRET/);
+    assert.doesNotMatch(workflow, /DEV_SUPABASE_SERVICE_ROLE_KEY/);
+    assert.doesNotMatch(workflow, /Authorization:|Bearer \$\{/);
+    assert.doesNotMatch(
+        runner,
+        /console\.(?:log|error)|process\.(?:stdout|stderr)/
+    );
+    assert.doesNotMatch(cli, /process\.env\.(?:JWT_SECRET|SUPABASE_URL|SUPABASE_SERVICE_ROLE_KEY)\b.*write/);
+});
+
+test('DB 직접 접근은 development service-role read-only select이며 write는 localhost canonical API에만 맡긴다', () => {
+    assert.match(cli, /process\.env\.DEV_SUPABASE_URL/);
+    assert.match(cli, /process\.env\.DEV_SUPABASE_SERVICE_ROLE_KEY/);
+    assert.match(cli, /\.from\('property_units'\)[\s\S]+\.select\(/);
+    assert.match(
+        cli,
+        /land_area_synced_at, land_area_sync_job_id/
+    );
+    assert.match(cli, /\.in\('land_area_sync_job_id', syncJobIds\)/);
+    assert.doesNotMatch(
+        cli,
+        /\.(?:insert|update|upsert|delete|rpc)\s*\(/
+    );
+    assert.match(runner, /const LOCAL_API_ORIGIN = 'http:\/\/127\.0\.0\.1:3100'/);
+    assert.match(runner, /keyid: 'dev'/);
+    assert.match(runner, /databaseTarget: 'development'/);
+    assert.match(runner, /iss: 'tonghari-web-dev'/);
+    assert.match(runner, /aud: 'tonghari-api'/);
+});
+
+test('cleanup은 host/container/local evidence 부재를 재검증하며 실패를 무시하지 않는다', () => {
+    assert.doesNotMatch(workflow, /\|\| true/);
+    assert.doesNotMatch(guardian, /\|\| true/);
+    assert.match(guardian, /cleanup_container_inputs/);
+    assert.match(guardian, /cleanup_host_inputs/);
+    assert.match(
+        guardian,
+        /docker exec "\$\{target_container\}" test ! -e "\$\{candidate\}"/
+    );
+    assert.match(workflow, /test ! -e "\$\{run_root\}"/);
+    assert.match(workflow, /test ! -e "\$\{validation_root\}"/);
+});
+
+test('runner soft timeout은 API queue 10분보다 길고 terminal 전 반환하지 않는다', () => {
+    assert.match(runner, /DEVELOPMENT_API_QUEUE_TIMEOUT_MS = 10 \* 60_000/);
+    assert.match(
+        runner,
+        /DEVELOPMENT_JOB_POLL_SOFT_TIMEOUT_MS =[\s\S]+DEVELOPMENT_API_QUEUE_TIMEOUT_MS \+ 60_000/
+    );
+    assert.match(
+        runner,
+        /current\.status === 'PROCESSING'[\s\S]+!hasWorkerFinalization\(current\)/
+    );
+    assert.match(runner, /JOB_POLL_SOFT_TIMEOUT_AFTER_TERMINAL/);
+});
+
+test('image는 non-root runner private directory를 mode 700으로 준비한다', () => {
+    assert.match(dockerfile, /\.development-land-area-sync/);
+    assert.match(
+        dockerfile,
+        /chown -R nodejs:nodejs[\s\S]+\.development-land-area-sync/
+    );
+    assert.match(
+        dockerfile,
+        /chmod 700[\s\S]+\.development-land-area-sync/
+    );
+});
