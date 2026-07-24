@@ -37,6 +37,7 @@ function fakeClient(config: {
                 insert(v: unknown) { rec.op = 'insert'; rec.value = v; return b; },
                 update(v: unknown) { rec.op = 'update'; rec.value = v; return b; },
                 eq(col: string, val: unknown) { rec.filters.push([col, val]); return b; },
+                is(col: string, val: unknown) { rec.filters.push([col, val]); return b; },
                 in(col: string, val: unknown) { rec.filters.push([col, val]); return b; },
                 order(col: string, o: { ascending: boolean }) { rec.order = [col, o]; return b; },
                 limit() { return b; },
@@ -78,13 +79,14 @@ test('getScopedJob 은 id+union+type 로 스코프한다', async () => {
     assert.deepEqual(calls[0].filters, [['id', JOB], ['union_id', UNION], ['job_type', 'LAND_AREA_SYNC']]);
 });
 
-test('getLatestScopedJob 은 union+type+anchorPnu 로 스코프하고 created_at 내림차순 정렬한다', async () => {
+test('getLatestScopedJob 은 활성 union+type+anchorPnu 로 스코프하고 created_at 내림차순 정렬한다', async () => {
     const { client, calls } = fakeClient({ selectResult: { data: null, error: null } });
     await getLatestScopedJob(client, UNION, '1168010100107360024');
     assert.deepEqual(calls[0].filters, [
         ['union_id', UNION],
         ['job_type', 'LAND_AREA_SYNC'],
         ['preview_data->landAreaSync->>anchorPnu', '1168010100107360024'],
+        ['archived_at', null],
     ]);
     assert.deepEqual(calls[0].order, ['created_at', { ascending: false }]);
 });
