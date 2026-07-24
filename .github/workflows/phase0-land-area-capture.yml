@@ -311,9 +311,31 @@ jobs:
 
           verify_target_health
 
-          docker cp "${host_manifest}" \
-            "${target_container}:${container_manifest}"
-          docker exec "${target_container}" chmod 600 "${container_manifest}"
+          docker exec -i \
+            -e "PHASE0_MANIFEST_PATH=${container_manifest}" \
+            "${target_container}" \
+            node -e '
+              const fs = require("node:fs");
+              const target = process.env.PHASE0_MANIFEST_PATH ?? "";
+              if (!/^\/app\/\.phase0-land-area\/workflow-manifest-[0-9]+-[0-9]+\.json$/.test(target)) {
+                process.exit(1);
+              }
+              const chunks = [];
+              let size = 0;
+              process.stdin.on("data", (chunk) => {
+                size += chunk.length;
+                if (size > 65536) process.exit(1);
+                chunks.push(chunk);
+              });
+              process.stdin.on("end", () => {
+                if (size < 1) process.exit(1);
+                fs.writeFileSync(target, Buffer.concat(chunks), {
+                  flag: "wx",
+                  mode: 0o600,
+                });
+              });
+              process.stdin.on("error", () => process.exit(1));
+            ' < "${host_manifest}"
 
           set +e
           timeout --foreground --kill-after=15s 10m \
