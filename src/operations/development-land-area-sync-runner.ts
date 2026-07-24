@@ -1059,28 +1059,70 @@ function assertJobEvidenceMatches(
 ): LandAreaSyncScopeSnapshot {
     const land = job.landAreaSync;
     const snapshot = land?.scopeSnapshot;
+    // 공개 artifact에는 값 자체가 아니라 아래의 유한한 비교 단계 코드만 남긴다.
+    // 운영자가 coarse한 mismatch를 재시도하며 추측하지 않고 쓰기 전에 정확히 중단할 수 있다.
+    if (!land) {
+        throw new ControlledRunnerError('JOB_EVIDENCE_LAND_MISSING');
+    }
+    if (land.anchorPnu !== evidence.anchorPnu) {
+        throw new ControlledRunnerError('JOB_EVIDENCE_ANCHOR_PNU_MISMATCH');
+    }
+    if (requireDiscovery && land.sourceDiscoveryJobId !== null) {
+        throw new ControlledRunnerError(
+            'JOB_EVIDENCE_DISCOVERY_LINEAGE_MISMATCH'
+        );
+    }
+    if (!snapshot) {
+        throw new ControlledRunnerError('JOB_EVIDENCE_SNAPSHOT_MISSING');
+    }
+    if (snapshot.strategy !== evidence.expectedStrategy) {
+        throw new ControlledRunnerError('JOB_EVIDENCE_STRATEGY_MISMATCH');
+    }
     if (
-        !land ||
-        land.anchorPnu !== evidence.anchorPnu ||
-        (requireDiscovery && land.sourceDiscoveryJobId !== null) ||
-        !snapshot ||
-        snapshot.strategy !== evidence.expectedStrategy ||
         JSON.stringify(snapshot.scannedPnus) !==
-            JSON.stringify(evidence.expectedScannedPnus) ||
-        JSON.stringify(snapshot.candidatePropertyUnitIds) !==
-            JSON.stringify(evidence.expectedPropertyUnitIds) ||
-        JSON.stringify(sortedProposedAreas(snapshot.proposedLandAreas)) !==
-            JSON.stringify(
-                sortedProposedAreas(evidence.expectedProposedLandAreas)
-            ) ||
-        !snapshot.ladfrlAreaEvidence ||
-        JSON.stringify(snapshot.ladfrlAreaEvidence.parcels) !==
-            JSON.stringify(evidence.expectedLadfrlAreaEvidence.parcels) ||
-        snapshot.ladfrlAreaEvidence.totalArea !==
-            evidence.expectedLadfrlAreaEvidence.totalArea ||
-        !HEX64_RE.test(snapshot.scopeHash)
+        JSON.stringify(evidence.expectedScannedPnus)
     ) {
-        throw new ControlledRunnerError('JOB_EVIDENCE_MISMATCH');
+        throw new ControlledRunnerError('JOB_EVIDENCE_SCANNED_PNUS_MISMATCH');
+    }
+    if (
+        JSON.stringify(snapshot.candidatePropertyUnitIds) !==
+        JSON.stringify(evidence.expectedPropertyUnitIds)
+    ) {
+        throw new ControlledRunnerError(
+            'JOB_EVIDENCE_PROPERTY_UNITS_MISMATCH'
+        );
+    }
+    if (
+        JSON.stringify(sortedProposedAreas(snapshot.proposedLandAreas)) !==
+        JSON.stringify(
+            sortedProposedAreas(evidence.expectedProposedLandAreas)
+        )
+    ) {
+        throw new ControlledRunnerError(
+            'JOB_EVIDENCE_PROPOSED_AREAS_MISMATCH'
+        );
+    }
+    if (!snapshot.ladfrlAreaEvidence) {
+        throw new ControlledRunnerError('JOB_EVIDENCE_LADFRL_MISSING');
+    }
+    if (
+        JSON.stringify(snapshot.ladfrlAreaEvidence.parcels) !==
+        JSON.stringify(evidence.expectedLadfrlAreaEvidence.parcels)
+    ) {
+        throw new ControlledRunnerError(
+            'JOB_EVIDENCE_LADFRL_PARCELS_MISMATCH'
+        );
+    }
+    if (
+        snapshot.ladfrlAreaEvidence.totalArea !==
+        evidence.expectedLadfrlAreaEvidence.totalArea
+    ) {
+        throw new ControlledRunnerError(
+            'JOB_EVIDENCE_LADFRL_TOTAL_MISMATCH'
+        );
+    }
+    if (!HEX64_RE.test(snapshot.scopeHash)) {
+        throw new ControlledRunnerError('JOB_EVIDENCE_SCOPE_HASH_INVALID');
     }
     return snapshot;
 }
