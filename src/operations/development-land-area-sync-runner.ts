@@ -26,6 +26,8 @@ export const DEVELOPMENT_EVIDENCE_MANIFEST_VERSION =
     'land-area-development-evidence-manifest@1';
 export const DEVELOPMENT_RUN_ARTIFACT_VERSION =
     'land-area-development-run-artifact@1';
+export const DEVELOPMENT_PUBLIC_RUN_ARTIFACT_VERSION =
+    'land-area-development-public-run-artifact@1';
 export const DEVELOPMENT_GIS_JWT_TTL_SECONDS = 10 * 60;
 export const DEVELOPMENT_API_QUEUE_TIMEOUT_MS = 10 * 60_000;
 export const DEVELOPMENT_JOB_POLL_SOFT_TIMEOUT_MS =
@@ -233,6 +235,53 @@ export interface DevelopmentRunArtifact {
         status: 'PASS' | 'FAIL';
         failureCode: string | null;
         stoppedBeforePnu: string | null;
+    };
+}
+
+export interface DevelopmentPublicRunArtifact {
+    version: typeof DEVELOPMENT_PUBLIC_RUN_ARTIFACT_VERSION;
+    databaseTarget: 'development';
+    manifestLabel: string;
+    aggregateCounts: {
+        targetCount: number;
+        expectedPropertyUnitCount: number;
+        observedPropertyUnitCount: number;
+        resultCount: number;
+        preflightActivePropertyUnitCount: number | null;
+        preflightActivePnuCount: number | null;
+        preflightPositiveLandAreaCount: number | null;
+        postflightActivePropertyUnitCount: number | null;
+        postflightActivePnuCount: number | null;
+        postflightPositiveLandAreaCount: number | null;
+        writerJobCount: number | null;
+        attributedPropertyUnitCount: number | null;
+    };
+    digests: {
+        manifestDigest: string;
+        preflightIdentityDigest: string | null;
+        preflightTupleDigest: string | null;
+        preflightNonTargetTupleDigest: string | null;
+        postflightIdentityDigest: string | null;
+        postflightTupleDigest: string | null;
+        postflightNonTargetTupleDigest: string | null;
+        writeAttributionDigest: string | null;
+    };
+    strategyCounts: {
+        LADFRL: number;
+        LDAREG: number;
+        NONE: number;
+    };
+    outcomeCounts: {
+        APPLIED: number;
+        PARTIAL: number;
+        NO_DATA: number;
+        REVIEW_REQUIRED: number;
+        FAILED: number;
+        NONE: number;
+    };
+    gate: {
+        status: 'PASS' | 'FAIL';
+        failureCode: string | null;
     };
 }
 
@@ -2017,4 +2066,268 @@ export function validateDevelopmentRunArtifact(
             stoppedBeforePnu: gate.stoppedBeforePnu as string | null,
         },
     };
+}
+
+const PUBLIC_MANIFEST_LABEL_RE =
+    /^[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?$/;
+
+function countPublicAggregateValues<T extends string>(
+    values: Array<T | null>,
+    keys: readonly T[]
+): Record<T | 'NONE', number> {
+    const counts = Object.fromEntries([
+        ...keys.map((key) => [key, 0]),
+        ['NONE', 0],
+    ]) as Record<T | 'NONE', number>;
+    for (const value of values) {
+        counts[value ?? 'NONE'] += 1;
+    }
+    return counts;
+}
+
+export function createDevelopmentPublicRunArtifact(
+    artifact: DevelopmentRunArtifact,
+    manifestLabel: string
+): DevelopmentPublicRunArtifact {
+    const strategyCounts = countPublicAggregateValues(
+        artifact.results.map((result) => result.strategy),
+        ['LADFRL', 'LDAREG'] as const
+    );
+    const outcomeCounts = countPublicAggregateValues(
+        artifact.results.map((result) => result.outcome),
+        [
+            'APPLIED',
+            'PARTIAL',
+            'NO_DATA',
+            'REVIEW_REQUIRED',
+            'FAILED',
+        ] as const
+    );
+    return validateDevelopmentPublicRunArtifact(
+        {
+            version: DEVELOPMENT_PUBLIC_RUN_ARTIFACT_VERSION,
+            databaseTarget: 'development',
+            manifestLabel,
+            aggregateCounts: {
+                targetCount: artifact.targetCount,
+                expectedPropertyUnitCount:
+                    artifact.expectedPropertyUnitCount,
+                observedPropertyUnitCount:
+                    artifact.observedPropertyUnitCount,
+                resultCount: artifact.results.length,
+                preflightActivePropertyUnitCount:
+                    artifact.preflight?.activePropertyUnitCount ?? null,
+                preflightActivePnuCount:
+                    artifact.preflight?.activePnuCount ?? null,
+                preflightPositiveLandAreaCount:
+                    artifact.preflight?.positiveLandAreaCount ?? null,
+                postflightActivePropertyUnitCount:
+                    artifact.postflight?.activePropertyUnitCount ?? null,
+                postflightActivePnuCount:
+                    artifact.postflight?.activePnuCount ?? null,
+                postflightPositiveLandAreaCount:
+                    artifact.postflight?.positiveLandAreaCount ?? null,
+                writerJobCount:
+                    artifact.writeAttribution?.writerJobCount ?? null,
+                attributedPropertyUnitCount:
+                    artifact.writeAttribution
+                        ?.attributedPropertyUnitCount ?? null,
+            },
+            digests: {
+                manifestDigest: artifact.manifestDigest,
+                preflightIdentityDigest:
+                    artifact.preflight?.identityDigest ?? null,
+                preflightTupleDigest:
+                    artifact.preflight?.tupleDigest ?? null,
+                preflightNonTargetTupleDigest:
+                    artifact.preflight?.nonTargetTupleDigest ?? null,
+                postflightIdentityDigest:
+                    artifact.postflight?.identityDigest ?? null,
+                postflightTupleDigest:
+                    artifact.postflight?.tupleDigest ?? null,
+                postflightNonTargetTupleDigest:
+                    artifact.postflight?.nonTargetTupleDigest ?? null,
+                writeAttributionDigest:
+                    artifact.writeAttribution?.attributionDigest ?? null,
+            },
+            strategyCounts,
+            outcomeCounts,
+            gate: {
+                status: artifact.gate.status,
+                failureCode: artifact.gate.failureCode,
+            },
+        },
+        manifestLabel
+    );
+}
+
+export function validateDevelopmentPublicRunArtifact(
+    input: unknown,
+    manifestLabel: string
+): DevelopmentPublicRunArtifact {
+    const value = asRecord(input, 'PUBLIC_RUN_ARTIFACT_INVALID');
+    const aggregateCounts = asRecord(
+        value.aggregateCounts,
+        'PUBLIC_RUN_ARTIFACT_INVALID'
+    );
+    const digests = asRecord(
+        value.digests,
+        'PUBLIC_RUN_ARTIFACT_INVALID'
+    );
+    const strategyCounts = asRecord(
+        value.strategyCounts,
+        'PUBLIC_RUN_ARTIFACT_INVALID'
+    );
+    const outcomeCounts = asRecord(
+        value.outcomeCounts,
+        'PUBLIC_RUN_ARTIFACT_INVALID'
+    );
+    const gate = asRecord(value.gate, 'PUBLIC_RUN_ARTIFACT_INVALID');
+    const aggregateKeys = [
+        'targetCount',
+        'expectedPropertyUnitCount',
+        'observedPropertyUnitCount',
+        'resultCount',
+        'preflightActivePropertyUnitCount',
+        'preflightActivePnuCount',
+        'preflightPositiveLandAreaCount',
+        'postflightActivePropertyUnitCount',
+        'postflightActivePnuCount',
+        'postflightPositiveLandAreaCount',
+        'writerJobCount',
+        'attributedPropertyUnitCount',
+    ] as const;
+    const nullableCountKeys = aggregateKeys.slice(4);
+    const digestKeys = [
+        'manifestDigest',
+        'preflightIdentityDigest',
+        'preflightTupleDigest',
+        'preflightNonTargetTupleDigest',
+        'postflightIdentityDigest',
+        'postflightTupleDigest',
+        'postflightNonTargetTupleDigest',
+        'writeAttributionDigest',
+    ] as const;
+    const strategyKeys = ['LADFRL', 'LDAREG', 'NONE'] as const;
+    const outcomeKeys = [
+        'APPLIED',
+        'PARTIAL',
+        'NO_DATA',
+        'REVIEW_REQUIRED',
+        'FAILED',
+        'NONE',
+    ] as const;
+    const validNullableCount = (candidate: unknown): boolean =>
+        candidate === null ||
+        (Number.isSafeInteger(candidate) && (candidate as number) >= 0);
+    const validNullableDigest = (candidate: unknown): boolean =>
+        candidate === null ||
+        (typeof candidate === 'string' && HEX64_RE.test(candidate));
+
+    if (
+        !PUBLIC_MANIFEST_LABEL_RE.test(manifestLabel) ||
+        !hasExactKeys(value, [
+            'version',
+            'databaseTarget',
+            'manifestLabel',
+            'aggregateCounts',
+            'digests',
+            'strategyCounts',
+            'outcomeCounts',
+            'gate',
+        ]) ||
+        value.version !== DEVELOPMENT_PUBLIC_RUN_ARTIFACT_VERSION ||
+        value.databaseTarget !== 'development' ||
+        value.manifestLabel !== manifestLabel ||
+        !hasExactKeys(aggregateCounts, aggregateKeys) ||
+        !aggregateKeys.slice(0, 4).every(
+            (key) =>
+                Number.isSafeInteger(aggregateCounts[key]) &&
+                (aggregateCounts[key] as number) >= 0
+        ) ||
+        !nullableCountKeys.every((key) =>
+            validNullableCount(aggregateCounts[key])
+        ) ||
+        !hasExactKeys(digests, digestKeys) ||
+        typeof digests.manifestDigest !== 'string' ||
+        !HEX64_RE.test(digests.manifestDigest) ||
+        !digestKeys
+            .slice(1)
+            .every((key) => validNullableDigest(digests[key])) ||
+        !hasExactKeys(strategyCounts, strategyKeys) ||
+        !strategyKeys.every(
+            (key) =>
+                Number.isSafeInteger(strategyCounts[key]) &&
+                (strategyCounts[key] as number) >= 0
+        ) ||
+        !hasExactKeys(outcomeCounts, outcomeKeys) ||
+        !outcomeKeys.every(
+            (key) =>
+                Number.isSafeInteger(outcomeCounts[key]) &&
+                (outcomeCounts[key] as number) >= 0
+        ) ||
+        strategyKeys.reduce(
+            (sum, key) => sum + (strategyCounts[key] as number),
+            0
+        ) !== aggregateCounts.resultCount ||
+        outcomeKeys.reduce(
+            (sum, key) => sum + (outcomeCounts[key] as number),
+            0
+        ) !== aggregateCounts.resultCount ||
+        !hasExactKeys(gate, ['status', 'failureCode']) ||
+        (gate.status !== 'PASS' && gate.status !== 'FAIL') ||
+        (gate.failureCode !== null &&
+            (typeof gate.failureCode !== 'string' ||
+                !/^[A-Z0-9_]{1,100}$/.test(gate.failureCode)))
+    ) {
+        throw new ControlledRunnerError('PUBLIC_RUN_ARTIFACT_INVALID');
+    }
+    const preflightFields = [
+        aggregateCounts.preflightActivePropertyUnitCount,
+        aggregateCounts.preflightActivePnuCount,
+        aggregateCounts.preflightPositiveLandAreaCount,
+        digests.preflightIdentityDigest,
+        digests.preflightTupleDigest,
+        digests.preflightNonTargetTupleDigest,
+    ];
+    const postflightFields = [
+        aggregateCounts.postflightActivePropertyUnitCount,
+        aggregateCounts.postflightActivePnuCount,
+        aggregateCounts.postflightPositiveLandAreaCount,
+        digests.postflightIdentityDigest,
+        digests.postflightTupleDigest,
+        digests.postflightNonTargetTupleDigest,
+    ];
+    const attributionFields = [
+        aggregateCounts.writerJobCount,
+        aggregateCounts.attributedPropertyUnitCount,
+        digests.writeAttributionDigest,
+    ];
+    const allNullOrAllPresent = (fields: unknown[]): boolean =>
+        fields.every((field) => field === null) ||
+        fields.every((field) => field !== null);
+    if (
+        !allNullOrAllPresent(preflightFields) ||
+        !allNullOrAllPresent(postflightFields) ||
+        !allNullOrAllPresent(attributionFields) ||
+        (aggregateCounts.resultCount as number) >
+            (aggregateCounts.targetCount as number) ||
+        (gate.status === 'PASS' &&
+            (gate.failureCode !== null ||
+                aggregateCounts.observedPropertyUnitCount !==
+                    aggregateCounts.expectedPropertyUnitCount ||
+                aggregateCounts.resultCount !==
+                    aggregateCounts.targetCount ||
+                outcomeCounts.APPLIED !== aggregateCounts.resultCount ||
+                outcomeKeys
+                    .filter((key) => key !== 'APPLIED')
+                    .some((key) => outcomeCounts[key] !== 0) ||
+                preflightFields.some((field) => field === null) ||
+                postflightFields.some((field) => field === null) ||
+                attributionFields.some((field) => field === null))) ||
+        (gate.status === 'FAIL' && gate.failureCode === null)
+    ) {
+        throw new ControlledRunnerError('PUBLIC_RUN_ARTIFACT_INVALID');
+    }
+    return value as unknown as DevelopmentPublicRunArtifact;
 }

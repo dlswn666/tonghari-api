@@ -10,10 +10,6 @@ on:
         default: mia-seven-representative-20260725
         options:
           - mia-seven-representative-20260725
-      actor_auth_user_id:
-        description: Exact development SYSTEM_ADMIN auth.users UUID
-        required: true
-        type: string
 
 permissions:
   contents: read
@@ -51,21 +47,18 @@ jobs:
           npm run build
           bash -n scripts/development-land-area-sync-remote-guardian.sh
 
-      - name: Validate exact actor UUID
+      - name: Validate protected actor UUID
         shell: bash
         env:
-          ACTOR_AUTH_USER_ID: ${{ inputs.actor_auth_user_id }}
-          EXPECTED_ACTOR_AUTH_USER_ID: ${{ secrets.DEV_GIS_SYSTEM_ADMIN_AUTH_UUID }}
+          ACTOR_AUTH_USER_ID: ${{ secrets.DEV_GIS_SYSTEM_ADMIN_AUTH_UUID }}
         run: |
           set -euo pipefail
           uuid_pattern='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
           if [[
-            -z "${EXPECTED_ACTOR_AUTH_USER_ID:-}"
+            -z "${ACTOR_AUTH_USER_ID:-}"
             || ! "${ACTOR_AUTH_USER_ID}" =~ ${uuid_pattern}
-            || ! "${EXPECTED_ACTOR_AUTH_USER_ID}" =~ ${uuid_pattern}
-            || "${ACTOR_AUTH_USER_ID}" != "${EXPECTED_ACTOR_AUTH_USER_ID}"
           ]]; then
-            echo "::error::Actor auth UUID does not match the protected development SYSTEM_ADMIN identity."
+            echo "::error::Protected development SYSTEM_ADMIN auth UUID is invalid."
             exit 1
           fi
 
@@ -194,7 +187,7 @@ jobs:
           DB_APPROVAL_PATH: ${{ steps.manifest.outputs.db_approval_path }}
           EVIDENCE_PATH: ${{ steps.manifest.outputs.evidence_path }}
           GUARDIAN_PATH: scripts/development-land-area-sync-remote-guardian.sh
-          ACTOR_AUTH_USER_ID: ${{ inputs.actor_auth_user_id }}
+          ACTOR_AUTH_USER_ID: ${{ secrets.DEV_GIS_SYSTEM_ADMIN_AUTH_UUID }}
           RUN_KEY: ${{ github.run_id }}-${{ github.run_attempt }}
           EXPECTED_GIT_SHA: ${{ github.sha }}
           EXPECTED_IMAGE_TAG: ghcr.io/dlswn666/alimtalk-proxy:${{ github.sha }}
@@ -411,9 +404,11 @@ jobs:
         shell: bash
         env:
           TARGET_PATH: ${{ steps.manifest.outputs.target_path }}
+          MANIFEST_LABEL: ${{ inputs.manifest }}
         run: |
           set -euo pipefail
           artifact="development-land-area-sync-output/artifact.json"
+          public_artifact="development-land-area-sync-output/public-artifact.json"
           validated="development-land-area-sync-output/validated"
           status="development-land-area-sync-output/status"
           for candidate in "${artifact}" "${validated}" "${status}"; do
@@ -434,7 +429,8 @@ jobs:
           cleanup_validation() {
             rm -f -- \
               "${validation_root}/.development-land-area-sync/target.json" \
-              "${validation_root}/.development-land-area-sync/artifact.json"
+              "${validation_root}/.development-land-area-sync/artifact.json" \
+              "${validation_root}/.development-land-area-sync/public-artifact.json"
             rmdir -- "${validation_root}/.development-land-area-sync"
             rmdir -- "${validation_root}"
             test ! -e "${validation_root}"
@@ -449,10 +445,23 @@ jobs:
             cd "${validation_root}"
             node "${GITHUB_WORKSPACE}/dist/cli/development-land-area-sync-validate.js" \
               --target ".development-land-area-sync/target.json" \
-              --artifact ".development-land-area-sync/artifact.json"
+              --artifact ".development-land-area-sync/artifact.json" \
+              --manifest-label "${MANIFEST_LABEL}" \
+              --public-out ".development-land-area-sync/public-artifact.json"
           )"
           if [[ "${validation_output}" != "LAND_AREA_DEVELOPMENT_RUN_ARTIFACT_VALIDATED" ]]; then
             echo "::error::Repository validator rejected the downloaded artifact."
+            exit 1
+          fi
+          if [[ -e "${public_artifact}" || -L "${public_artifact}" ]]; then
+            echo "::error::Public artifact output must not pre-exist."
+            exit 1
+          fi
+          install -m 600 \
+            "${validation_root}/.development-land-area-sync/public-artifact.json" \
+            "${public_artifact}"
+          if [[ ! -f "${public_artifact}" || -L "${public_artifact}" ]]; then
+            echo "::error::Public artifact output must be a regular file."
             exit 1
           fi
           printf '%s\n' "${expected_attestation}" \
@@ -462,11 +471,11 @@ jobs:
           trap - EXIT
 
       - name: Upload sanitized run artifact
-        if: always() && steps.validate.outcome == 'success' && hashFiles('development-land-area-sync-output/validated-runner') != ''
+        if: always() && steps.validate.outcome == 'success' && hashFiles('development-land-area-sync-output/validated-runner') != '' && hashFiles('development-land-area-sync-output/public-artifact.json') != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: development-land-area-sync-${{ inputs.manifest }}-${{ github.run_id }}
-          path: development-land-area-sync-output/artifact.json
+          path: development-land-area-sync-output/public-artifact.json
           if-no-files-found: error
           retention-days: 14
 
@@ -493,7 +502,7 @@ jobs:
             || -L "${artifact_file}"
             || -L "${validation_file}"
           ]]; then
-            echo "::error::Validated sanitized artifact is missing."
+            echo "::error::Validated full artifact is missing."
             exit 1
           fi
           gate_status="$(

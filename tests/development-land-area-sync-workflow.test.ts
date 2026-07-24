@@ -19,6 +19,10 @@ const cli = fs.readFileSync(
     path.join(root, 'src/cli/development-land-area-sync-runner.ts'),
     'utf8'
 );
+const validatorCli = fs.readFileSync(
+    path.join(root, 'src/cli/development-land-area-sync-validate.ts'),
+    'utf8'
+);
 const dockerfile = fs.readFileSync(path.join(root, 'Dockerfile'), 'utf8');
 const guardian = fs.readFileSync(
     path.join(
@@ -28,19 +32,63 @@ const guardian = fs.readFileSync(
     'utf8'
 );
 
-test('workflow는 protected environment, main-only, repository choice, exact actor UUID를 요구한다', () => {
+test('workflow는 protected environment secret의 actor UUID만 내부 사용하고 공개 입력을 금지한다', () => {
+    const dispatchBlock = workflow.slice(
+        workflow.indexOf('workflow_dispatch:'),
+        workflow.indexOf('permissions:')
+    );
     assert.match(workflow, /environment: land-area-sync-development-write/);
     assert.match(workflow, /GITHUB_REF.*refs\/heads\/main/);
     assert.match(workflow, /type: choice/);
     assert.match(workflow, /mia-seven-representative-20260725/);
     assert.match(
         workflow,
-        /EXPECTED_ACTOR_AUTH_USER_ID: \$\{\{ secrets\.DEV_GIS_SYSTEM_ADMIN_AUTH_UUID \}\}/
+        /ACTOR_AUTH_USER_ID: \$\{\{ secrets\.DEV_GIS_SYSTEM_ADMIN_AUTH_UUID \}\}/
     );
+    assert.doesNotMatch(dispatchBlock, /actor_auth_user_id|auth UUID/i);
+    assert.doesNotMatch(
+        dispatchBlock,
+        /[0-9a-f]{8}-[0-9a-f-]{27}|[0-9]{19}|secret/i
+    );
+    assert.doesNotMatch(workflow, /\$\{\{ inputs\.actor_auth_user_id \}\}/);
+    assert.doesNotMatch(workflow, /EXPECTED_ACTOR_AUTH_USER_ID/);
+    assert.doesNotMatch(
+        workflow,
+        /echo[^\n]*\$\{ACTOR_AUTH_USER_ID\}/
+    );
+});
+
+test('workflow는 full artifact를 로컬 gate에만 쓰고 strict 공개 artifact만 업로드한다', () => {
+    const uploadBlock = workflow.slice(
+        workflow.indexOf('- name: Upload sanitized run artifact'),
+        workflow.indexOf('- name: Enforce development run gate')
+    );
+    const gateBlock = workflow.slice(
+        workflow.indexOf('- name: Enforce development run gate')
+    );
+    assert.match(workflow, /--manifest-label "\$\{MANIFEST_LABEL\}"/);
     assert.match(
         workflow,
-        /"\$\{ACTOR_AUTH_USER_ID\}" != "\$\{EXPECTED_ACTOR_AUTH_USER_ID\}"/
+        /--public-out "\.development-land-area-sync\/public-artifact\.json"/
     );
+    assert.match(
+        uploadBlock,
+        /path: development-land-area-sync-output\/public-artifact\.json/
+    );
+    assert.doesNotMatch(
+        uploadBlock,
+        /path: development-land-area-sync-output\/artifact\.json/
+    );
+    assert.match(
+        gateBlock,
+        /artifact_file="development-land-area-sync-output\/artifact\.json"/
+    );
+    assert.match(
+        validatorCli,
+        /createDevelopmentPublicRunArtifact[\s\S]+validateDevelopmentPublicRunArtifact/
+    );
+    assert.match(validatorCli, /flag: 'wx'/);
+    assert.match(runner, /PUBLIC_RUN_ARTIFACT_INVALID/);
 });
 
 test('workflow는 SSH와 분리된 guardian이 공통 operation lock을 terminal drain과 cleanup까지 보유한다', () => {

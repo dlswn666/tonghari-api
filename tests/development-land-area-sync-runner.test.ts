@@ -8,14 +8,18 @@ import {
     DEVELOPMENT_EVIDENCE_MANIFEST_VERSION,
     DEVELOPMENT_GIS_JWT_TTL_SECONDS,
     DEVELOPMENT_JOB_POLL_SOFT_TIMEOUT_MS,
+    DEVELOPMENT_PUBLIC_RUN_ARTIFACT_VERSION,
+    DEVELOPMENT_RUN_ARTIFACT_VERSION,
     DEVELOPMENT_TARGET_MANIFEST_VERSION,
     LocalhostDevelopmentLandAreaSyncClient,
     computeDevelopmentTargetDigest,
     createDevelopmentGisSystemAdminJwt,
+    createDevelopmentPublicRunArtifact,
     parseDevelopmentDbApprovalManifest,
     parseDevelopmentEvidenceManifest,
     parseDevelopmentTargetManifest,
     runDevelopmentLandAreaSync,
+    validateDevelopmentPublicRunArtifact,
     validateDevelopmentRunArtifact,
     validateDevelopmentRunnerEnvironment,
     validateDevelopmentRunnerManifests,
@@ -23,6 +27,7 @@ import {
     type DevelopmentEvidenceEntry,
     type DevelopmentEvidenceManifest,
     type DevelopmentReadOnlyPreflightReader,
+    type DevelopmentRunArtifact,
     type DevelopmentTargetManifest,
     type LandAreaSyncApiClient,
     type LandAreaSyncApiJob,
@@ -245,6 +250,167 @@ function job(
         },
     };
 }
+
+function validRunArtifact(): DevelopmentRunArtifact {
+    const identityDigest = '6'.repeat(64);
+    const nonTargetTupleDigest = '7'.repeat(64);
+    return {
+        version: DEVELOPMENT_RUN_ARTIFACT_VERSION,
+        databaseTarget: 'development',
+        unionId: UNION_ID,
+        targetCount: 1,
+        manifestDigest: computeDevelopmentTargetDigest(UNION_ID, [PNU]),
+        expectedPropertyUnitCount: 1,
+        observedPropertyUnitCount: 1,
+        startedAt: '2026-07-25T00:00:00.000Z',
+        completedAt: '2026-07-25T00:01:00.000Z',
+        preflight: {
+            activePropertyUnitCount: 1,
+            activePnuCount: 1,
+            positiveLandAreaCount: 0,
+            identityDigest,
+            tupleDigest: '8'.repeat(64),
+            nonTargetTupleDigest,
+        },
+        postflight: {
+            activePropertyUnitCount: 1,
+            activePnuCount: 1,
+            positiveLandAreaCount: 1,
+            identityDigest,
+            tupleDigest: '9'.repeat(64),
+            nonTargetTupleDigest,
+        },
+        writeAttribution: {
+            writerJobCount: 1,
+            attributedPropertyUnitCount: 1,
+            attributionDigest: 'b'.repeat(64),
+        },
+        results: [
+            {
+                pnu: PNU,
+                admission: 'NEW_DISCOVERY',
+                discoveryJobId: DISCOVERY_JOB_ID,
+                applyJobId: APPLY_JOB_ID,
+                writerJobId: APPLY_JOB_ID,
+                status: 'COMPLETED',
+                strategy: 'LADFRL',
+                scopeState: 'SINGLE_PNU_CONFIRMED',
+                outcome: 'APPLIED',
+                updatedPropertyUnits: 1,
+                unchangedPropertyUnits: 0,
+                issueCodes: [],
+            },
+        ],
+        gate: {
+            status: 'PASS',
+            failureCode: null,
+            stoppedBeforePnu: null,
+        },
+    };
+}
+
+test('공개 artifact는 집계와 digest allowlist만 남기고 raw 식별자·secret·target 배열을 제거한다', () => {
+    const targetManifest = target();
+    const fullArtifact = validRunArtifact();
+    validateDevelopmentRunArtifact(fullArtifact, targetManifest);
+    const secretSentinel = 'never-publish-development-secret';
+    const pollutedRuntimeValue = {
+        ...fullArtifact,
+        rawSecret: secretSentinel,
+        targetPnus: [PNU],
+        propertyUnitIds: [PROPERTY_UNIT_ID],
+    } as DevelopmentRunArtifact;
+    const publicArtifact = createDevelopmentPublicRunArtifact(
+        pollutedRuntimeValue,
+        'mia-seven-representative-20260725'
+    );
+
+    assert.equal(
+        publicArtifact.version,
+        DEVELOPMENT_PUBLIC_RUN_ARTIFACT_VERSION
+    );
+    assert.deepEqual(Object.keys(publicArtifact).sort(), [
+        'aggregateCounts',
+        'databaseTarget',
+        'digests',
+        'gate',
+        'manifestLabel',
+        'outcomeCounts',
+        'strategyCounts',
+        'version',
+    ]);
+    assert.doesNotThrow(() =>
+        validateDevelopmentPublicRunArtifact(
+            publicArtifact,
+            'mia-seven-representative-20260725'
+        )
+    );
+    assert.deepEqual(publicArtifact.strategyCounts, {
+        LADFRL: 1,
+        LDAREG: 0,
+        NONE: 0,
+    });
+    assert.deepEqual(publicArtifact.outcomeCounts, {
+        APPLIED: 1,
+        PARTIAL: 0,
+        NO_DATA: 0,
+        REVIEW_REQUIRED: 0,
+        FAILED: 0,
+        NONE: 0,
+    });
+
+    const serialized = JSON.stringify(publicArtifact);
+    for (const forbiddenValue of [
+        UNION_ID,
+        PNU,
+        PROPERTY_UNIT_ID,
+        DISCOVERY_JOB_ID,
+        APPLY_JOB_ID,
+        secretSentinel,
+        fullArtifact.startedAt,
+        fullArtifact.completedAt,
+    ]) {
+        assert.doesNotMatch(serialized, new RegExp(forbiddenValue));
+    }
+    for (const forbiddenKey of [
+        '"unionId"',
+        '"pnu"',
+        '"pnus"',
+        '"jobId"',
+        '"writerJobId"',
+        '"propertyUnitId"',
+        '"propertyUnitIds"',
+        '"results"',
+        '"targets"',
+        '"startedAt"',
+        '"completedAt"',
+        '"rawSecret"',
+    ]) {
+        assert.equal(serialized.includes(forbiddenKey), false);
+    }
+    assert.throws(
+        () =>
+            validateDevelopmentPublicRunArtifact(
+                { ...publicArtifact, unionId: UNION_ID },
+                'mia-seven-representative-20260725'
+            ),
+        /PUBLIC_RUN_ARTIFACT_INVALID/
+    );
+    assert.throws(
+        () =>
+            validateDevelopmentPublicRunArtifact(
+                {
+                    ...publicArtifact,
+                    aggregateCounts: {
+                        ...publicArtifact.aggregateCounts,
+                        writerJobCount: null,
+                    },
+                },
+                'mia-seven-representative-20260725'
+            ),
+        /PUBLIC_RUN_ARTIFACT_INVALID/
+    );
+});
 
 test('대표 evidence reference digest는 문서화된 PII-free canonical preimage와 실제 Phase 0 artifact hash를 고정한다', () => {
     const manifest = parseDevelopmentEvidenceManifest(
