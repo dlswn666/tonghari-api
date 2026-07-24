@@ -18,6 +18,7 @@ import {
     type LandAreaSyncOutcome,
     type LandAreaSyncScopeState,
 } from '../../types/land-area-sync-job.types';
+import { emptyCounts } from './preview';
 
 /** sync_jobs 행(LAND_AREA_SYNC 스코프에서 읽는 컬럼). */
 export interface LandAreaSyncJobRow {
@@ -146,7 +147,11 @@ async function mergeLandAreaSync(
     client: SupabaseClient,
     jobId: string,
     unionId: string,
-    patch: Record<string, unknown>
+    patch:
+        | Record<string, unknown>
+        | ((
+              current: Record<string, unknown>
+          ) => Record<string, unknown>)
 ): Promise<Record<string, unknown>> {
     const { data, error } = await client
         .from('sync_jobs')
@@ -166,7 +171,12 @@ async function mergeLandAreaSync(
         preview.landAreaSync && typeof preview.landAreaSync === 'object'
             ? (preview.landAreaSync as Record<string, unknown>)
             : {};
-    return { ...preview, landAreaSync: { ...land, ...patch } };
+    const resolvedPatch =
+        typeof patch === 'function' ? patch(land) : patch;
+    return {
+        ...preview,
+        landAreaSync: { ...land, ...resolvedPatch },
+    };
 }
 
 /**
@@ -269,11 +279,38 @@ export async function markScopedFailed(
     message: string
 ): Promise<boolean> {
     const finalizedAt = new Date().toISOString();
-    const previewData = await mergeLandAreaSync(client, jobId, unionId, {
-        scopeState: 'FAILED',
-        outcome: 'FAILED',
-        workerFinalization: { version: 1, finalizedAt },
-    });
+    const previewData = await mergeLandAreaSync(
+        client,
+        jobId,
+        unionId,
+        (current) => {
+            const issues = Array.isArray(current.issues)
+                ? current.issues
+                : [];
+            const issuesTotal =
+                Number.isSafeInteger(current.issuesTotal) &&
+                (current.issuesTotal as number) >= issues.length
+                    ? (current.issuesTotal as number)
+                    : issues.length;
+            return {
+                scopeState: 'FAILED',
+                outcome: 'FAILED',
+                counts:
+                    current.counts &&
+                    typeof current.counts === 'object' &&
+                    !Array.isArray(current.counts)
+                        ? current.counts
+                        : emptyCounts(),
+                issues,
+                issuesTotal,
+                issuesTruncated:
+                    typeof current.issuesTruncated === 'boolean'
+                        ? current.issuesTruncated
+                        : issuesTotal > issues.length,
+                workerFinalization: { version: 1, finalizedAt },
+            };
+        }
+    );
     const { data, error } = await client
         .from('sync_jobs')
         .update({

@@ -11,6 +11,7 @@ import {
     markScopedFailed,
     type LandAreaSyncJobRow,
 } from '../src/services/land-area-sync/repository';
+import { emptyCounts } from '../src/services/land-area-sync/preview';
 
 interface CallRecord {
     table: string;
@@ -138,9 +139,23 @@ test('freezeScopeSnapshot 은 status=PROCESSING 스코프에서만 CAS 한다', 
     assert.ok(update.filters.some((f) => f[0] === 'job_type' && f[1] === 'LAND_AREA_SYNC'));
 });
 
-test('markScopedFailed 은 id+union+type+status=PROCESSING 로 FAILED 를 기록한다(COMPLETED 뒤집기 차단, I3)', async () => {
+test('markScopedFailed 은 초기 INSERT 직후에도 guard가 요구하는 전체 FAILED terminal payload를 기록한다', async () => {
     const { client, calls } = fakeClient({
-        selectResult: { data: { preview_data: {} }, error: null },
+        selectResult: {
+            data: {
+                preview_data: {
+                    actorUserId: 'admin-1',
+                    source: 'LAND_AREA_SYNC',
+                    landAreaSync: {
+                        schemaVersion: 2,
+                        anchorPnu: '1168010100107360024',
+                        sourceDiscoveryJobId: null,
+                        admissionKey: JOB,
+                    },
+                },
+            },
+            error: null,
+        },
         updateResult: { data: { id: JOB }, error: null },
     });
     const ok = await markScopedFailed(client, JOB, UNION, 'boom');
@@ -155,6 +170,56 @@ test('markScopedFailed 은 id+union+type+status=PROCESSING 로 FAILED 를 기록
     };
     assert.equal(receipt.version, 1);
     assert.equal(Number.isNaN(Date.parse(receipt.finalizedAt)), false);
+    assert.deepEqual(
+        value.preview_data.landAreaSync.counts,
+        emptyCounts()
+    );
+    assert.deepEqual(value.preview_data.landAreaSync.issues, []);
+    assert.equal(value.preview_data.landAreaSync.issuesTotal, 0);
+    assert.equal(
+        value.preview_data.landAreaSync.issuesTruncated,
+        false
+    );
     // status=PROCESSING 스코프가 있어야 이미 COMPLETED 된 job 이 사후 조회 실패로 FAILED 로 뒤집히지 않는다.
     assert.deepEqual(update.filters, [['id', JOB], ['union_id', UNION], ['job_type', 'LAND_AREA_SYNC'], ['status', 'PROCESSING']]);
+});
+
+test('markScopedFailed 은 기존 counts/issues metadata를 보존하고 누락값만 보충한다', async () => {
+    const existingCounts = { ...emptyCounts(), titleRows: 2 };
+    const existingIssues = [
+        { code: 'TITLE_SCAN_FAILED', targetPnu: '1168010100107360024' },
+    ];
+    const { client, calls } = fakeClient({
+        selectResult: {
+            data: {
+                preview_data: {
+                    landAreaSync: {
+                        schemaVersion: 2,
+                        anchorPnu: '1168010100107360024',
+                        counts: existingCounts,
+                        issues: existingIssues,
+                    },
+                },
+            },
+            error: null,
+        },
+        updateResult: { data: { id: JOB }, error: null },
+    });
+
+    assert.equal(
+        await markScopedFailed(client, JOB, UNION, 'boom'),
+        true
+    );
+    const update = calls.find((c) => c.op === 'update')!;
+    const terminal = (
+        update.value as {
+            preview_data: {
+                landAreaSync: Record<string, unknown>;
+            };
+        }
+    ).preview_data.landAreaSync;
+    assert.deepEqual(terminal.counts, existingCounts);
+    assert.deepEqual(terminal.issues, existingIssues);
+    assert.equal(terminal.issuesTotal, 1);
+    assert.equal(terminal.issuesTruncated, false);
 });
