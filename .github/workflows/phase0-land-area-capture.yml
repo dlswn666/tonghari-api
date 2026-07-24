@@ -121,7 +121,7 @@ jobs:
           install -m 600 /dev/null "${HOME}/.ssh/id_ed25519"
           printf '%s\n' "${EC2_SSH_KEY}" > "${HOME}/.ssh/id_ed25519"
 
-          host_keys="$(ssh-keyscan -T 10 -t ed25519,rsa "${EC2_HOST}" 2>/dev/null)"
+          host_keys="$(ssh-keyscan -T 10 -t ed25519,ecdsa,rsa "${EC2_HOST}" 2>/dev/null)"
           if [[ -z "${host_keys}" ]]; then
             echo "::error::EC2 host key scan returned no keys."
             exit 1
