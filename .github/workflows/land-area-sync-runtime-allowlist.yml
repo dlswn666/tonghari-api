@@ -1,0 +1,721 @@
+name: Land Area Sync Runtime Allowlist
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'development 대지권 동기화 runtime gate 동작'
+        required: true
+        type: choice
+        default: disable
+        options:
+          - enable
+          - disable
+      land_area_sync_allowed_targets:
+        description: 'canonical development:unionUuid:PNU allowlist 원문 (disable은 빈 값)'
+        required: false
+        type: string
+      expected_allowlist_count:
+        description: '승인된 exact target 수 (disable은 0)'
+        required: true
+        default: '0'
+        type: string
+      expected_allowlist_sha256:
+        description: '승인된 canonical allowlist SHA-256 (disable은 빈 값)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tonghari-api-production
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate development-only runtime manifest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      count: ${{ steps.attestation.outputs.count }}
+      digest: ${{ steps.attestation.outputs.digest }}
+    steps:
+      - name: Require explicit main workflow dispatch
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ]]; then
+            echo "::error::Runtime allowlist changes require workflow_dispatch."
+            exit 1
+          fi
+          if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "::error::Runtime allowlist changes must run from refs/heads/main."
+            exit 1
+          fi
+
+      - name: Checkout exact main revision
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Test and compile repository validator
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm test
+          npm run build
+
+      - name: Validate approved count and digest without logging raw allowlist
+        id: attestation
+        shell: bash
+        env:
+          LAND_AREA_SYNC_RUNTIME_ACTION: ${{ inputs.action }}
+          LAND_AREA_SYNC_ALLOWED_TARGETS: ${{ inputs.land_area_sync_allowed_targets }}
+          EXPECTED_ALLOWLIST_COUNT: ${{ inputs.expected_allowlist_count }}
+          EXPECTED_ALLOWLIST_DIGEST: ${{ inputs.expected_allowlist_sha256 }}
+        run: |
+          set -euo pipefail
+
+          attestation="$(
+            node dist/cli/land-area-sync-runtime-allowlist.js
+          )"
+          IFS=':' read -r actual_count actual_digest extra <<< "${attestation}"
+          if [[ -n "${extra:-}" ]] || [[ ! "${actual_count}" =~ ^[0-9]+$ ]]; then
+            echo "::error::Runtime allowlist validator returned an invalid attestation."
+            exit 1
+          fi
+          if [[ "${actual_count}" -gt 0 ]] \
+            && [[ ! "${actual_digest}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Runtime allowlist validator returned an invalid digest."
+            exit 1
+          fi
+          if [[ "${actual_count}" == "0" && -n "${actual_digest}" ]]; then
+            echo "::error::Disabled runtime allowlist must have an empty digest."
+            exit 1
+          fi
+
+          echo "count=${actual_count}" >> "${GITHUB_OUTPUT}"
+          echo "digest=${actual_digest}" >> "${GITHUB_OUTPUT}"
+          echo "Runtime manifest validated (count=${actual_count}, digest=${actual_digest:-empty})."
+
+  apply-runtime-gate:
+    name: Apply or disable development runtime gate
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: land-area-sync-development-backfill
+    timeout-minutes: 15
+    steps:
+      - name: Require EC2 connection secrets
+        shell: bash
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_SSH_FINGERPRINT: ${{ secrets.EC2_SSH_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+
+          missing=()
+          for secret_name in \
+            EC2_HOST \
+            EC2_USERNAME \
+            EC2_SSH_KEY \
+            EC2_SSH_FINGERPRINT
+          do
+            if [[ -z "${!secret_name:-}" ]]; then
+              missing+=("${secret_name}")
+            fi
+          done
+          if (( ${#missing[@]} > 0 )); then
+            echo "::error::Missing required EC2 connection secret."
+            exit 1
+          fi
+
+      - name: Configure pinned EC2 SSH identity
+        shell: bash
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_SSH_FINGERPRINT: ${{ secrets.EC2_SSH_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${EC2_USERNAME}" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+            echo "::error::EC2 username format is invalid."
+            exit 1
+          fi
+          if [[
+            ${#EC2_HOST} -gt 253
+            || ! "${EC2_HOST}" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$
+          ]]; then
+            echo "::error::EC2 host format is invalid."
+            exit 1
+          fi
+
+          install -d -m 700 "${HOME}/.ssh"
+          install -m 600 /dev/null "${HOME}/.ssh/id_ed25519"
+          printf '%s\n' "${EC2_SSH_KEY}" > "${HOME}/.ssh/id_ed25519"
+
+          host_keys="$(
+            ssh-keyscan -T 10 -t ed25519,ecdsa,rsa "${EC2_HOST}" 2>/dev/null
+          )"
+          if [[ -z "${host_keys}" ]]; then
+            echo "::error::EC2 host key scan returned no keys."
+            exit 1
+          fi
+          matched_host_key=""
+          while IFS= read -r host_key; do
+            fingerprint="$(
+              printf '%s\n' "${host_key}" \
+                | ssh-keygen -lf - -E sha256 \
+                | awk '{print $2}'
+            )"
+            if [[ "${fingerprint}" == "${EC2_SSH_FINGERPRINT}" ]]; then
+              matched_host_key="${host_key}"
+              break
+            fi
+          done <<< "${host_keys}"
+          if [[ -z "${matched_host_key}" ]]; then
+            echo "::error::EC2 SSH fingerprint mismatch."
+            exit 1
+          fi
+          printf '%s\n' "${matched_host_key}" > "${HOME}/.ssh/known_hosts"
+          chmod 600 "${HOME}/.ssh/known_hosts"
+
+      - name: Stage raw allowlist without printing it
+        id: runtime-input
+        shell: bash
+        env:
+          RAW_ALLOWED_TARGETS: ${{ inputs.land_area_sync_allowed_targets }}
+          RUN_KEY: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${RUN_KEY}" =~ ^[0-9]+-[0-9]+$ ]]; then
+            echo "::error::Invalid workflow run key."
+            exit 1
+          fi
+          local_root="${RUNNER_TEMP}/land-area-sync-runtime-${RUN_KEY}"
+          install -d -m 700 "${local_root}"
+          allowlist_path="${local_root}/allowlist"
+          install -m 600 /dev/null "${allowlist_path}"
+          printf '%s' "${RAW_ALLOWED_TARGETS}" > "${allowlist_path}"
+          echo "path=${allowlist_path}" >> "${GITHUB_OUTPUT}"
+
+      - name: Apply atomic EC2 runtime change using the current immutable image
+        shell: bash
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
+          ALLOWLIST_PATH: ${{ steps.runtime-input.outputs.path }}
+          RUN_KEY: ${{ github.run_id }}-${{ github.run_attempt }}
+          RUNTIME_ACTION: ${{ inputs.action }}
+          EXPECTED_ALLOWLIST_COUNT: ${{ needs.validate.outputs.count }}
+          EXPECTED_ALLOWLIST_DIGEST: ${{ needs.validate.outputs.digest }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${RUN_KEY}" =~ ^[0-9]+-[0-9]+$ ]]; then
+            echo "::error::Invalid workflow run key."
+            exit 1
+          fi
+          if [[ ! "${RUNTIME_ACTION}" =~ ^(enable|disable)$ ]]; then
+            echo "::error::Invalid runtime action."
+            exit 1
+          fi
+          if [[ ! "${EXPECTED_ALLOWLIST_COUNT}" =~ ^[0-9]+$ ]]; then
+            echo "::error::Invalid expected allowlist count."
+            exit 1
+          fi
+          if [[ -n "${EXPECTED_ALLOWLIST_DIGEST}" ]] \
+            && [[ ! "${EXPECTED_ALLOWLIST_DIGEST}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Invalid expected allowlist digest."
+            exit 1
+          fi
+          if [[ ! -f "${ALLOWLIST_PATH}" || -L "${ALLOWLIST_PATH}" ]]; then
+            echo "::error::Staged allowlist must be a regular non-symlink file."
+            exit 1
+          fi
+
+          ssh_options=(
+            -i "${HOME}/.ssh/id_ed25519"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o "UserKnownHostsFile=${HOME}/.ssh/known_hosts"
+          )
+          remote_root="alimtalk-proxy/.land-area-sync-runtime/${RUN_KEY}"
+
+          cleanup_remote() {
+            ssh "${ssh_options[@]}" "${EC2_USERNAME}@${EC2_HOST}" \
+              "RUN_KEY='${RUN_KEY}' bash -s" \
+              >/dev/null 2>&1 <<'REMOTE_CLEANUP' || true
+          set -euo pipefail
+          application_root="${HOME}/alimtalk-proxy"
+          parent="${application_root}/.land-area-sync-runtime"
+          run_root="${parent}/${RUN_KEY}"
+          if [[ -d "${run_root}" && ! -L "${run_root}" ]]; then
+            rm -f -- "${run_root}/allowlist"
+            rmdir -- "${run_root}" 2>/dev/null || true
+          fi
+          REMOTE_CLEANUP
+          }
+          trap cleanup_remote EXIT
+
+          ssh "${ssh_options[@]}" "${EC2_USERNAME}@${EC2_HOST}" \
+            "RUN_KEY='${RUN_KEY}' bash -s" <<'REMOTE_PREPARE'
+          set -euo pipefail
+          application_root="${HOME}/alimtalk-proxy"
+          parent="${application_root}/.land-area-sync-runtime"
+          run_root="${parent}/${RUN_KEY}"
+          [[ "${RUN_KEY}" =~ ^[0-9]+-[0-9]+$ ]]
+          test -d "${application_root}"
+          test ! -L "${application_root}"
+          if [[ -e "${parent}" || -L "${parent}" ]]; then
+            test -d "${parent}"
+            test ! -L "${parent}"
+          else
+            mkdir -m 700 -- "${parent}"
+          fi
+          test "$(stat -c '%u' "${parent}")" = "$(id -u)"
+          test "$(stat -c '%a' "${parent}")" = "700"
+          (umask 077; mkdir -m 700 -- "${run_root}")
+          test -d "${run_root}"
+          test ! -L "${run_root}"
+          test "$(stat -c '%u' "${run_root}")" = "$(id -u)"
+          test "$(stat -c '%a' "${run_root}")" = "700"
+          REMOTE_PREPARE
+
+          scp "${ssh_options[@]}" "${ALLOWLIST_PATH}" \
+            "${EC2_USERNAME}@${EC2_HOST}:${remote_root}/allowlist"
+
+          ssh "${ssh_options[@]}" "${EC2_USERNAME}@${EC2_HOST}" \
+            "RUN_KEY='${RUN_KEY}' RUNTIME_ACTION='${RUNTIME_ACTION}' EXPECTED_ALLOWLIST_COUNT='${EXPECTED_ALLOWLIST_COUNT}' EXPECTED_ALLOWLIST_DIGEST='${EXPECTED_ALLOWLIST_DIGEST}' bash -s" <<'REMOTE_RUNTIME'
+          set -Eeuo pipefail
+
+          [[ "${RUN_KEY}" =~ ^[0-9]+-[0-9]+$ ]]
+          [[ "${RUNTIME_ACTION}" =~ ^(enable|disable)$ ]]
+          [[ "${EXPECTED_ALLOWLIST_COUNT}" =~ ^[0-9]+$ ]]
+          if [[ -n "${EXPECTED_ALLOWLIST_DIGEST}" ]]; then
+            [[ "${EXPECTED_ALLOWLIST_DIGEST}" =~ ^[0-9a-f]{64}$ ]]
+          fi
+
+          application_root="${HOME}/alimtalk-proxy"
+          run_root="${application_root}/.land-area-sync-runtime/${RUN_KEY}"
+          allowlist_path="${run_root}/allowlist"
+          container_name="alimtalk-proxy"
+          candidate_container="${container_name}-runtime-candidate"
+          rollback_container="${container_name}-runtime-rollback"
+          env_path="${application_root}/.env"
+          env_backup=""
+          env_next=""
+          env_replaced=0
+          previous_renamed=0
+          new_current_attempted=0
+          current_image_id=""
+          previous_health_attestation=""
+
+          cleanup_run_files() {
+            set +e
+            if [[ -f "${allowlist_path}" && ! -L "${allowlist_path}" ]]; then
+              rm -f -- "${allowlist_path}"
+            fi
+            if [[ -d "${run_root}" && ! -L "${run_root}" ]]; then
+              rmdir -- "${run_root}" 2>/dev/null || true
+            fi
+            return 0
+          }
+          trap cleanup_run_files EXIT
+
+          read_health_attestation() {
+            local inspected_container="$1"
+            local port="$2"
+            local result=""
+
+            for attempt in $(seq 1 20); do
+              if result="$(
+                curl -fsS --connect-timeout 2 --max-time 5 \
+                  "http://127.0.0.1:${port}/health" \
+                  | docker exec -i "${inspected_container}" node -e '
+                      let body = "";
+                      process.stdin.setEncoding("utf8");
+                      process.stdin.on("data", (chunk) => { body += chunk; });
+                      process.stdin.on("end", () => {
+                        try {
+                          const health = JSON.parse(body);
+                          const enabled =
+                            health.features?.landAreaSyncEnabled;
+                          const count =
+                            health.features?.landAreaSyncAllowedTargetCount;
+                          const digest =
+                            health.features?.landAreaSyncAllowedTargetsDigest;
+                          if (
+                            health.status !== "ok"
+                            || typeof enabled !== "boolean"
+                            || !Number.isInteger(count)
+                            || count < 0
+                            || typeof digest !== "string"
+                          ) process.exit(1);
+                          process.stdout.write(
+                            `${enabled}:${count}:${digest}`
+                          );
+                        } catch {
+                          process.exit(1);
+                        }
+                      });
+                    ' 2>/dev/null
+              )"; then
+                printf '%s' "${result}"
+                return 0
+              fi
+              sleep 2
+            done
+            return 1
+          }
+
+          verify_container() {
+            local inspected_container="$1"
+            local port="$2"
+            local expected_health="$3"
+            local actual_image_id=""
+            local actual_health=""
+
+            actual_image_id="$(
+              docker container inspect --format '{{.Image}}' \
+                "${inspected_container}"
+            )"
+            if [[ "${actual_image_id}" != "${current_image_id}" ]]; then
+              return 1
+            fi
+            actual_health="$(
+              read_health_attestation "${inspected_container}" "${port}"
+            )"
+            [[ "${actual_health}" == "${expected_health}" ]]
+          }
+
+          test -d "${application_root}"
+          test ! -L "${application_root}"
+          test -d "${run_root}"
+          test ! -L "${run_root}"
+          test "$(stat -c '%u' "${run_root}")" = "$(id -u)"
+          test "$(stat -c '%a' "${run_root}")" = "700"
+          test -f "${allowlist_path}"
+          test ! -L "${allowlist_path}"
+          test "$(stat -c '%u' "${allowlist_path}")" = "$(id -u)"
+          chmod 600 "${allowlist_path}"
+          test "$(stat -c '%a' "${allowlist_path}")" = "600"
+
+          if [[ ! -f "${env_path}" || -L "${env_path}" ]]; then
+            echo "Runtime .env must be a regular non-symlink file."
+            false
+          fi
+          if [[ "$(stat -c '%u' "${env_path}")" != "$(id -u)" ]] \
+            || [[ "$(stat -c '%a' "${env_path}")" != "600" ]]; then
+            echo "Runtime .env must be owned by the deploy user with mode 600."
+            false
+          fi
+          if docker container inspect "${candidate_container}" >/dev/null 2>&1 \
+            || docker container inspect "${rollback_container}" >/dev/null 2>&1; then
+            echo "A previous runtime candidate or rollback container requires review."
+            false
+          fi
+          if ! docker container inspect "${container_name}" >/dev/null 2>&1 \
+            || [[ "$(
+              docker container inspect --format '{{.State.Running}}' \
+                "${container_name}"
+            )" != "true" ]]; then
+            echo "The current API container must exist and be running."
+            false
+          fi
+
+          current_image_id="$(
+            docker container inspect --format '{{.Image}}' "${container_name}"
+          )"
+          if [[ ! "${current_image_id}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "The current API container does not expose an immutable image ID."
+            false
+          fi
+          previous_health_attestation="$(
+            read_health_attestation "${container_name}" 3100
+          )"
+          if [[ ! "${previous_health_attestation}" =~ ^(true|false):[0-9]+:([0-9a-f]{64})?$ ]]; then
+            echo "The current API health attestation is invalid."
+            false
+          fi
+
+          raw_allowed_targets="$(<"${allowlist_path}")"
+          export LAND_AREA_SYNC_ALLOWED_TARGETS="${raw_allowed_targets}"
+          runtime_attestation="$(
+            docker run --rm \
+              --env LAND_AREA_SYNC_ALLOWED_TARGETS \
+              "${current_image_id}" \
+              node dist/cli/land-area-sync-allowlist-manifest.js
+          )"
+          IFS=':' read -r actual_count actual_digest attestation_extra \
+            <<< "${runtime_attestation}"
+          if [[ -n "${attestation_extra:-}" ]] \
+            || [[ ! "${actual_count}" =~ ^[0-9]+$ ]]; then
+            echo "Current image returned an invalid runtime attestation."
+            false
+          fi
+          if [[ "${actual_count}" != "${EXPECTED_ALLOWLIST_COUNT}" ]] \
+            || [[ "${actual_digest}" != "${EXPECTED_ALLOWLIST_DIGEST}" ]]; then
+            echo "Remote runtime attestation does not match the approved input."
+            false
+          fi
+
+          if [[ "${RUNTIME_ACTION}" == "enable" ]]; then
+            desired_enabled="true"
+            if [[ "${actual_count}" -le 0 ]] \
+              || [[ ! "${actual_digest}" =~ ^[0-9a-f]{64}$ ]] \
+              || [[ -z "${raw_allowed_targets}" ]]; then
+              echo "Enable requires a non-empty approved allowlist."
+              false
+            fi
+            IFS=',' read -r -a allowed_entries <<< "${raw_allowed_targets}"
+            if [[ "${#allowed_entries[@]}" != "${actual_count}" ]]; then
+              echo "Remote runtime allowlist count is inconsistent."
+              false
+            fi
+            for allowed_entry in "${allowed_entries[@]}"; do
+              if [[ ! "${allowed_entry}" =~ ^development:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[0-9]{19}$ ]]; then
+                echo "Only exact canonical development targets are allowed."
+                false
+              fi
+            done
+            canonical_allowed_targets="$(
+              printf '%s\n' "${allowed_entries[@]}" \
+                | LC_ALL=C sort \
+                | paste -sd, -
+            )"
+            if [[ "${canonical_allowed_targets}" != "${raw_allowed_targets}" ]]; then
+              echo "Remote runtime allowlist is not canonical."
+              false
+            fi
+          else
+            desired_enabled="false"
+            if [[ -n "${raw_allowed_targets}" ]] \
+              || [[ "${actual_count}" != "0" ]] \
+              || [[ -n "${actual_digest}" ]]; then
+              echo "Disable requires an empty allowlist attestation."
+              false
+            fi
+          fi
+          expected_health_attestation="${desired_enabled}:${actual_count}:${actual_digest}"
+
+          rollback() {
+            exit_code=$?
+            rollback_failed=0
+            trap - ERR
+            set +e
+
+            if docker container inspect "${candidate_container}" >/dev/null 2>&1; then
+              docker rm -f "${candidate_container}" >/dev/null 2>&1 \
+                || rollback_failed=1
+            fi
+            if [[ "${new_current_attempted}" -eq 1 ]] \
+              && docker container inspect "${container_name}" >/dev/null 2>&1; then
+              docker rm -f "${container_name}" >/dev/null 2>&1 \
+                || rollback_failed=1
+            fi
+
+            if [[ "${env_replaced}" -eq 1 ]]; then
+              if [[ -f "${env_backup}" && ! -L "${env_backup}" ]] \
+                && [[ "$(stat -c '%u' "${env_backup}")" == "$(id -u)" ]] \
+                && [[ "$(stat -c '%a' "${env_backup}")" == "600" ]]; then
+                mv -f -- "${env_backup}" "${env_path}" \
+                  || rollback_failed=1
+              else
+                rollback_failed=1
+              fi
+            elif [[ -n "${env_backup}" ]]; then
+              rm -f -- "${env_backup}" >/dev/null 2>&1 || true
+            fi
+            if [[ -n "${env_next}" ]]; then
+              rm -f -- "${env_next}" >/dev/null 2>&1 || true
+            fi
+
+            if [[ "${previous_renamed}" -eq 1 ]]; then
+              if docker container inspect "${container_name}" >/dev/null 2>&1; then
+                rollback_failed=1
+              elif docker rename "${rollback_container}" "${container_name}"; then
+                docker start "${container_name}" >/dev/null \
+                  || rollback_failed=1
+              else
+                rollback_failed=1
+              fi
+            elif docker container inspect "${container_name}" >/dev/null 2>&1 \
+              && [[ "$(
+                docker container inspect --format '{{.State.Running}}' \
+                  "${container_name}"
+              )" != "true" ]]; then
+              docker start "${container_name}" >/dev/null \
+                || rollback_failed=1
+            fi
+
+            if [[ ! -f "${env_path}" || -L "${env_path}" ]] \
+              || [[ "$(stat -c '%u' "${env_path}" 2>/dev/null)" != "$(id -u)" ]] \
+              || [[ "$(stat -c '%a' "${env_path}" 2>/dev/null)" != "600" ]]; then
+              rollback_failed=1
+            fi
+            if ! verify_container \
+              "${container_name}" \
+              3100 \
+              "${previous_health_attestation}"; then
+              rollback_failed=1
+            fi
+
+            if [[ "${rollback_failed}" -ne 0 ]]; then
+              echo "ROLLBACK_FAILED: manual recovery is required."
+              exit 70
+            fi
+            echo "Runtime change failed; previous .env and container were restored."
+            exit "${exit_code}"
+          }
+          trap rollback ERR
+
+          env_backup="$(
+            mktemp "${application_root}/.env.land-area-sync.backup.XXXXXX"
+          )"
+          cp -p -- "${env_path}" "${env_backup}"
+          chmod 600 "${env_backup}"
+          env_next="$(
+            mktemp "${application_root}/.env.land-area-sync.next.XXXXXX"
+          )"
+          chmod 600 "${env_next}"
+
+          export DESIRED_LAND_AREA_SYNC_ENABLED="${desired_enabled}"
+          export DESIRED_LAND_AREA_SYNC_ALLOWED_TARGETS="${raw_allowed_targets}"
+          awk '
+            BEGIN {
+              enabled_seen = 0
+              allowlist_seen = 0
+            }
+            /^[[:space:]]*LAND_AREA_SYNC_ENABLED[[:space:]]*=/ {
+              if (++enabled_seen > 1) exit 42
+              print "LAND_AREA_SYNC_ENABLED=" \
+                ENVIRON["DESIRED_LAND_AREA_SYNC_ENABLED"]
+              next
+            }
+            /^[[:space:]]*LAND_AREA_SYNC_ALLOWED_TARGETS[[:space:]]*=/ {
+              if (++allowlist_seen > 1) exit 43
+              print "LAND_AREA_SYNC_ALLOWED_TARGETS=" \
+                ENVIRON["DESIRED_LAND_AREA_SYNC_ALLOWED_TARGETS"]
+              next
+            }
+            { print }
+            END {
+              if (enabled_seen == 0) {
+                print "LAND_AREA_SYNC_ENABLED=" \
+                  ENVIRON["DESIRED_LAND_AREA_SYNC_ENABLED"]
+              }
+              if (allowlist_seen == 0) {
+                print "LAND_AREA_SYNC_ALLOWED_TARGETS=" \
+                  ENVIRON["DESIRED_LAND_AREA_SYNC_ALLOWED_TARGETS"]
+              }
+            }
+          ' "${env_path}" > "${env_next}"
+
+          chmod 600 "${env_next}"
+          if [[ "$(stat -c '%u' "${env_next}")" != "$(id -u)" ]] \
+            || [[ "$(stat -c '%a' "${env_next}")" != "600" ]]; then
+            echo "Next runtime .env owner or mode is invalid."
+            false
+          fi
+          if [[ "$(
+            grep -Ec '^[[:space:]]*LAND_AREA_SYNC_ENABLED[[:space:]]*=' \
+              "${env_next}" || true
+          )" != "1" ]] \
+            || [[ "$(
+              grep -Ec '^[[:space:]]*LAND_AREA_SYNC_ALLOWED_TARGETS[[:space:]]*=' \
+                "${env_next}" || true
+            )" != "1" ]]; then
+            echo "Next runtime .env must contain one exact key for each gate."
+            false
+          fi
+          actual_enabled_line="$(
+            grep '^LAND_AREA_SYNC_ENABLED=' "${env_next}"
+          )"
+          actual_allowlist_line="$(
+            grep '^LAND_AREA_SYNC_ALLOWED_TARGETS=' "${env_next}"
+          )"
+          if [[ "${actual_enabled_line}" != "LAND_AREA_SYNC_ENABLED=${desired_enabled}" ]] \
+            || [[ "${actual_allowlist_line#*=}" != "${raw_allowed_targets}" ]]; then
+            echo "Next runtime .env did not preserve the approved gate values."
+            false
+          fi
+
+          mv -f -- "${env_next}" "${env_path}"
+          env_next=""
+          env_replaced=1
+          if [[ ! -f "${env_path}" || -L "${env_path}" ]] \
+            || [[ "$(stat -c '%u' "${env_path}")" != "$(id -u)" ]] \
+            || [[ "$(stat -c '%a' "${env_path}")" != "600" ]]; then
+            echo "Atomic runtime .env replacement failed validation."
+            false
+          fi
+
+          docker run -d \
+            --name "${candidate_container}" \
+            --restart no \
+            -p 127.0.0.1:13100:3100 \
+            --env-file "${env_path}" \
+            --memory=800m \
+            --memory-swap=1600m \
+            "${current_image_id}" >/dev/null
+          if ! verify_container \
+            "${candidate_container}" \
+            13100 \
+            "${expected_health_attestation}"; then
+            echo "Runtime candidate health attestation failed."
+            false
+          fi
+          docker rm -f "${candidate_container}" >/dev/null
+
+          docker stop "${container_name}" >/dev/null
+          docker rename "${container_name}" "${rollback_container}"
+          previous_renamed=1
+
+          new_current_attempted=1
+          docker run -d \
+            --name "${container_name}" \
+            --restart unless-stopped \
+            -p 3100:3100 \
+            --env-file "${env_path}" \
+            -v "${application_root}/logs:/app/logs" \
+            --memory=800m \
+            --memory-swap=1600m \
+            "${current_image_id}" >/dev/null
+          if ! verify_container \
+            "${container_name}" \
+            3100 \
+            "${expected_health_attestation}"; then
+            echo "Runtime container health attestation failed."
+            false
+          fi
+
+          trap - ERR
+          docker rm -f "${rollback_container}" >/dev/null 2>&1 || true
+          rm -f -- "${env_backup}" >/dev/null 2>&1 || true
+          env_backup=""
+          echo "Runtime action ${RUNTIME_ACTION} verified (count=${actual_count}, digest=${actual_digest:-empty})."
+          REMOTE_RUNTIME
+
+      - name: Remove staged runner input
+        if: always()
+        shell: bash
+        env:
+          ALLOWLIST_PATH: ${{ steps.runtime-input.outputs.path }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${ALLOWLIST_PATH}" && -f "${ALLOWLIST_PATH}" ]] \
+            && [[ ! -L "${ALLOWLIST_PATH}" ]]; then
+            rm -f -- "${ALLOWLIST_PATH}"
+          fi
