@@ -2122,3 +2122,71 @@ test('repository manifest는 미아7 최초 관찰 이름을 쓰고 expectedBylo
         )
     );
 });
+
+test('서울특별시 강북구 미아동 791-2315 전용 manifest는 기존 대표 표본과 exact PNU shape/digest를 고정한다', async () => {
+    const manifestName =
+        'mia-seven-791-2315-first-observation-20260725';
+    const manifestPath = path.join(
+        process.cwd(),
+        `phase0-manifests/${manifestName}.json`
+    );
+    const manifestRaw = await readFile(manifestPath, 'utf8');
+    const expectedManifest = {
+        version: LAND_AREA_PHASE0_MANIFEST_VERSION,
+        samples: [
+            {
+                alias: 'mia7-first-observation-a',
+                expectedBylot: 'ZERO',
+                pnu: '1130510100107912166',
+            },
+            {
+                alias: 'mia7-first-observation-b',
+                expectedBylot: 'POSITIVE',
+                pnu: '1130510100107450049',
+            },
+            {
+                alias: 'mia7-791-2315-first-observation',
+                expectedBylot: 'ZERO',
+                pnu: '1130510100107912315',
+            },
+        ],
+    } as const;
+
+    assert.deepEqual(JSON.parse(manifestRaw), expectedManifest);
+    assert.deepEqual(
+        parseLandAreaPhase0Manifest(JSON.parse(manifestRaw)),
+        expectedManifest
+    );
+    assert.equal(
+        createHash('sha256').update(manifestRaw).digest('hex'),
+        '8b66ae291d5b9b0d3b75ebd723ad513cd93efe8578ab3056bca3ccc18250c8fa'
+    );
+    assert.equal(
+        expectedManifest.samples.some(
+            (sample) => sample.expectedBylot === 'ZERO'
+        ),
+        true
+    );
+    assert.equal(
+        expectedManifest.samples.some(
+            (sample) => sample.expectedBylot === 'POSITIVE'
+        ),
+        true
+    );
+
+    const workflow = await readFile(
+        path.join(
+            process.cwd(),
+            '.github/workflows/phase0-land-area-capture.yml'
+        ),
+        'utf8'
+    );
+    assert.match(workflow, new RegExp(`^          - ${manifestName}$`, 'm'));
+    assert.match(
+        workflow,
+        new RegExp(
+            `${manifestName.replaceAll('-', '\\-')}\\)\\n` +
+                `              manifest_path="phase0-manifests/${manifestName}\\.json"`
+        )
+    );
+});
