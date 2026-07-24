@@ -45,6 +45,19 @@ export type ProviderIssueKind =
     | 'PAGINATION_MISMATCH'
     | 'ABORTED';
 
+/** raw body 없이 응답 계약 차이를 구분하는 고정 구조 코드. */
+export type ProviderSchemaErrorCode =
+    | 'RESPONSE_CONTAINER_MISSING'
+    | 'RESULT_CODE_MISSING'
+    | 'BODY_MISSING'
+    | 'ENDPOINT_RESPONSE_NON_OBJECT'
+    | 'ENDPOINT_CONTAINER_MISSING_EMPTY_OBJECT'
+    | 'ENDPOINT_CONTAINER_MISSING_RESPONSE'
+    | 'ENDPOINT_CONTAINER_MISSING_OTHER'
+    | 'ENDPOINT_CONTAINER_INVALID'
+    | 'TOTAL_COUNT_INVALID'
+    | 'INPUT_PNU_INVALID';
+
 /**
  * strict scan 실패 정보.
  *
@@ -59,6 +72,8 @@ export interface ProviderIssue {
     httpStatus?: number;
     /** provider 식별용 코드 (resultCode, INVALID_KEY 등). PII·raw body는 담지 않는다 */
     providerCode?: string;
+    /** SCHEMA_ERROR의 구조적 원인. provider body나 비밀값은 포함하지 않는다. */
+    schemaErrorCode?: ProviderSchemaErrorCode;
     /** 실패 시점까지 조회한 페이지 수 */
     pagesFetched?: number;
     /** 첫 페이지에서 확정한 totalCount */
@@ -90,7 +105,11 @@ export type HttpClient = (req: HttpRequest) => Promise<HttpResponse>;
 export type ParsedEnvelope<T> =
     | { kind: 'SUCCESS'; totalCount: number; rows: T[] }
     | { kind: 'PROVIDER_ERROR'; providerCode?: string; message: string }
-    | { kind: 'SCHEMA_ERROR'; message: string };
+    | {
+          kind: 'SCHEMA_ERROR';
+          message: string;
+          schemaErrorCode: ProviderSchemaErrorCode;
+      };
 
 export type EnvelopeParser<T> = (data: unknown) => ParsedEnvelope<T>;
 

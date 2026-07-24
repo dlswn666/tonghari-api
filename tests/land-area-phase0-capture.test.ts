@@ -104,7 +104,6 @@ function titleRows(pnu: string): BrTitleRow[] {
             {
                 pnu,
                 mgmBldrgstPk: ZERO_PK,
-                mgmUpBldrgstPk: ZERO_UP_PK,
                 bylotCnt: '0',
                 regstrGbCd: '1',
                 regstrGbCdNm: '일반건축물대장',
@@ -120,7 +119,6 @@ function titleRows(pnu: string): BrTitleRow[] {
         {
             pnu,
             mgmBldrgstPk: POSITIVE_PK,
-            mgmUpBldrgstPk: POSITIVE_UP_PK,
             bylotCnt: '1',
             regstrGbCd: '2',
             regstrGbCdNm: '집합건축물대장',
@@ -129,13 +127,6 @@ function titleRows(pnu: string): BrTitleRow[] {
             etcPurps: `공동주택(다세대주택) ${OWNER}`,
             ownerTelno: CONTACT,
             [UNKNOWN_KEY]: SECRET,
-        },
-        {
-            pnu,
-            mgmBldrgstPk: POSITIVE_PK,
-            bylotCnt: '1',
-            regstrGbCd: '2',
-            mainPurpsCd: SECRET,
         },
     ];
 }
@@ -179,7 +170,6 @@ function exposRows(pnu: string): BrExposRow[] {
         {
             pnu,
             mgmBldrgstPk: pnu === ZERO_PNU ? ZERO_PK : POSITIVE_PK,
-            mgmUpBldrgstPk: pnu === ZERO_PNU ? ZERO_UP_PK : POSITIVE_UP_PK,
             dongNm: UNIT_DONG,
             flrNoNm: UNIT_FLOOR,
             hoNm: UNIT_HO,
@@ -437,6 +427,304 @@ test('ZERO/POSITIVE: exact 관리 PK의 bylotCnt와 부속지번 수를 교차�
     );
 });
 
+test('실측형 집합건축물: title root 1 + basis/expos child 7 + ratio 7 + 미적용 관찰 1을 구분한다', async () => {
+    const childPks = Array.from(
+        { length: 7 },
+        (_, index) => `40040040040${index + 10}`
+    );
+    const liveShape = adapter({
+        async scanTitle(pnu) {
+            liveShape.calls.push({ endpoint: 'getBrTitleInfo', pnu });
+            if (pnu === ZERO_PNU) return complete(titleRows(pnu));
+            return complete([
+                {
+                    pnu,
+                    mgmBldrgstPk: POSITIVE_PK,
+                    bylotCnt: '1',
+                    regstrGbCd: '2',
+                    regstrGbCdNm: '집합',
+                    mainPurpsCd: '02000',
+                    mainPurpsCdNm: '공동주택',
+                    etcPurps: '다세대주택',
+                },
+            ]);
+        },
+        async scanBasis(pnu) {
+            liveShape.calls.push({ endpoint: 'getBrBasisOulnInfo', pnu });
+            if (pnu === ZERO_PNU) return complete(basisRows(pnu));
+            return complete([
+                {
+                    pnu,
+                    mgmBldrgstPk: POSITIVE_PK,
+                    bylotCnt: '1',
+                },
+                ...childPks.map((pk) => ({
+                    pnu,
+                    mgmBldrgstPk: pk,
+                    mgmUpBldrgstPk: POSITIVE_PK,
+                    bylotCnt: '1',
+                })),
+            ]);
+        },
+        async scanExpos(pnu) {
+            liveShape.calls.push({ endpoint: 'getBrExposInfo', pnu });
+            if (pnu === ZERO_PNU || pnu === ATTACHED_PNU) {
+                return complete([]);
+            }
+            return complete(
+                childPks.map((pk, index) => ({
+                    pnu,
+                    mgmBldrgstPk: pk,
+                    mgmUpBldrgstPk: POSITIVE_PK,
+                    dongNm: '1동',
+                    flrNoNm: `${index + 1}층`,
+                    hoNm: `${index + 1}01호`,
+                }))
+            );
+        },
+        async scanLdareg(pnu) {
+            liveShape.calls.push({ endpoint: 'ldaregList', pnu });
+            if (pnu === ZERO_PNU) return complete([]);
+            return complete([
+                ...childPks.map((_, index) => ({
+                    pnu,
+                    agbldgSn: 'LIVE-SHAPE',
+                    ldaQotaRate: `${index + 10}/364.6`,
+                    clsSeCode: '0',
+                    clsSeCodeNm: '현재',
+                    buldDongNm: '1동',
+                    buldFloorNm: `${index + 1}층`,
+                    buldHoNm: `${index + 1}01호`,
+                })),
+                {
+                    pnu,
+                    agbldgSn: 'LIVE-SHAPE',
+                    clsSeCode: '0',
+                    clsSeCodeNm: '현재',
+                    buldDongNm: '관리',
+                    buldFloorNm: '0층',
+                    buldHoNm: '0호',
+                },
+            ]);
+        },
+    });
+    const artifact = await captureLandAreaPhase0({
+        manifest: manifest(),
+        adapter: liveShape.implementation,
+        buildingHubAuth: HUB_AUTH,
+        vworldAuth: VWORLD_AUTH,
+    });
+
+    const positive = artifact.samples.find(
+        (sample) => sample.expectedBylot === 'POSITIVE'
+    )!;
+    assert.equal(artifact.gate.status, 'PASS');
+    assert.equal(positive.policyCandidate, 'TITLE_ONLY');
+    assert.equal(positive.checks.titleBasis.status, 'PASS');
+    assert.equal(positive.checks.bylotAttached.status, 'PASS');
+    assert.deepEqual(positive.failureCodes, []);
+    assert.ok(
+        positive.reviewCodes.includes(
+            'LDAREG_RATIO_MISSING_OBSERVED'
+        )
+    );
+    const basis = positive.endpoints.find(
+        (endpoint) => endpoint.endpoint === 'getBrBasisOulnInfo'
+    )!;
+    assert.equal(basis.inventory.kind, 'BASIS');
+    if (basis.inventory.kind === 'BASIS') {
+        assert.equal(
+            basis.inventory.records.filter(
+                (record) => record.upManagementPkHash !== undefined
+            ).length,
+            7
+        );
+    }
+});
+
+test('동/층/호가 완전하지 않은 EXPOS·LDAREG unit은 상호 일치처럼 보여도 fail-closed한다', async () => {
+    const partial = adapter({
+        async scanExpos(pnu) {
+            partial.calls.push({ endpoint: 'getBrExposInfo', pnu });
+            return complete(
+                exposRows(pnu).map((row) => ({
+                    ...row,
+                    dongNm: undefined,
+                    flrNoNm: undefined,
+                }))
+            );
+        },
+        async scanLdareg(pnu) {
+            partial.calls.push({ endpoint: 'ldaregList', pnu });
+            return complete(
+                ldaregRows(pnu).map((row) => ({
+                    ...row,
+                    buldNm: undefined,
+                    buldFloorNm: undefined,
+                }))
+            );
+        },
+    });
+    const approvedManifest = manifest();
+    const artifact = await captureLandAreaPhase0({
+        manifest: approvedManifest,
+        adapter: partial.implementation,
+        buildingHubAuth: HUB_AUTH,
+        vworldAuth: VWORLD_AUTH,
+    });
+    assert.equal(artifact.gate.status, 'FAIL');
+    assert.ok(
+        artifact.gate.failureCodes.includes(
+            'LDAREG_EXPOS_UNIT_CORRELATION_MISMATCH'
+        )
+    );
+    assert.equal(
+        validateLandAreaPhase0CaptureArtifact(
+            approvedManifest,
+            artifact
+        ),
+        artifact
+    );
+});
+
+test('unit component의 비문자열 값과 충돌 alias는 같은 모양이어도 fail-closed한다', async () => {
+    const malformed = adapter({
+        async scanExpos(pnu) {
+            malformed.calls.push({ endpoint: 'getBrExposInfo', pnu });
+            return complete(
+                exposRows(pnu).map((row) => ({
+                    ...row,
+                    dongNm: { malformed: true },
+                    flrNoNm: true,
+                    hoNm: ['101'],
+                }))
+            );
+        },
+        async scanLdareg(pnu) {
+            malformed.calls.push({ endpoint: 'ldaregList', pnu });
+            return complete(
+                ldaregRows(pnu).map((row) => ({
+                    ...row,
+                    buldNm: { malformed: true },
+                    buldFloorNm: true,
+                    buldHoNm: ['101'],
+                }))
+            );
+        },
+    });
+    const malformedArtifact = await captureLandAreaPhase0({
+        manifest: manifest(),
+        adapter: malformed.implementation,
+        buildingHubAuth: HUB_AUTH,
+        vworldAuth: VWORLD_AUTH,
+    });
+    assert.equal(malformedArtifact.gate.status, 'FAIL');
+    assert.ok(
+        malformedArtifact.gate.failureCodes.includes(
+            'LDAREG_EXPOS_UNIT_CORRELATION_MISMATCH'
+        )
+    );
+
+    const conflictingAliases = adapter({
+        async scanExpos(pnu) {
+            conflictingAliases.calls.push({
+                endpoint: 'getBrExposInfo',
+                pnu,
+            });
+            return complete(
+                exposRows(pnu).map((row) => ({
+                    ...row,
+                    buldDongNm: '다른동',
+                    buldFloorNm: '99층',
+                    buldHoNm: '999호',
+                }))
+            );
+        },
+        async scanLdareg(pnu) {
+            conflictingAliases.calls.push({
+                endpoint: 'ldaregList',
+                pnu,
+            });
+            return complete(
+                ldaregRows(pnu).map((row) => ({
+                    ...row,
+                    buldDongNm: '다른동',
+                    flrNoNm: '99층',
+                    hoNm: '999호',
+                }))
+            );
+        },
+    });
+    const aliasArtifact = await captureLandAreaPhase0({
+        manifest: manifest(),
+        adapter: conflictingAliases.implementation,
+        buildingHubAuth: HUB_AUTH,
+        vworldAuth: VWORLD_AUTH,
+    });
+    assert.equal(aliasArtifact.gate.status, 'FAIL');
+    assert.ok(
+        aliasArtifact.gate.failureCodes.includes(
+            'LDAREG_EXPOS_UNIT_CORRELATION_MISMATCH'
+        )
+    );
+});
+
+test('title root·EXPOS에 모순된 상위 관리 PK가 있으면 PK closure를 통과하지 못한다', async () => {
+    const contradictoryBasis = adapter({
+        async scanBasis(pnu) {
+            contradictoryBasis.calls.push({
+                endpoint: 'getBrBasisOulnInfo',
+                pnu,
+            });
+            return complete(
+                basisRows(pnu).map((row) => ({
+                    ...row,
+                    mgmUpBldrgstPk: '9999999999999',
+                }))
+            );
+        },
+    });
+    const basisArtifact = await captureLandAreaPhase0({
+        manifest: manifest(),
+        adapter: contradictoryBasis.implementation,
+        buildingHubAuth: HUB_AUTH,
+        vworldAuth: VWORLD_AUTH,
+    });
+    assert.equal(basisArtifact.gate.status, 'FAIL');
+    assert.ok(
+        basisArtifact.gate.failureCodes.includes(
+            'TITLE_BASIS_PK_CLOSURE_MISMATCH'
+        )
+    );
+
+    const contradictoryExpos = adapter({
+        async scanExpos(pnu) {
+            contradictoryExpos.calls.push({
+                endpoint: 'getBrExposInfo',
+                pnu,
+            });
+            return complete(
+                exposRows(pnu).map((row) => ({
+                    ...row,
+                    mgmUpBldrgstPk: '9999999999999',
+                }))
+            );
+        },
+    });
+    const exposArtifact = await captureLandAreaPhase0({
+        manifest: manifest(),
+        adapter: contradictoryExpos.implementation,
+        buildingHubAuth: HUB_AUTH,
+        vworldAuth: VWORLD_AUTH,
+    });
+    assert.equal(exposArtifact.gate.status, 'FAIL');
+    assert.ok(
+        exposArtifact.gate.failureCodes.includes(
+            'TITLE_BASIS_PK_CLOSURE_MISMATCH'
+        )
+    );
+});
+
 test('관리 PK numeric 응답은 digit string과 같은 canonical identity로 처리한다', async () => {
     const numeric = adapter({
         async scanTitle(pnu) {
@@ -477,7 +765,13 @@ test('관리 PK numeric 응답은 digit string과 같은 canonical identity로 �
                 exposRows(pnu).map((row) => ({
                     ...row,
                     mgmBldrgstPk: Number(row.mgmBldrgstPk),
-                    mgmUpBldrgstPk: Number(row.mgmUpBldrgstPk),
+                    ...(row.mgmUpBldrgstPk === undefined
+                        ? {}
+                        : {
+                              mgmUpBldrgstPk: Number(
+                                  row.mgmUpBldrgstPk
+                              ),
+                          }),
                 }))
             );
         },
@@ -635,7 +929,9 @@ test('title와 basis의 같은 관리 PK bylotCnt가 다르면 정책 후보를 
 
     assert.equal(artifact.gate.status, 'FAIL');
     assert.ok(
-        artifact.gate.failureCodes.includes('TITLE_BASIS_EXACT_PK_MISMATCH')
+        artifact.gate.failureCodes.includes(
+            'TITLE_BASIS_PK_CLOSURE_MISMATCH'
+        )
     );
     assert.ok(
         artifact.samples.every((sample) => sample.policyCandidate === null)
@@ -1245,6 +1541,66 @@ test('strict artifact validator는 extra key, hash/set/code/gate union 변조와
         candidate.gate.status = 'FAIL';
         candidate.gate.failureCodes = ['GATE_ONLY'];
     }, /sample failure union/);
+    rejected((candidate) => {
+        const sample = candidate.samples.find(
+            (entry: any) => entry.expectedBylot === 'POSITIVE'
+        );
+        const inventory = sample.endpoints.find(
+            (entry: any) => entry.endpoint === 'getBrExposInfo'
+        ).inventory;
+        delete inventory.records[0].unitIdentityHash;
+        inventory.records[0].unitIdentityShape = 'INCOMPLETE';
+        inventory.sanitizedDigest = sanitizedTestDigest(
+            inventory.records
+        );
+    }, /semantic failure|unit identity/);
+    rejected((candidate) => {
+        const sample = candidate.samples.find(
+            (entry: any) => entry.expectedBylot === 'POSITIVE'
+        );
+        const titleHash = sample.endpoints
+            .find((entry: any) => entry.endpoint === 'getBrTitleInfo')
+            .inventory.records[0].managementPkHash;
+        const inventory = sample.endpoints.find(
+            (entry: any) => entry.endpoint === 'getBrBasisOulnInfo'
+        ).inventory;
+        const root = inventory.records.find(
+            (record: any) => record.managementPkHash === titleHash
+        );
+        root.upManagementPkHash = '0'.repeat(64);
+        inventory.sanitizedDigest = sanitizedTestDigest(
+            inventory.records
+        );
+    }, /outside title PK closure/);
+    rejected((candidate) => {
+        const sample = candidate.samples.find(
+            (entry: any) => entry.expectedBylot === 'POSITIVE'
+        );
+        const inventory = sample.endpoints.find(
+            (entry: any) => entry.endpoint === 'ldaregList'
+        ).inventory;
+        inventory.records[0].quotaRatioInput.parseState = 'MISSING';
+        inventory.sanitizedDigest = sanitizedTestDigest(
+            inventory.records
+        );
+    }, /quotaRatioInput is inconsistent/);
+    rejected((candidate) => {
+        const sample = candidate.samples.find(
+            (entry: any) => entry.expectedBylot === 'POSITIVE'
+        );
+        const inventory = sample.endpoints.find(
+            (entry: any) => entry.endpoint === 'ldaregList'
+        ).inventory;
+        inventory.records[0].quotaRatioInput = {
+            presence: 'ABSENT',
+            jsonType: 'undefined',
+            parseState: 'VALID',
+            stringShape: 'NOT_APPLICABLE',
+        };
+        inventory.sanitizedDigest = sanitizedTestDigest(
+            inventory.records
+        );
+    }, /quotaRatioInput is inconsistent/);
 
     assert.throws(
         () =>
@@ -1253,6 +1609,53 @@ test('strict artifact validator는 extra key, hash/set/code/gate union 변조와
                 padding: 'x'.repeat(3 * 1024 * 1024),
             }),
         /artifact size/
+    );
+});
+
+test('SCHEMA_ERROR artifact는 고정 schemaErrorCode가 없으면 검증되지 않는다', async () => {
+    const schemaFailure = adapter({
+        async scanLdareg(pnu) {
+            schemaFailure.calls.push({ endpoint: 'ldaregList', pnu });
+            return {
+                state: 'FAILED',
+                issue: {
+                    kind: 'SCHEMA_ERROR',
+                    endpoint: 'ldaregList',
+                    message: '응답 구조가 계약과 다릅니다.',
+                    schemaErrorCode:
+                        'ENDPOINT_CONTAINER_MISSING_EMPTY_OBJECT',
+                    attempts: 1,
+                },
+            };
+        },
+    });
+    const approvedManifest = manifest();
+    const artifact = await captureLandAreaPhase0({
+        manifest: approvedManifest,
+        adapter: schemaFailure.implementation,
+        buildingHubAuth: HUB_AUTH,
+        vworldAuth: VWORLD_AUTH,
+    });
+    assert.equal(
+        validateLandAreaPhase0CaptureArtifact(
+            approvedManifest,
+            artifact
+        ),
+        artifact
+    );
+
+    const candidate = structuredClone(artifact) as any;
+    const endpoint = candidate.samples[0].endpoints.find(
+        (entry: any) => entry.endpoint === 'ldaregList'
+    );
+    delete endpoint.issue.schemaErrorCode;
+    assert.throws(
+        () =>
+            validateLandAreaPhase0CaptureArtifact(
+                approvedManifest,
+                candidate
+            ),
+        /SCHEMA_ERROR requires schemaErrorCode/
     );
 });
 
@@ -1379,7 +1782,7 @@ test('FORGED_ALL_ZERO_PASS_ACCEPTED: all-zero endpoint와 fake nested PASS 조�
                 approvedManifest,
                 forged
             ),
-        /every endpoint COMPLETE_ZERO/
+        /required semantic failure|every endpoint COMPLETE_ZERO/
     );
 });
 

@@ -240,6 +240,7 @@ function validateIssue(value: unknown, path: string): void {
         value,
         ['kind'],
         [
+            'schemaErrorCode',
             'httpStatus',
             'pagesFetched',
             'expectedTotalCount',
@@ -248,6 +249,27 @@ function validateIssue(value: unknown, path: string): void {
         ],
         path
     );
+    if (value.schemaErrorCode !== undefined) {
+        assertEnum(
+            value.schemaErrorCode,
+            [
+                'RESPONSE_CONTAINER_MISSING',
+                'RESULT_CODE_MISSING',
+                'BODY_MISSING',
+                'ENDPOINT_RESPONSE_NON_OBJECT',
+                'ENDPOINT_CONTAINER_MISSING_EMPTY_OBJECT',
+                'ENDPOINT_CONTAINER_MISSING_RESPONSE',
+                'ENDPOINT_CONTAINER_MISSING_OTHER',
+                'ENDPOINT_CONTAINER_INVALID',
+                'TOTAL_COUNT_INVALID',
+                'INPUT_PNU_INVALID',
+            ],
+            `${path}.schemaErrorCode`
+        );
+        if (value.kind !== 'SCHEMA_ERROR') {
+            reject(`${path}.schemaErrorCode requires SCHEMA_ERROR`);
+        }
+    }
     assertEnum(
         value.kind,
         [
@@ -261,6 +283,12 @@ function validateIssue(value: unknown, path: string): void {
         ],
         `${path}.kind`
     );
+    if (
+        value.kind === 'SCHEMA_ERROR' &&
+        value.schemaErrorCode === undefined
+    ) {
+        reject(`${path}.SCHEMA_ERROR requires schemaErrorCode`);
+    }
     for (const key of [
         'httpStatus',
         'pagesFetched',
@@ -394,8 +422,17 @@ function validateInventory(value: unknown, endpoint: string, path: string): void
         value.records.forEach((record, index) => {
             const recordPath = `${path}.records[${index}]`;
             assertRecord(record, recordPath);
-            assertExactKeys(record, ['bylot'], ['managementPkHash'], recordPath);
-            validateOptionalHashFields(record, ['managementPkHash'], recordPath);
+            assertExactKeys(
+                record,
+                ['bylot'],
+                ['managementPkHash', 'upManagementPkHash'],
+                recordPath
+            );
+            validateOptionalHashFields(
+                record,
+                ['managementPkHash', 'upManagementPkHash'],
+                recordPath
+            );
             validateBylot(record.bylot, `${recordPath}.bylot`);
         });
         validateBoundedRecordEnvelope(value, value.records, path);
@@ -507,7 +544,7 @@ function validateInventory(value: unknown, endpoint: string, path: string): void
         { required: string[]; optional: string[]; hash: string[]; decimal: string[] }
     > = {
         EXPOS: {
-            required: [],
+            required: ['unitIdentityShape'],
             optional: [
                 'managementPkHash',
                 'upManagementPkHash',
@@ -527,7 +564,11 @@ function validateInventory(value: unknown, endpoint: string, path: string): void
             decimal: ['landArea'],
         },
         LDAREG: {
-            required: [],
+            required: [
+                'unitIdentityShape',
+                'quotaRatioState',
+                'quotaRatioInput',
+            ],
             optional: [
                 'pnuHash',
                 'aggregateBuildingSerialHash',
@@ -576,6 +617,115 @@ function validateInventory(value: unknown, endpoint: string, path: string): void
             ) {
                 reject(`${recordPath}.quotaRatio is invalid`);
             }
+        }
+        if (value.kind === 'LDAREG') {
+            assertEnum(
+                record.unitIdentityShape,
+                ['DONG_FLOOR_HO', 'INCOMPLETE'],
+                `${recordPath}.unitIdentityShape`
+            );
+            assertEnum(
+                record.quotaRatioState,
+                ['VALID', 'MISSING', 'INVALID'],
+                `${recordPath}.quotaRatioState`
+            );
+            if (
+                (record.quotaRatioState === 'VALID') !==
+                (record.quotaRatio !== undefined)
+            ) {
+                reject(`${recordPath}.quotaRatioState conflicts with quotaRatio`);
+            }
+            assertRecord(record.quotaRatioInput, `${recordPath}.quotaRatioInput`);
+            assertExactKeys(
+                record.quotaRatioInput,
+                ['presence', 'jsonType', 'parseState', 'stringShape'],
+                [],
+                `${recordPath}.quotaRatioInput`
+            );
+            assertEnum(
+                record.quotaRatioInput.presence,
+                ['ABSENT', 'NULL', 'PRESENT'],
+                `${recordPath}.quotaRatioInput.presence`
+            );
+            assertEnum(
+                record.quotaRatioInput.jsonType,
+                [
+                    'undefined',
+                    'null',
+                    'string',
+                    'number',
+                    'boolean',
+                    'object',
+                    'array',
+                ],
+                `${recordPath}.quotaRatioInput.jsonType`
+            );
+            assertEnum(
+                record.quotaRatioInput.parseState,
+                ['VALID', 'MISSING', 'INVALID'],
+                `${recordPath}.quotaRatioInput.parseState`
+            );
+            assertEnum(
+                record.quotaRatioInput.stringShape,
+                [
+                    'NOT_APPLICABLE',
+                    'EMPTY',
+                    'NON_EMPTY',
+                    'NOT_STRING',
+                ],
+                `${recordPath}.quotaRatioInput.stringShape`
+            );
+            const presenceTypeMatches =
+                (record.quotaRatioInput.presence === 'ABSENT' &&
+                    record.quotaRatioInput.jsonType === 'undefined') ||
+                (record.quotaRatioInput.presence === 'NULL' &&
+                    record.quotaRatioInput.jsonType === 'null') ||
+                (record.quotaRatioInput.presence === 'PRESENT' &&
+                    record.quotaRatioInput.jsonType !== 'undefined' &&
+                    record.quotaRatioInput.jsonType !== 'null');
+            const stringShapeMatches =
+                ((record.quotaRatioInput.presence === 'ABSENT' ||
+                    record.quotaRatioInput.presence === 'NULL') &&
+                    record.quotaRatioInput.stringShape ===
+                        'NOT_APPLICABLE' &&
+                    record.quotaRatioInput.parseState === 'MISSING') ||
+                (record.quotaRatioInput.presence === 'PRESENT' &&
+                    record.quotaRatioInput.jsonType === 'string' &&
+                    record.quotaRatioInput.parseState === 'MISSING' &&
+                    record.quotaRatioInput.stringShape === 'EMPTY') ||
+                (record.quotaRatioInput.presence === 'PRESENT' &&
+                    record.quotaRatioInput.jsonType === 'string' &&
+                    record.quotaRatioInput.parseState !== 'MISSING' &&
+                    record.quotaRatioInput.stringShape === 'NON_EMPTY') ||
+                (record.quotaRatioInput.presence === 'PRESENT' &&
+                    record.quotaRatioInput.jsonType !== 'string' &&
+                    record.quotaRatioInput.stringShape === 'NOT_STRING' &&
+                    record.quotaRatioInput.parseState === 'INVALID');
+            if (
+                !presenceTypeMatches ||
+                !stringShapeMatches ||
+                record.quotaRatioInput.parseState !==
+                    record.quotaRatioState ||
+                (record.quotaRatioInput.parseState === 'MISSING' &&
+                    record.quotaRatioInput.jsonType !== 'undefined' &&
+                    record.quotaRatioInput.jsonType !== 'null' &&
+                    record.quotaRatioInput.jsonType !== 'string')
+            ) {
+                reject(`${recordPath}.quotaRatioInput is inconsistent`);
+            }
+        } else if (value.kind === 'EXPOS') {
+            assertEnum(
+                record.unitIdentityShape,
+                ['DONG_FLOOR_HO', 'INCOMPLETE'],
+                `${recordPath}.unitIdentityShape`
+            );
+        }
+        if (
+            (value.kind === 'EXPOS' || value.kind === 'LDAREG') &&
+            (record.unitIdentityShape === 'DONG_FLOOR_HO') !==
+                (record.unitIdentityHash !== undefined)
+        ) {
+            reject(`${recordPath}.unitIdentityShape conflicts with hash`);
         }
     });
     validateBoundedRecordEnvelope(value, value.records, path);
@@ -811,8 +961,60 @@ function validateChecks(value: unknown, path: string): void {
     );
 }
 
+function hasExactExpectedHousingClassification(
+    sample: JsonRecord,
+    titleRecords: JsonRecord[]
+): boolean {
+    if (titleRecords.length === 0) return false;
+    const sameExactPair = (
+        registryTypeCode: string,
+        mainPurposeCode: string,
+        mainPurposeLabel: string,
+        expectedSignal: string,
+        requiredSignal: boolean
+    ): boolean =>
+        titleRecords.every(
+            (record) =>
+                record.registryTypeCode === registryTypeCode &&
+                record.mainPurposeCode === mainPurposeCode &&
+                record.mainPurposeLabel === mainPurposeLabel &&
+                Array.isArray(record.otherPurposeSignals) &&
+                record.otherPurposeSignals.every(
+                    (signal) => signal === expectedSignal
+                ) &&
+                (!requiredSignal ||
+                    record.otherPurposeSignals.includes(expectedSignal))
+        );
+    if (sample.expectedBylot === 'ZERO') {
+        return sameExactPair(
+            '1',
+            '01000',
+            '단독주택',
+            'DETACHED_HOUSE',
+            false
+        );
+    }
+    return (
+        sameExactPair(
+            '2',
+            '02003',
+            '다세대주택',
+            'MULTIPLEX_HOUSE',
+            false
+        ) ||
+        sameExactPair(
+            '2',
+            '02000',
+            '공동주택',
+            'MULTIPLEX_HOUSE',
+            true
+        )
+    );
+}
+
 function requireSemanticFailureCodes(sample: JsonRecord, path: string): void {
     const required = new Set<string>();
+    const requiredReview = new Set<string>();
     const endpoints = sample.endpoints as JsonRecord[];
     for (const endpoint of endpoints) {
         if (endpoint.state === 'FAILED') required.add('SCAN_FAILED');
@@ -852,6 +1054,108 @@ function requireSemanticFailureCodes(sample: JsonRecord, path: string): void {
         required.add('LDAREG_SCOPE_REPLICA_INVALID');
     }
 
+    const endpointByName = (name: string): JsonRecord =>
+        endpoints.find((endpoint) => endpoint.endpoint === name)!;
+    const titleInventory = endpointByName('getBrTitleInfo')
+        .inventory as JsonRecord;
+    const titleInventoryRecords = titleInventory.records as JsonRecord[];
+    if (
+        !hasExactExpectedHousingClassification(
+            sample,
+            titleInventoryRecords
+        )
+    ) {
+        required.add('HOUSING_CLASSIFICATION_ALLOWLIST_MISMATCH');
+    }
+    const ldaregInventory = endpointByName('ldaregList')
+        .inventory as JsonRecord;
+    const ldaregRecords = ldaregInventory.records as JsonRecord[];
+    const scopeTotal =
+        scopeLadfrl.status === 'PASS' &&
+        typeof scopeLadfrl.totalArea === 'string'
+            ? Number(scopeLadfrl.totalArea)
+            : null;
+    if (
+        ldaregRecords.some(
+            (record) => record.quotaRatioState === 'INVALID'
+        )
+    ) {
+        required.add('LDAREG_RATIO_INVALID');
+    }
+    if (
+        ldaregRecords.some(
+            (record) => record.quotaRatioState === 'MISSING'
+        )
+    ) {
+        requiredReview.add('LDAREG_RATIO_MISSING_OBSERVED');
+    }
+    if (
+        scopeTotal !== null &&
+        ldaregRecords.some(
+            (record) =>
+                record.quotaRatioState === 'VALID' &&
+                !validQuotaRatio(record.quotaRatio, scopeTotal)
+        )
+    ) {
+        required.add('LDAREG_DENOMINATOR_MISMATCH');
+    }
+
+    if (sample.expectedBylot === 'POSITIVE') {
+        const exposInventory = endpointByName('getBrExposInfo')
+            .inventory as JsonRecord;
+        const exposRecords = exposInventory.records as JsonRecord[];
+        const exposHashes = exposRecords
+            .map((record) => record.unitIdentityHash)
+            .filter((hash): hash is string => typeof hash === 'string');
+        const validLdaregHashes = ldaregRecords
+            .filter((record) => record.quotaRatioState === 'VALID')
+            .map((record) => record.unitIdentityHash)
+            .filter((hash): hash is string => typeof hash === 'string');
+        const missingLdaregHashes = new Set(
+            ldaregRecords
+                .filter(
+                    (record) => record.quotaRatioState === 'MISSING'
+                )
+                .map((record) => record.unitIdentityHash)
+                .filter((hash): hash is string => typeof hash === 'string')
+        );
+        const exposSet = new Set(exposHashes);
+        const ldaregSet = new Set(validLdaregHashes);
+        if (
+            exposHashes.length !== exposRecords.length ||
+            validLdaregHashes.length !==
+                ldaregRecords.filter(
+                    (record) => record.quotaRatioState === 'VALID'
+                ).length ||
+            missingLdaregHashes.size !==
+                ldaregRecords.filter(
+                    (record) => record.quotaRatioState === 'MISSING'
+                ).length ||
+            exposRecords.some(
+                (record) =>
+                    record.unitIdentityShape !== 'DONG_FLOOR_HO'
+            ) ||
+            ldaregRecords
+                .filter(
+                    (record) =>
+                        record.quotaRatioState === 'VALID' ||
+                        record.quotaRatioState === 'MISSING'
+                )
+                .some(
+                    (record) =>
+                        record.unitIdentityShape !== 'DONG_FLOOR_HO'
+                ) ||
+            exposSet.size === 0 ||
+            exposSet.size !== exposHashes.length ||
+            ldaregSet.size !== validLdaregHashes.length ||
+            exposSet.size !== ldaregSet.size ||
+            [...exposSet].some((hash) => !ldaregSet.has(hash)) ||
+            [...missingLdaregHashes].some((hash) => exposSet.has(hash))
+        ) {
+            required.add('LDAREG_EXPOS_UNIT_CORRELATION_MISMATCH');
+        }
+    }
+
     const evidenceRecords = bylotEvidence.records as JsonRecord[];
     const titleBasisShouldPass =
         sample.policyCandidate !== null &&
@@ -866,7 +1170,7 @@ function requireSemanticFailureCodes(sample: JsonRecord, path: string): void {
         reject(`${path}.checks.titleBasis conflicts with sanitized evidence`);
     }
     if (!titleBasisShouldPass) {
-        required.add('TITLE_BASIS_EXACT_PK_MISMATCH');
+        required.add('TITLE_BASIS_PK_CLOSURE_MISMATCH');
         required.add('BYLOT_POLICY_UNRESOLVED');
     }
 
@@ -943,6 +1247,12 @@ function requireSemanticFailureCodes(sample: JsonRecord, path: string): void {
     for (const code of required) {
         if (!failureCodes.includes(code)) {
             reject(`${path}.failureCodes omits a required semantic failure`);
+        }
+    }
+    const reviewCodes = sample.reviewCodes as string[];
+    for (const code of requiredReview) {
+        if (!reviewCodes.includes(code)) {
+            reject(`${path}.reviewCodes omits a required semantic review`);
         }
     }
 }
@@ -1031,6 +1341,9 @@ function requirePassWitnesses(sample: JsonRecord, path: string): void {
     ) {
         reject(`${path} PASS title endpoint lacks codebook evidence`);
     }
+    if (!hasExactExpectedHousingClassification(sample, titleRecords)) {
+        reject(`${path} PASS lacks an exact approved housing classification`);
+    }
 
     const titleHashes = new Set<string>();
     for (const [index, record] of titleRecords.entries()) {
@@ -1056,6 +1369,13 @@ function requirePassWitnesses(sample: JsonRecord, path: string): void {
         titleHashes,
         `${path}.evidence.bylotByManagementPk`
     );
+    const expectedPositive = sample.expectedBylot === 'POSITIVE';
+    const evidenceByHash = new Map(
+        titleEvidence.map((record) => [
+            record.managementPkHash as string,
+            record,
+        ])
+    );
 
     const basisEndpoint = endpoint('getBrBasisOulnInfo');
     const basisInventory = basisEndpoint.inventory as JsonRecord;
@@ -1066,26 +1386,60 @@ function requirePassWitnesses(sample: JsonRecord, path: string): void {
     ) {
         reject(`${path} PASS basis endpoint lacks nonzero COMPLETE evidence`);
     }
-    const basisHashes = basisRecords.map((record, index) => {
+    const titleBoundBasisHashes = new Set<string>();
+    const basisChildHashes = new Set<string>();
+    const basisParentByChildHash = new Map<string, string>();
+    basisRecords.forEach((record, index) => {
         if (typeof record.managementPkHash !== 'string') {
             reject(
                 `${path}.basisInventory.records[${index}] lacks management hash`
             );
         }
-        return record.managementPkHash;
+        const managementHash = record.managementPkHash;
+        const isTitleRoot = titleHashes.has(managementHash);
+        const rootHash = isTitleRoot
+            ? managementHash
+            : record.upManagementPkHash;
+        if (
+            typeof rootHash !== 'string' ||
+            !titleHashes.has(rootHash) ||
+            (isTitleRoot &&
+                record.upManagementPkHash !== undefined &&
+                record.upManagementPkHash !== managementHash)
+        ) {
+            reject(
+                `${path}.basisInventory.records[${index}] is outside title PK closure`
+            );
+        }
+        if (managementHash === rootHash) {
+            titleBoundBasisHashes.add(managementHash);
+        } else {
+            const existingParent =
+                basisParentByChildHash.get(managementHash);
+            if (existingParent && existingParent !== rootHash) {
+                reject(
+                    `${path}.basisInventory.records[${index}] has conflicting roots`
+                );
+            }
+            basisParentByChildHash.set(managementHash, rootHash);
+            basisChildHashes.add(managementHash);
+        }
+        const rootEvidence = evidenceByHash.get(rootHash);
+        const bylot = record.bylot as JsonRecord;
+        if (
+            !rootEvidence ||
+            bylot.parseState !== 'VALID' ||
+            bylot.count !== rootEvidence.effectiveCount
+        ) {
+            reject(
+                `${path}.basisInventory.records[${index}] conflicts with root bylot evidence`
+            );
+        }
     });
     requireExactUniqueHashSet(
-        [...new Set(basisHashes)],
+        [...titleBoundBasisHashes],
         titleHashes,
         `${path}.basisInventory`
-    );
-
-    const expectedPositive = sample.expectedBylot === 'POSITIVE';
-    const evidenceByHash = new Map(
-        titleEvidence.map((record) => [
-            record.managementPkHash as string,
-            record,
-        ])
     );
     for (const [hash, record] of evidenceByHash) {
         const effectiveCount = record.effectiveCount;
@@ -1149,6 +1503,38 @@ function requirePassWitnesses(sample: JsonRecord, path: string): void {
         ) {
             reject(`${path} PASS basis inventory conflicts with bylot evidence`);
         }
+    }
+
+    const exposEndpoint = endpoint('getBrExposInfo');
+    const exposInventory = exposEndpoint.inventory as JsonRecord;
+    const exposRecords = exposInventory.records as JsonRecord[];
+    const exposManagementHashes = new Set<string>();
+    for (const [index, record] of exposRecords.entries()) {
+        if (typeof record.managementPkHash !== 'string') {
+            reject(
+                `${path}.exposInventory.records[${index}] lacks management hash`
+            );
+        }
+        const expectedRoot = titleHashes.has(record.managementPkHash)
+            ? record.managementPkHash
+            : basisParentByChildHash.get(record.managementPkHash);
+        if (
+            typeof expectedRoot !== 'string' ||
+            (record.upManagementPkHash !== undefined &&
+                record.upManagementPkHash !== expectedRoot)
+        ) {
+            reject(
+                `${path}.exposInventory.records[${index}] is outside basis PK closure`
+            );
+        }
+        exposManagementHashes.add(record.managementPkHash);
+    }
+    if (
+        [...basisChildHashes].some(
+            (hash) => !exposManagementHashes.has(hash)
+        )
+    ) {
+        reject(`${path}.exposInventory does not cover every basis child PK`);
     }
 
     const scope = evidence.scopeLadfrl as JsonRecord;
@@ -1237,14 +1623,73 @@ function requirePassWitnesses(sample: JsonRecord, path: string): void {
         const ldaregInventory = ldaregEndpoint.inventory as JsonRecord;
         const ldaregRecords = ldaregInventory.records as JsonRecord[];
         const expectedDenominator = Number(scope.totalArea);
+        const validLdaregRecords = ldaregRecords.filter(
+            (record) => record.quotaRatioState === 'VALID'
+        );
+        const missingLdaregRecords = ldaregRecords.filter(
+            (record) => record.quotaRatioState === 'MISSING'
+        );
+        const exposUnitHashes = exposRecords.map((record, index) => {
+            if (
+                record.unitIdentityShape !== 'DONG_FLOOR_HO' ||
+                typeof record.unitIdentityHash !== 'string'
+            ) {
+                reject(
+                    `${path}.exposInventory.records[${index}] lacks unit identity`
+                );
+            }
+            return record.unitIdentityHash;
+        });
+        const validLdaregUnitHashes = validLdaregRecords.map(
+            (record, index) => {
+                if (
+                    record.unitIdentityShape !== 'DONG_FLOOR_HO' ||
+                    typeof record.unitIdentityHash !== 'string' ||
+                    !validQuotaRatio(
+                        record.quotaRatio,
+                        expectedDenominator
+                    )
+                ) {
+                    reject(
+                        `${path}.ldaregInventory.validRecords[${index}] lacks a valid unit ratio witness`
+                    );
+                }
+                return record.unitIdentityHash;
+            }
+        );
+        const exposUnitSet = new Set(exposUnitHashes);
+        const validLdaregUnitSet = new Set(validLdaregUnitHashes);
+        if (
+            exposUnitSet.size !== exposUnitHashes.length ||
+            validLdaregUnitSet.size !== validLdaregUnitHashes.length ||
+            exposUnitSet.size === 0 ||
+            exposUnitSet.size !== validLdaregUnitSet.size ||
+            [...exposUnitSet].some(
+                (hash) => !validLdaregUnitSet.has(hash)
+            ) ||
+            missingLdaregRecords.some(
+                (record) =>
+                    record.unitIdentityShape !== 'DONG_FLOOR_HO' ||
+                    typeof record.unitIdentityHash !== 'string' ||
+                    exposUnitSet.has(record.unitIdentityHash)
+            )
+        ) {
+            reject(`${path} POSITIVE PASS lacks exact EXPOS/LDAREG unit correlation`);
+        }
+        if (
+            missingLdaregRecords.length > 0 &&
+            !(sample.reviewCodes as string[]).includes(
+                'LDAREG_RATIO_MISSING_OBSERVED'
+            )
+        ) {
+            reject(`${path} omits the missing LDAREG ratio review code`);
+        }
         if (
             ldaregEndpoint.state !== 'COMPLETE' ||
             (ldaregEndpoint.totalCount as number) <= 0 ||
-            ldaregRecords.length === 0 ||
-            !ldaregRecords.some(
-                (record) =>
-                    record.pnuHash === sample.pnuHash &&
-                    validQuotaRatio(record.quotaRatio, expectedDenominator)
+            validLdaregRecords.length === 0 ||
+            validLdaregRecords.some(
+                (record) => record.pnuHash !== sample.pnuHash
             )
         ) {
             reject(`${path} POSITIVE PASS lacks valid LDAREG quota evidence`);

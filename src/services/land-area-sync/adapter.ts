@@ -28,6 +28,7 @@ import type {
     ParsedEnvelope,
     ProviderIssue,
     ProviderIssueKind,
+    ProviderSchemaErrorCode,
     StrictScan,
 } from '../../types/land-area-sync.types';
 import { convertPlatGbCdToLandGbn } from '../gis-shared/pnu';
@@ -157,22 +158,38 @@ export function parseBuildingHubEnvelope<T = Record<string, unknown>>(
         | { header?: { resultCode?: unknown; resultMsg?: unknown }; body?: { totalCount?: unknown; items?: { item?: unknown } } }
         | undefined;
     if (!root || typeof root !== 'object') {
-        return { kind: 'SCHEMA_ERROR', message: 'response 컨테이너가 없습니다.' };
+        return {
+            kind: 'SCHEMA_ERROR',
+            message: 'response 컨테이너가 없습니다.',
+            schemaErrorCode: 'RESPONSE_CONTAINER_MISSING',
+        };
     }
     const resultCode = root.header?.resultCode;
     if (resultCode === undefined || resultCode === null) {
-        return { kind: 'SCHEMA_ERROR', message: 'resultCode가 없습니다.' };
+        return {
+            kind: 'SCHEMA_ERROR',
+            message: 'resultCode가 없습니다.',
+            schemaErrorCode: 'RESULT_CODE_MISSING',
+        };
     }
     if (String(resultCode) !== '00') {
         return { kind: 'PROVIDER_ERROR', providerCode: String(resultCode), message: 'provider 오류 응답입니다.' };
     }
     const body = root.body;
     if (!body || typeof body !== 'object') {
-        return { kind: 'SCHEMA_ERROR', message: 'body가 없습니다.' };
+        return {
+            kind: 'SCHEMA_ERROR',
+            message: 'body가 없습니다.',
+            schemaErrorCode: 'BODY_MISSING',
+        };
     }
     const totalCount = parseNonNegInt(body.totalCount);
     if (totalCount === null) {
-        return { kind: 'SCHEMA_ERROR', message: 'totalCount가 0 이상의 정수가 아닙니다.' };
+        return {
+            kind: 'SCHEMA_ERROR',
+            message: 'totalCount가 0 이상의 정수가 아닙니다.',
+            schemaErrorCode: 'TOTAL_COUNT_INVALID',
+        };
     }
     return { kind: 'SUCCESS', totalCount, rows: normalizeItems(body.items?.item) as T[] };
 }
@@ -187,11 +204,37 @@ export function parseVworldEnvelope<T = Record<string, unknown>>(
     itemKey: string,
     data: unknown
 ): ParsedEnvelope<T> {
-    const container = (data as Record<string, unknown> | null)?.[containerKey] as
+    if (data === null || typeof data !== 'object' || Array.isArray(data)) {
+        return {
+            kind: 'SCHEMA_ERROR',
+            message: 'endpoint 응답이 객체가 아닙니다.',
+            schemaErrorCode: 'ENDPOINT_RESPONSE_NON_OBJECT',
+        };
+    }
+    const root = data as Record<string, unknown>;
+    if (!Object.prototype.hasOwnProperty.call(root, containerKey)) {
+        const keys = Object.keys(root);
+        const schemaErrorCode: ProviderSchemaErrorCode =
+            keys.length === 0
+                ? 'ENDPOINT_CONTAINER_MISSING_EMPTY_OBJECT'
+                : keys.includes('response')
+                  ? 'ENDPOINT_CONTAINER_MISSING_RESPONSE'
+                  : 'ENDPOINT_CONTAINER_MISSING_OTHER';
+        return {
+            kind: 'SCHEMA_ERROR',
+            message: `${containerKey} 컨테이너가 없습니다.`,
+            schemaErrorCode,
+        };
+    }
+    const container = root[containerKey] as
         | { totalCount?: unknown; error?: unknown; message?: unknown; resultCode?: unknown; [k: string]: unknown }
         | undefined;
     if (!container || typeof container !== 'object') {
-        return { kind: 'SCHEMA_ERROR', message: `${containerKey} 컨테이너가 없습니다.` };
+        return {
+            kind: 'SCHEMA_ERROR',
+            message: `${containerKey} 컨테이너가 객체가 아닙니다.`,
+            schemaErrorCode: 'ENDPOINT_CONTAINER_INVALID',
+        };
     }
     // V-World 오류 envelope (INVALID_KEY, OVER_REQUEST_LIMIT 등)은 HTTP 200 이지만 즉시 실패다.
     if (container.error !== undefined && container.error !== null && container.error !== '') {
@@ -206,7 +249,11 @@ export function parseVworldEnvelope<T = Record<string, unknown>>(
     }
     const totalCount = parseNonNegInt(container.totalCount);
     if (totalCount === null) {
-        return { kind: 'SCHEMA_ERROR', message: 'totalCount가 0 이상의 정수가 아닙니다.' };
+        return {
+            kind: 'SCHEMA_ERROR',
+            message: 'totalCount가 0 이상의 정수가 아닙니다.',
+            schemaErrorCode: 'TOTAL_COUNT_INVALID',
+        };
     }
     return { kind: 'SUCCESS', totalCount, rows: normalizeItems(container[itemKey]) as T[] };
 }
@@ -546,7 +593,10 @@ export class LandAreaSyncAdapter {
             if (parsed.kind === 'SCHEMA_ERROR') {
                 return {
                     ok: false,
-                    issue: this.issue('SCHEMA_ERROR', endpoint, parsed.message, { attempts: attempt }),
+                    issue: this.issue('SCHEMA_ERROR', endpoint, parsed.message, {
+                        attempts: attempt,
+                        schemaErrorCode: parsed.schemaErrorCode,
+                    }),
                 };
             }
             return { ok: true, parsed, attempts: attempt };
@@ -606,8 +656,17 @@ export class LandAreaSyncAdapter {
         return { state: 'FAILED', issue: { ...this.abortIssue(endpoint), pagesFetched } };
     }
 
-    private schemaFailure<T>(endpoint: GisSharedEndpointName, message: string): StrictScan<T> {
-        return { state: 'FAILED', issue: this.issue('SCHEMA_ERROR', endpoint, message) };
+    private schemaFailure<T>(
+        endpoint: GisSharedEndpointName,
+        message: string,
+        schemaErrorCode: ProviderSchemaErrorCode = 'INPUT_PNU_INVALID'
+    ): StrictScan<T> {
+        return {
+            state: 'FAILED',
+            issue: this.issue('SCHEMA_ERROR', endpoint, message, {
+                schemaErrorCode,
+            }),
+        };
     }
 
     private paginationMismatch<T>(

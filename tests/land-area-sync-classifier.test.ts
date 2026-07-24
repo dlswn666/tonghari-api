@@ -6,9 +6,22 @@ import { HOUSING_PURPOSE_ALLOWLIST } from '../src/services/land-area-sync/housin
 const DETACHED = HOUSING_PURPOSE_ALLOWLIST.find((p) => p.category === 'DETACHED')!;
 const MULTIFAMILY = HOUSING_PURPOSE_ALLOWLIST.find((p) => p.category === 'MULTIFAMILY')!;
 const MULTIPLEX = HOUSING_PURPOSE_ALLOWLIST.find((p) => p.category === 'MULTIPLEX')!;
+const LIVE_MULTIPLEX = HOUSING_PURPOSE_ALLOWLIST.find(
+    (p) => p.requiredOtherPurposeSignal === 'MULTIPLEX_HOUSE'
+)!;
 
-function row(p: { regstrGbCd: string; mainPurpsCd: string; mainPurpsCdNm: string }) {
-    return { regstrGbCd: p.regstrGbCd, mainPurpsCd: p.mainPurpsCd, mainPurpsCdNm: p.mainPurpsCdNm };
+function row(p: {
+    regstrGbCd: string;
+    mainPurpsCd: string;
+    mainPurpsCdNm: string;
+    etcPurps?: string;
+}) {
+    return {
+        regstrGbCd: p.regstrGbCd,
+        mainPurpsCd: p.mainPurpsCd,
+        mainPurpsCdNm: p.mainPurpsCdNm,
+        etcPurps: p.etcPurps,
+    };
 }
 
 function input(over: Partial<HousingClassifierInput> = {}): HousingClassifierInput {
@@ -37,6 +50,63 @@ test('다세대주택 exact pair → LDAREG/MULTIPLEX', () => {
     assert.equal(r.kind, 'CLASSIFIED');
     assert.equal(r.kind === 'CLASSIFIED' && r.family, 'LDAREG');
     assert.equal(r.kind === 'CLASSIFIED' && r.regstrGbCd, '2');
+});
+
+test('집합/공동주택 + 기타용도 다세대주택 exact token → LDAREG/MULTIPLEX', () => {
+    const r = classifyHousingType(
+        input({
+            titleRows: [
+                row({
+                    ...LIVE_MULTIPLEX,
+                    etcPurps: '공동주택(다세대주택)',
+                }),
+            ],
+        })
+    );
+    assert.equal(r.kind, 'CLASSIFIED');
+    assert.equal(r.kind === 'CLASSIFIED' && r.family, 'LDAREG');
+    assert.equal(r.kind === 'CLASSIFIED' && r.category, 'MULTIPLEX');
+});
+
+test('기타용도 lookalike substring은 다세대주택 신호로 분류하지 않는다', () => {
+    const r = classifyHousingType(
+        input({
+            titleRows: [
+                row({
+                    ...LIVE_MULTIPLEX,
+                    etcPurps: '비다세대주택형',
+                }),
+            ],
+        })
+    );
+    assert.equal(r.kind, 'REVIEW_REQUIRED');
+    assert.equal(
+        r.kind === 'REVIEW_REQUIRED' && r.reason,
+        'REQUIRED_OTHER_PURPOSE_SIGNAL_MISSING'
+    );
+});
+
+test('다세대주택과 아파트·근린생활시설 co-signal은 혼재 분류로 차단한다', () => {
+    for (const etcPurps of [
+        '공동주택(다세대주택,아파트)',
+        '공동주택(다세대주택,근린생활시설)',
+    ]) {
+        const r = classifyHousingType(
+            input({
+                titleRows: [
+                    row({
+                        ...LIVE_MULTIPLEX,
+                        etcPurps,
+                    }),
+                ],
+            })
+        );
+        assert.equal(r.kind, 'REVIEW_REQUIRED');
+        assert.equal(
+            r.kind === 'REVIEW_REQUIRED' && r.reason,
+            'CONTRADICTORY_OTHER_PURPOSE_SIGNAL'
+        );
+    }
 });
 
 // ── 미지원·비주거 (§9.2) ─────────────────────────────────────────

@@ -1,3 +1,5 @@
+import type { HousingOtherPurposeSignal } from './housing-purpose-signals';
+
 /**
  * 주택 유형 분류용 공식 (대장구분·주용도) exact pair frozen fixture (DESIGN §9.1).
  *
@@ -29,6 +31,8 @@ export interface HousingPurposePair {
     mainPurpsCd: string;
     /** 주용도 명 (Phase 0 placeholder) */
     mainPurpsCdNm: string;
+    /** 기타용도에서 exact-token으로 추가 확인해야 하는 경우의 고정 신호. */
+    requiredOtherPurposeSignal?: HousingOtherPurposeSignal;
     category: HousingCategory;
     family: HousingStrategyFamily;
 }
@@ -45,6 +49,15 @@ export const HOUSING_PURPOSE_ALLOWLIST: readonly HousingPurposePair[] = [
     { regstrGbCd: '1', mainPurpsCd: '01002', mainPurpsCdNm: '다가구주택', category: 'MULTIFAMILY', family: 'LADFRL' },
     // 다세대주택 (집합건축물) — LDAREG
     { regstrGbCd: '2', mainPurpsCd: '02003', mainPurpsCdNm: '다세대주택', category: 'MULTIPLEX', family: 'LDAREG' },
+    // Phase 0 실측: 집합/공동주택 + 기타용도 exact token 다세대주택 — LDAREG
+    {
+        regstrGbCd: '2',
+        mainPurpsCd: '02000',
+        mainPurpsCdNm: '공동주택',
+        requiredOtherPurposeSignal: 'MULTIPLEX_HOUSE',
+        category: 'MULTIPLEX',
+        family: 'LDAREG',
+    },
 ] as const;
 
 /**

@@ -112,7 +112,14 @@ test('parseBuildingHubEnvelope: resultCode!=00 은 PROVIDER_ERROR(즉시 실패)
 });
 
 test('parseBuildingHubEnvelope: response 컨테이너 누락은 SCHEMA_ERROR', () => {
-    assert.equal(parseBuildingHubEnvelope({ foo: 1 }).kind, 'SCHEMA_ERROR');
+    const parsed = parseBuildingHubEnvelope({ foo: 1 });
+    assert.equal(parsed.kind, 'SCHEMA_ERROR');
+    if (parsed.kind === 'SCHEMA_ERROR') {
+        assert.equal(
+            parsed.schemaErrorCode,
+            'RESPONSE_CONTAINER_MISSING'
+        );
+    }
     assert.equal(parseBuildingHubEnvelope(null).kind, 'SCHEMA_ERROR');
 });
 
@@ -137,7 +144,18 @@ test('parseVworldEnvelope: 정상 → SUCCESS + rows', () => {
 });
 
 test('parseVworldEnvelope: 컨테이너 누락은 SCHEMA_ERROR', () => {
-    assert.equal(parseVworldEnvelope('ldaregVOList', 'ldaregVOList', { other: 1 }).kind, 'SCHEMA_ERROR');
+    const parsed = parseVworldEnvelope(
+        'ldaregVOList',
+        'ldaregVOList',
+        { other: 1 }
+    );
+    assert.equal(parsed.kind, 'SCHEMA_ERROR');
+    if (parsed.kind === 'SCHEMA_ERROR') {
+        assert.equal(
+            parsed.schemaErrorCode,
+            'ENDPOINT_CONTAINER_MISSING_OTHER'
+        );
+    }
 });
 
 // ── pagination 경계 ─────────────────────────────────────────────
@@ -371,7 +389,13 @@ test('no-retry: schema 오류 즉시 FAILED', async () => {
     const { httpClient, sleep, calls } = scripted(() => ok({ garbage: true }));
     const res = await makeAdapter(httpClient, sleep).scanTitle(PNU, HUB_AUTH);
     assert.equal(res.state, 'FAILED');
-    if (res.state === 'FAILED') assert.equal(res.issue.kind, 'SCHEMA_ERROR');
+    if (res.state === 'FAILED') {
+        assert.equal(res.issue.kind, 'SCHEMA_ERROR');
+        assert.equal(
+            res.issue.schemaErrorCode,
+            'RESPONSE_CONTAINER_MISSING'
+        );
+    }
     assert.equal(calls.length, 1);
 });
 
@@ -500,6 +524,9 @@ test('잘못된 PNU 형식은 호출 없이 FAILED(SCHEMA_ERROR)', async () => {
     const { httpClient, sleep, calls } = scripted(() => ok(hubBody(0, [])));
     const res = await makeAdapter(httpClient, sleep).scanTitle('123', HUB_AUTH);
     assert.equal(res.state, 'FAILED');
+    if (res.state === 'FAILED') {
+        assert.equal(res.issue.schemaErrorCode, 'INPUT_PNU_INVALID');
+    }
     assert.equal(calls.length, 0);
 });
 

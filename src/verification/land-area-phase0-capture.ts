@@ -12,6 +12,11 @@ import type {
     VworldAuth,
 } from '../services/land-area-sync/adapter';
 import { parseBylotCnt } from '../services/land-area-sync/bylot';
+import { classifyHousingType } from '../services/land-area-sync/classifier';
+import {
+    housingOtherPurposeSignals,
+    type HousingOtherPurposeSignal,
+} from '../services/land-area-sync/housing-purpose-signals';
 import {
     isOptionalRegistryManagementPkValid,
     normalizeRegistryManagementPk,
@@ -22,6 +27,10 @@ import {
     isDenominatorWithinTolerance,
     parseLdaQotaRate,
 } from '../services/land-area-sync/ratio';
+import {
+    normalizeUnitSegment,
+    normalizeUnitTuple,
+} from '../services/land-area-sync/normalizer';
 import {
     assembleAttachedPnus,
     buildBuildingHubPnu,
@@ -44,9 +53,9 @@ export const LAND_AREA_PHASE0_MANIFEST_VERSION =
 export const LAND_AREA_PHASE0_PLAN_VERSION =
     'land-area-phase0-capture-plan@1' as const;
 export const LAND_AREA_PHASE0_ARTIFACT_VERSION =
-    'land-area-phase0-capture-artifact@2' as const;
+    'land-area-phase0-capture-artifact@3' as const;
 export const LAND_AREA_PHASE0_ARTIFACT_SCHEMA_HASH =
-    'e26d6aafd54fd42f70e0d87a10c1b0d1009e69cd3f5d847dedaf762ef0c17fd4' as const;
+    '42defd540c3c3d81331aea1f6f74346e790e0c4093da50a23f300932fadbde7d' as const;
 export const LAND_AREA_PHASE0_MAX_ARTIFACT_BYTES = 3 * 1024 * 1024;
 export const LAND_AREA_PHASE0_OUTPUT_DIRECTORY = '.phase0-land-area';
 
@@ -65,15 +74,6 @@ const CLASSIFICATION_CODE_PATTERN = /^\d{1,3}$/;
 const SAFE_AREA_PATTERN = /^(?:0|[1-9]\d{0,7})(?:\.\d{1,6})?$/;
 const SAFE_LABEL_PATTERN =
     /^[\p{L}\p{N}][\p{L}\p{N}\p{Zs}·ㆍ()（）,\-/.]{0,79}$/u;
-const OTHER_PURPOSE_SIGNAL_RULES = [
-    ['DETACHED_HOUSE', '단독주택'],
-    ['MULTI_UNIT_HOUSE', '다가구주택'],
-    ['MULTIPLEX_HOUSE', '다세대주택'],
-    ['ROW_HOUSE', '연립주택'],
-    ['APARTMENT', '아파트'],
-    ['NEIGHBORHOOD_LIVING', '근린생활시설'],
-] as const;
-
 export const LAND_AREA_PHASE0_ENDPOINTS = [
     'getBrTitleInfo',
     'getBrBasisOulnInfo',
@@ -138,6 +138,7 @@ export interface LandAreaPhase0CapturePlan {
 type SanitizedIssue = Pick<
     ProviderIssue,
     | 'kind'
+    | 'schemaErrorCode'
     | 'httpStatus'
     | 'pagesFetched'
     | 'expectedTotalCount'
@@ -196,9 +197,7 @@ interface TitleInventory extends BoundedInventory {
         mainPurposeLabel?: string;
         otherPurposePresent: boolean;
         otherPurposeHash?: string;
-        otherPurposeSignals: Array<
-            (typeof OTHER_PURPOSE_SIGNAL_RULES)[number][0]
-        >;
+        otherPurposeSignals: HousingOtherPurposeSignal[];
     }>;
 }
 
@@ -206,6 +205,7 @@ interface BasisInventory extends BoundedInventory {
     kind: 'BASIS';
     records: Array<{
         managementPkHash?: string;
+        upManagementPkHash?: string;
         bylot: BylotFieldInventory;
     }>;
 }
@@ -234,6 +234,7 @@ interface ExposInventory extends BoundedInventory {
     records: Array<{
         managementPkHash?: string;
         upManagementPkHash?: string;
+        unitIdentityShape: 'DONG_FLOOR_HO' | 'INCOMPLETE';
         unitIdentityHash?: string;
         mainAttachedTypeCode?: string;
         floorTypeCode?: string;
@@ -256,7 +257,19 @@ interface LdaregInventory extends BoundedInventory {
     records: Array<{
         pnuHash?: string;
         aggregateBuildingSerialHash?: string;
+        unitIdentityShape: 'DONG_FLOOR_HO' | 'INCOMPLETE';
         unitIdentityHash?: string;
+        quotaRatioState: 'VALID' | 'MISSING' | 'INVALID';
+        quotaRatioInput: {
+            presence: 'ABSENT' | 'NULL' | 'PRESENT';
+            jsonType: JsonValueType;
+            parseState: 'VALID' | 'MISSING' | 'INVALID';
+            stringShape:
+                | 'NOT_APPLICABLE'
+                | 'EMPTY'
+                | 'NON_EMPTY'
+                | 'NOT_STRING';
+        };
         quotaRatio?: string;
         classificationCode?: string;
         classificationLabel?: string;
@@ -455,7 +468,11 @@ function identityHash(kind: string, value: unknown): string | undefined {
 
 function managementPkHash(kind: 'MGM_BLDRGST_PK' | 'MGM_UP_BLDRGST_PK', value: unknown): string | undefined {
     const normalized = normalizeRegistryManagementPk(value);
-    return normalized === null ? undefined : sha256(`${kind}\u0000${normalized}`);
+    const identityKind =
+        kind === 'MGM_UP_BLDRGST_PK' ? 'MGM_BLDRGST_PK' : kind;
+    return normalized === null
+        ? undefined
+        : sha256(`${identityKind}\u0000${normalized}`);
 }
 
 function pnuHash(value: string): string {
@@ -657,9 +674,7 @@ function sanitizedOtherPurpose(
 ): {
     otherPurposePresent: boolean;
     otherPurposeHash?: string;
-    otherPurposeSignals: Array<
-        (typeof OTHER_PURPOSE_SIGNAL_RULES)[number][0]
-    >;
+    otherPurposeSignals: HousingOtherPurposeSignal[];
 } {
     if (typeof value !== 'string' || !value.trim()) {
         return {
@@ -677,9 +692,7 @@ function sanitizedOtherPurpose(
     return {
         otherPurposePresent: true,
         otherPurposeHash: sha256(`ETC_PURPS\u0000${normalized}`),
-        otherPurposeSignals: OTHER_PURPOSE_SIGNAL_RULES.filter(([, token]) =>
-            normalized.includes(token)
-        ).map(([signal]) => signal),
+        otherPurposeSignals: housingOtherPurposeSignals(normalized),
     };
 }
 
@@ -735,32 +748,70 @@ function bylotFieldInventory(
     };
 }
 
-function unitIdentityHash(
+function unitIdentity(
     kind: 'EXPOS_UNIT' | 'LDAREG_UNIT',
     row: Record<string, unknown>
-): string | undefined {
-    const values =
-        kind === 'EXPOS_UNIT'
-            ? [
-                  row.dongNm ?? row.buldDongNm,
-                  row.flrNoNm ?? row.buldFloorNm,
-                  row.hoNm ?? row.buldHoNm,
-              ]
-            : [
-                  row.buldNm ?? row.dongNm,
-                  row.buldFloorNm ?? row.flrNoNm,
-                  row.buldHoNm ?? row.hoNm,
-              ];
-    const normalized = values.map((value) =>
-        typeof value === 'string' ? value.trim() : ''
-    );
-    return normalized.some(Boolean)
-        ? sha256(`${kind}\u0000${normalized.join('\u001f')}`)
-        : undefined;
+): {
+    shape: 'DONG_FLOOR_HO' | 'INCOMPLETE';
+    hash?: string;
+} {
+    const exactStringAlias = (aliases: readonly string[]): string | null => {
+        const present = aliases
+            .filter((alias) =>
+                Object.prototype.hasOwnProperty.call(row, alias)
+            )
+            .map((alias) => row[alias]);
+        if (
+            present.length === 0 ||
+            present.some((value) => typeof value !== 'string')
+        ) {
+            return null;
+        }
+        const normalized = [
+            ...new Set(
+                (present as string[])
+                    .map((value) => normalizeUnitSegment(value))
+                    .filter(Boolean)
+            ),
+        ];
+        return normalized.length === 1 ? normalized[0] : null;
+    };
+    const tuple = normalizeUnitTuple({
+        dong: exactStringAlias(
+            kind === 'EXPOS_UNIT'
+                ? ['dongNm', 'buldDongNm']
+                : ['buldDongNm', 'buldNm', 'dongNm']
+        ),
+        floor: exactStringAlias(
+            kind === 'EXPOS_UNIT'
+                ? ['flrNoNm', 'buldFloorNm']
+                : ['buldFloorNm', 'flrNoNm']
+        ),
+        ho: exactStringAlias(
+            kind === 'EXPOS_UNIT'
+                ? ['hoNm', 'buldHoNm']
+                : ['buldHoNm', 'hoNm']
+        ),
+    });
+    if (!tuple.dong || !tuple.floor || !tuple.ho) {
+        return { shape: 'INCOMPLETE' };
+    }
+    return {
+        shape: 'DONG_FLOOR_HO',
+        hash: sha256(
+            `UNIT_TUPLE_JSON\u0000${stableStringify([
+                tuple.dong,
+                tuple.floor,
+                tuple.ho,
+            ])}`
+        ),
+    };
 }
 
 function sanitizedIssue(issue: ProviderIssue): SanitizedIssue {
     const result: SanitizedIssue = { kind: issue.kind };
+    if (issue.schemaErrorCode !== undefined)
+        result.schemaErrorCode = issue.schemaErrorCode;
     if (issue.httpStatus !== undefined) result.httpStatus = issue.httpStatus;
     if (issue.pagesFetched !== undefined)
         result.pagesFetched = issue.pagesFetched;
@@ -879,8 +930,15 @@ function basisInventory(rows: BrBasisOulnRow[]): BasisInventory {
             'MGM_BLDRGST_PK',
             row.mgmBldrgstPk
         );
+        const upManagementPkHashValue = managementPkHash(
+            'MGM_UP_BLDRGST_PK',
+            row.mgmUpBldrgstPk
+        );
         return {
             ...(managementPkHashValue ? { managementPkHash: managementPkHashValue } : {}),
+            ...(upManagementPkHashValue
+                ? { upManagementPkHash: upManagementPkHashValue }
+                : {}),
             bylot: bylotFieldInventory(row as Record<string, unknown>),
         };
     });
@@ -965,7 +1023,7 @@ function exposInventory(
             'MGM_UP_BLDRGST_PK',
             row.mgmUpBldrgstPk
         );
-        const unitHash = unitIdentityHash('EXPOS_UNIT', row);
+        const unit = unitIdentity('EXPOS_UNIT', row);
         const mainAttachedTypeCode = safePublicCode(
             row.mainAtchGbCd,
             MAIN_ATTACHED_TYPE_CODE_PATTERN,
@@ -983,7 +1041,8 @@ function exposInventory(
         return {
             ...(managementPkHashValue ? { managementPkHash: managementPkHashValue } : {}),
             ...(upManagementPkHashValue ? { upManagementPkHash: upManagementPkHashValue } : {}),
-            ...(unitHash ? { unitIdentityHash: unitHash } : {}),
+            unitIdentityShape: unit.shape,
+            ...(unit.hash ? { unitIdentityHash: unit.hash } : {}),
             ...(mainAttachedTypeCode ? { mainAttachedTypeCode } : {}),
             ...(floorTypeCode ? { floorTypeCode } : {}),
             ...(sanitizedFloorShape
@@ -1028,8 +1087,37 @@ function ldaregInventory(
             'AGBLDG_SN',
             row.agbldgSn
         );
-        const unitHash = unitIdentityHash('LDAREG_UNIT', row);
+        const unit = unitIdentity('LDAREG_UNIT', row);
         const quotaRatio = safeRatio(row.ldaQotaRate, isSensitive);
+        const quotaRatioState: LdaregInventory['records'][number]['quotaRatioState'] =
+            row.ldaQotaRate === undefined ||
+            row.ldaQotaRate === null ||
+            (typeof row.ldaQotaRate === 'string' &&
+                row.ldaQotaRate.trim() === '')
+                ? 'MISSING'
+                : quotaRatio
+                  ? 'VALID'
+                  : 'INVALID';
+        const quotaRatioInput: LdaregInventory['records'][number]['quotaRatioInput'] =
+            {
+                presence:
+                    row.ldaQotaRate === undefined
+                        ? 'ABSENT'
+                        : row.ldaQotaRate === null
+                          ? 'NULL'
+                          : 'PRESENT',
+                jsonType: jsonValueType(row.ldaQotaRate),
+                parseState: quotaRatioState,
+                stringShape:
+                    row.ldaQotaRate === undefined ||
+                    row.ldaQotaRate === null
+                        ? 'NOT_APPLICABLE'
+                        : typeof row.ldaQotaRate !== 'string'
+                          ? 'NOT_STRING'
+                          : row.ldaQotaRate.trim() === ''
+                            ? 'EMPTY'
+                            : 'NON_EMPTY',
+            };
         const classificationCode = safePublicCode(
             row.clsSeCode,
             CLASSIFICATION_CODE_PATTERN,
@@ -1047,7 +1135,10 @@ function ldaregInventory(
             ...(aggregateBuildingSerialHash
                 ? { aggregateBuildingSerialHash }
                 : {}),
-            ...(unitHash ? { unitIdentityHash: unitHash } : {}),
+            unitIdentityShape: unit.shape,
+            ...(unit.hash ? { unitIdentityHash: unit.hash } : {}),
+            quotaRatioState,
+            quotaRatioInput,
             ...(quotaRatio ? { quotaRatio } : {}),
             ...(classificationCode ? { classificationCode } : {}),
             ...(classificationLabel ? { classificationLabel } : {}),
@@ -1291,10 +1382,58 @@ function buildSampleArtifact(
 
     const titlePks = [...titleCounts.counts.keys()].sort();
     const basisPks = [...basisCounts.counts.keys()].sort();
-    const exactPkSet =
-        titlePks.length > 0 &&
-        titlePks.length === basisPks.length &&
-        titlePks.every((pk, index) => pk === basisPks[index]);
+    const titlePkSet = new Set(titlePks);
+    const basisParentByPk = new Map<string, string>();
+    let basisClosureValid = true;
+    for (const row of basisRows) {
+        const pk = normalizeRegistryManagementPk(row.mgmBldrgstPk);
+        const upPk = normalizeRegistryManagementPk(row.mgmUpBldrgstPk);
+        if (!pk) {
+            basisClosureValid = false;
+            continue;
+        }
+        if (titlePkSet.has(pk)) {
+            if (upPk && upPk !== pk) {
+                basisClosureValid = false;
+            }
+            continue;
+        }
+        if (!upPk || !titlePkSet.has(upPk)) {
+            basisClosureValid = false;
+            continue;
+        }
+        const existing = basisParentByPk.get(pk);
+        if (existing && existing !== upPk) {
+            basisClosureValid = false;
+            continue;
+        }
+        basisParentByPk.set(pk, upPk);
+    }
+    const exposPks = new Set<string>();
+    let exposClosureValid = true;
+    for (const typedRow of exposRows) {
+        const row = typedRow as Record<string, unknown>;
+        const pk = normalizeRegistryManagementPk(row.mgmBldrgstPk);
+        const upPk = normalizeRegistryManagementPk(row.mgmUpBldrgstPk);
+        if (!pk) {
+            exposClosureValid = false;
+            continue;
+        }
+        exposPks.add(pk);
+        const expectedRoot = titlePkSet.has(pk)
+            ? pk
+            : basisParentByPk.get(pk);
+        if (!expectedRoot || (upPk && upPk !== expectedRoot)) {
+            exposClosureValid = false;
+        }
+    }
+    const basisChildPks = basisPks.filter((pk) => !titlePkSet.has(pk));
+    const basisExposClosureValid =
+        exposClosureValid &&
+        basisChildPks.every((pk) => exposPks.has(pk)) &&
+        [...exposPks].every(
+            (pk) => titlePkSet.has(pk) || basisParentByPk.has(pk)
+        );
     let policyCandidate: LandAreaPhase0SampleArtifact['policyCandidate'] =
         null;
     if (
@@ -1304,7 +1443,9 @@ function buildSampleArtifact(
         !basisCounts.hasInvalidPk &&
         titlePnuExact &&
         basisPnuExact &&
-        exactPkSet
+        titlePks.length > 0 &&
+        basisClosureValid &&
+        basisExposClosureValid
     ) {
         let hasFallback = false;
         let compatible = true;
@@ -1335,7 +1476,7 @@ function buildSampleArtifact(
         }
     }
 
-    const effectiveCount = (pk: string): number | null => {
+    const candidateCount = (pk: string): number | null => {
         if (!policyCandidate) return null;
         const title = titleCounts.counts.get(pk);
         const basis = basisCounts.counts.get(pk);
@@ -1349,6 +1490,26 @@ function buildSampleArtifact(
             return basis.count;
         }
         return null;
+    };
+    if (policyCandidate) {
+        for (const basisPk of basisPks) {
+            const rootPk = titlePkSet.has(basisPk)
+                ? basisPk
+                : basisParentByPk.get(basisPk);
+            const basis = basisCounts.counts.get(basisPk);
+            if (
+                !rootPk ||
+                basis?.state !== 'RESOLVED' ||
+                candidateCount(rootPk) !== basis.count
+            ) {
+                policyCandidate = null;
+                break;
+            }
+        }
+    }
+
+    const effectiveCount = (pk: string): number | null => {
+        return candidateCount(pk);
     };
     const relationFor = (
         pk: string
@@ -1379,7 +1540,6 @@ function buildSampleArtifact(
 
     const allPks = new Set<string>([
         ...titlePks,
-        ...basisPks,
         ...attachedCounts.keys(),
     ]);
     const bylotEvidenceRecords = [...allPks].map((pk) => {
@@ -1461,6 +1621,26 @@ function buildSampleArtifact(
         }
     }
     const reviewCodes = new Set<string>();
+    const classification = classifyHousingType({
+        titleRows: titleRows.map((row) => ({
+            regstrGbCd: row.regstrGbCd,
+            mainPurpsCd: row.mainPurpsCd,
+            mainPurpsCdNm: row.mainPurpsCdNm,
+            etcPurps:
+                typeof row.etcPurps === 'string'
+                    ? row.etcPurps
+                    : undefined,
+        })),
+        rootIdentities: titlePks,
+    });
+    const expectedFamily =
+        raw.sample.expectedBylot === 'POSITIVE' ? 'LDAREG' : 'LADFRL';
+    if (
+        classification.kind !== 'CLASSIFIED' ||
+        classification.family !== expectedFamily
+    ) {
+        failureCodes.add('HOUSING_CLASSIFICATION_ALLOWLIST_MISMATCH');
+    }
     if (titleCounts.hasInvalidPk || titlePkInvalid)
         failureCodes.add('TITLE_PK_INVALID');
     if (!titlePnuExact) failureCodes.add('TITLE_PNU_EXACT_MISMATCH');
@@ -1484,7 +1664,7 @@ function buildSampleArtifact(
         failureCodes.add('BASIS_BYLOT_INVALID_OR_CONFLICT');
     }
     if (!titleBasisPassed) {
-        failureCodes.add('TITLE_BASIS_EXACT_PK_MISMATCH');
+        failureCodes.add('TITLE_BASIS_PK_CLOSURE_MISMATCH');
         failureCodes.add('BYLOT_POLICY_UNRESOLVED');
     }
     if (policyCandidate === 'TITLE_WITH_BASIS_FALLBACK') {
@@ -1621,20 +1801,100 @@ function buildSampleArtifact(
         failureCodes.add('LDAREG_SCOPE_REPLICA_INVALID');
     }
     const scopeLdaregRows = scopeLdareg.flatMap(({ scan }) => rowsOf(scan));
-    if (scopeLdaregRows.length > 0) {
-        const ldaregDenominatorsValid = scopeLdaregRows.every((row) => {
-            const ratio = safeParsedRatio(row.ldaQotaRate, isSensitive);
-            return (
-                ratio !== null &&
+    const validScopeLdaregRatios = scopeLdaregRows
+        .map((row) => ({
+            row,
+            ratio: safeParsedRatio(row.ldaQotaRate, isSensitive),
+        }))
+        .filter(
+            (
+                entry
+            ): entry is {
+                row: LdaregRow;
+                ratio: {
+                    normalized: string;
+                    numerator: number;
+                    denominator: number;
+                };
+            } => entry.ratio !== null
+        );
+    const invalidScopeLdaregRatios = scopeLdaregRows.filter(
+        (row) =>
+            row.ldaQotaRate !== undefined &&
+            row.ldaQotaRate !== null &&
+            !(
+                typeof row.ldaQotaRate === 'string' &&
+                row.ldaQotaRate.trim() === ''
+            ) &&
+            safeParsedRatio(row.ldaQotaRate, isSensitive) === null
+    );
+    const missingScopeLdaregRatios = scopeLdaregRows.filter(
+        (row) =>
+            row.ldaQotaRate === undefined ||
+            row.ldaQotaRate === null ||
+            (typeof row.ldaQotaRate === 'string' &&
+                row.ldaQotaRate.trim() === '')
+    );
+    if (invalidScopeLdaregRatios.length > 0) {
+        failureCodes.add('LDAREG_RATIO_INVALID');
+    }
+    if (missingScopeLdaregRatios.length > 0) {
+        reviewCodes.add('LDAREG_RATIO_MISSING_OBSERVED');
+    }
+    if (validScopeLdaregRatios.length > 0) {
+        const validDenominatorsMatch = validScopeLdaregRatios.every(
+            ({ ratio }) =>
                 scopeLadfrl?.ok === true &&
                 isDenominatorWithinTolerance(
                     ratio.denominator,
                     scopeLadfrl.totalAreaNumber
                 )
-            );
-        });
-        if (!ldaregDenominatorsValid) {
+        );
+        if (!validDenominatorsMatch) {
             failureCodes.add('LDAREG_DENOMINATOR_MISMATCH');
+        }
+    }
+
+    if (raw.sample.expectedBylot === 'POSITIVE') {
+        const validLdaregRecords = ldaregResult.records.filter(
+            (record) => record.quotaRatioState === 'VALID'
+        );
+        const missingLdaregRecords = ldaregResult.records.filter(
+            (record) => record.quotaRatioState === 'MISSING'
+        );
+        const exposUnitHashes = exposResult.records
+            .map((record) => record.unitIdentityHash)
+            .filter((hash): hash is string => hash !== undefined);
+        const validLdaregUnitHashes = validLdaregRecords
+            .map((record) => record.unitIdentityHash)
+            .filter((hash): hash is string => hash !== undefined);
+        const missingLdaregUnitHashes = new Set(
+            missingLdaregRecords
+                .map((record) => record.unitIdentityHash)
+                .filter((hash): hash is string => hash !== undefined)
+        );
+        const exposSet = new Set(exposUnitHashes);
+        const validLdaregSet = new Set(validLdaregUnitHashes);
+        const exactUnitCorrelation =
+            exposUnitHashes.length === exposResult.records.length &&
+            validLdaregUnitHashes.length === validLdaregRecords.length &&
+            missingLdaregUnitHashes.size === missingLdaregRecords.length &&
+            exposResult.records.every(
+                (record) => record.unitIdentityShape === 'DONG_FLOOR_HO'
+            ) &&
+            [...validLdaregRecords, ...missingLdaregRecords].every(
+                (record) => record.unitIdentityShape === 'DONG_FLOOR_HO'
+            ) &&
+            exposUnitHashes.length === exposSet.size &&
+            validLdaregUnitHashes.length === validLdaregSet.size &&
+            exposSet.size > 0 &&
+            exposSet.size === validLdaregSet.size &&
+            [...exposSet].every((hash) => validLdaregSet.has(hash)) &&
+            [...missingLdaregUnitHashes].every(
+                (hash) => !exposSet.has(hash)
+            );
+        if (!exactUnitCorrelation) {
+            failureCodes.add('LDAREG_EXPOS_UNIT_CORRELATION_MISMATCH');
         }
     }
 

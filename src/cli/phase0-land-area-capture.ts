@@ -22,6 +22,7 @@ import {
     resolveLandAreaPhase0OutputPath,
     type LandAreaPhase0CaptureAdapter,
 } from '../verification/land-area-phase0-capture';
+import { validateLandAreaPhase0CaptureArtifact } from '../verification/land-area-phase0-artifact-validator';
 
 const MAX_MANIFEST_BYTES = 64 * 1024;
 const STDOUT_LIMIT = 256;
@@ -243,6 +244,7 @@ export async function runLandAreaPhase0CaptureCli(
             buildingHubAuth,
             vworldAuth,
         });
+        validateLandAreaPhase0CaptureArtifact(manifest, artifact);
         await writeLandAreaPhase0Artifact(cwd, outputPath, artifact);
 
         if (artifact.gate.status === 'PASS') {
