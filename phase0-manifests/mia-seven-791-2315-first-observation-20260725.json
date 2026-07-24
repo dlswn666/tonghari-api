@@ -1,0 +1,20 @@
+{
+  "version": "land-area-phase0-capture-input@1",
+  "samples": [
+    {
+      "alias": "mia7-first-observation-a",
+      "expectedBylot": "ZERO",
+      "pnu": "1130510100107912166"
+    },
+    {
+      "alias": "mia7-first-observation-b",
+      "expectedBylot": "POSITIVE",
+      "pnu": "1130510100107450049"
+    },
+    {
+      "alias": "mia7-791-2315-first-observation",
+      "expectedBylot": "ZERO",
+      "pnu": "1130510100107912315"
+    }
+  ]
+}
