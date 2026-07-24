@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import {
     access,
     chmod,
@@ -21,6 +22,7 @@ import type {
     StrictScan,
 } from '../src/types/land-area-sync.types';
 import {
+    LAND_AREA_PHASE0_ARTIFACT_SCHEMA_HASH,
     LAND_AREA_PHASE0_MANIFEST_VERSION,
     buildLandAreaPhase0CapturePlan,
     captureLandAreaPhase0,
@@ -29,10 +31,15 @@ import {
     type LandAreaPhase0CaptureAdapter,
     type LandAreaPhase0CaptureManifest,
 } from '../src/verification/land-area-phase0-capture';
+import { validateLandAreaPhase0CaptureArtifact } from '../src/verification/land-area-phase0-artifact-validator';
 import {
     runLandAreaPhase0CaptureCli,
     writeLandAreaPhase0Artifact,
 } from '../src/cli/phase0-land-area-capture';
+import {
+    LAND_AREA_PHASE0_VALIDATION_SENTINEL,
+    runLandAreaPhase0ValidationCli,
+} from '../src/cli/phase0-land-area-validate';
 
 const ZERO_PNU = '1168010100107000000';
 const POSITIVE_PNU = '1168010100107360024';
@@ -62,6 +69,24 @@ function manifest(samples?: LandAreaPhase0CaptureManifest['samples']): LandAreaP
                 { alias: 'positive-sample', expectedBylot: 'POSITIVE', pnu: POSITIVE_PNU },
             ],
     };
+}
+
+function sanitizedTestDigest(value: unknown): string {
+    const canonicalize = (candidate: unknown): unknown => {
+        if (Array.isArray(candidate)) return candidate.map(canonicalize);
+        if (candidate !== null && typeof candidate === 'object') {
+            return Object.fromEntries(
+                Object.entries(candidate as Record<string, unknown>)
+                    .filter(([, nested]) => nested !== undefined)
+                    .sort(([left], [right]) => left.localeCompare(right))
+                    .map(([key, nested]) => [key, canonicalize(nested)])
+            );
+        }
+        return candidate;
+    };
+    return createHash('sha256')
+        .update(JSON.stringify(canonicalize(value)), 'utf8')
+        .digest('hex');
 }
 
 function complete<T>(rows: T[]): StrictScan<T> {
@@ -1116,4 +1141,498 @@ test('production image는 compiled CLI와 node 사용자 전용 0700 artifact �
     assert.match(dockerfile, /chmod 700 \.phase0-land-area/);
     assert.match(dockerfile, /USER nodejs/);
     assert.match(dockerignore, /^\.phase0-land-area$/m);
+});
+
+test('strict artifact validator는 exact manifest/sample/endpoint/schema 계약의 PASS와 FAIL을 모두 보존한다', async () => {
+    const { implementation } = adapter();
+    const passManifest = manifest();
+    const passArtifact = await captureLandAreaPhase0({
+        manifest: passManifest,
+        adapter: implementation,
+        buildingHubAuth: HUB_AUTH,
+        vworldAuth: VWORLD_AUTH,
+    });
+    assert.equal(
+        passArtifact.schemaHash,
+        LAND_AREA_PHASE0_ARTIFACT_SCHEMA_HASH
+    );
+    assert.equal(
+        validateLandAreaPhase0CaptureArtifact(passManifest, passArtifact),
+        passArtifact
+    );
+
+    // 최초 관찰의 expectedBylot은 아직 입증값이 아니다. 관찰 결과가 가설과
+    // 다르면 strict-valid FAIL artifact로 보존되어야 한다.
+    const firstObservationManifest = manifest([
+        {
+            alias: 'first-observation-a',
+            expectedBylot: 'POSITIVE',
+            pnu: ZERO_PNU,
+        },
+        {
+            alias: 'first-observation-b',
+            expectedBylot: 'ZERO',
+            pnu: POSITIVE_PNU,
+        },
+    ]);
+    const failing = adapter();
+    const failArtifact = await captureLandAreaPhase0({
+        manifest: firstObservationManifest,
+        adapter: failing.implementation,
+        buildingHubAuth: HUB_AUTH,
+        vworldAuth: VWORLD_AUTH,
+    });
+    assert.equal(failArtifact.gate.status, 'FAIL');
+    assert.ok(failArtifact.gate.failureCodes.length > 0);
+    assert.deepEqual(
+        failArtifact.gate.failureCodes,
+        [...new Set(failArtifact.samples.flatMap((sample) => sample.failureCodes))].sort()
+    );
+    assert.equal(
+        validateLandAreaPhase0CaptureArtifact(
+            firstObservationManifest,
+            failArtifact
+        ),
+        failArtifact
+    );
+});
+
+test('strict artifact validator는 extra key, hash/set/code/gate union 변조와 3MiB 초과를 fail-closed한다', async () => {
+    const { implementation } = adapter();
+    const approvedManifest = manifest();
+    const artifact = await captureLandAreaPhase0({
+        manifest: approvedManifest,
+        adapter: implementation,
+        buildingHubAuth: HUB_AUTH,
+        vworldAuth: VWORLD_AUTH,
+    });
+    const rejected = (mutate: (candidate: any) => void, pattern: RegExp) => {
+        const candidate = structuredClone(artifact) as any;
+        mutate(candidate);
+        assert.throws(
+            () =>
+                validateLandAreaPhase0CaptureArtifact(
+                    approvedManifest,
+                    candidate
+                ),
+            pattern
+        );
+    };
+
+    rejected((candidate) => {
+        candidate.extra = true;
+    }, /unknown key/);
+    rejected((candidate) => {
+        candidate.samples[0].checks.titleBasis.extra = true;
+    }, /unknown key/);
+    rejected((candidate) => {
+        candidate.schemaHash = '0'.repeat(64);
+    }, /schema hash/);
+    rejected((candidate) => {
+        candidate.samples[0].pnuHash = '0'.repeat(64);
+    }, /approved manifest/);
+    rejected((candidate) => {
+        candidate.samples[0].endpoints[1] =
+            candidate.samples[0].endpoints[0];
+    }, /exact approved endpoint set/);
+    rejected((candidate) => {
+        candidate.samples[0].failureCodes = ['Z_CODE', 'A_CODE'];
+    }, /sorted and unique/);
+    rejected((candidate) => {
+        candidate.gate.status = 'FAIL';
+    }, /PASS is allowed iff/);
+    rejected((candidate) => {
+        candidate.gate.status = 'FAIL';
+        candidate.gate.failureCodes = ['GATE_ONLY'];
+    }, /sample failure union/);
+
+    assert.throws(
+        () =>
+            validateLandAreaPhase0CaptureArtifact(approvedManifest, {
+                ...artifact,
+                padding: 'x'.repeat(3 * 1024 * 1024),
+            }),
+        /artifact size/
+    );
+});
+
+test('reviewer all-zero fixture는 nested FAIL을 숨긴 PASS/failureCodes=[]로 승인될 수 없다', async () => {
+    const approvedManifest = manifest();
+    const captured = adapter();
+    const artifact = await captureLandAreaPhase0({
+        manifest: approvedManifest,
+        adapter: captured.implementation,
+        buildingHubAuth: HUB_AUTH,
+        vworldAuth: VWORLD_AUTH,
+    });
+    const zeroAttachedInventory = structuredClone(
+        artifact.samples
+            .find((sample) => sample.expectedBylot === 'ZERO')!
+            .endpoints.find(
+                (endpoint) => endpoint.inventory.kind === 'ATTACHED'
+            )!.inventory
+    );
+    const allZero = structuredClone(artifact) as any;
+    for (const sample of allZero.samples) {
+        for (const endpoint of sample.endpoints) {
+            endpoint.state = 'COMPLETE_ZERO';
+            endpoint.totalCount = 0;
+            endpoint.pagesFetched = 1;
+            delete endpoint.issue;
+            if (endpoint.inventory.kind === 'ATTACHED') {
+                endpoint.inventory = structuredClone(zeroAttachedInventory);
+            } else {
+                endpoint.inventory.records = [];
+                endpoint.inventory.totalRecords = 0;
+                endpoint.inventory.truncated = false;
+                endpoint.inventory.sanitizedDigest =
+                    sanitizedTestDigest([]);
+            }
+        }
+        sample.evidence.bylotByManagementPk = {
+            records: [],
+            totalRecords: 0,
+            truncated: false,
+            sanitizedDigest: sanitizedTestDigest([]),
+        };
+        sample.evidence.scopeLadfrl = {
+            status: 'FAIL',
+            records: [],
+            totalArea: null,
+        };
+        sample.evidence.ldaregReplication.status = 'FAIL';
+        sample.evidence.ldaregReplication.rowCount = null;
+        sample.evidence.ldaregReplication.rowMultisetDigest = null;
+        sample.policyCandidate = null;
+        sample.checks.titleBasis.status = 'FAIL';
+        sample.checks.bylotAttached = {
+            status: 'FAIL',
+            matchedManagementPkHashes: {
+                records: [],
+                totalRecords: 0,
+                truncated: false,
+                sanitizedDigest: sanitizedTestDigest([]),
+            },
+        };
+        sample.failureCodes = [];
+        sample.reviewCodes = [];
+    }
+    allZero.gate = {
+        status: 'PASS',
+        failureCodes: [],
+        reviewCodes: [],
+    };
+
+    assert.throws(
+        () =>
+            validateLandAreaPhase0CaptureArtifact(
+                approvedManifest,
+                allZero
+            ),
+        /required semantic failure/
+    );
+});
+
+test('FORGED_ALL_ZERO_PASS_ACCEPTED: all-zero endpoint와 fake nested PASS 조합을 fail-closed한다', async () => {
+    const approvedManifest = manifest();
+    const captured = adapter();
+    const artifact = await captureLandAreaPhase0({
+        manifest: approvedManifest,
+        adapter: captured.implementation,
+        buildingHubAuth: HUB_AUTH,
+        vworldAuth: VWORLD_AUTH,
+    });
+    const zeroAttachedInventory = structuredClone(
+        artifact.samples
+            .find((sample) => sample.expectedBylot === 'ZERO')!
+            .endpoints.find(
+                (endpoint) => endpoint.inventory.kind === 'ATTACHED'
+            )!.inventory
+    );
+    const forged = structuredClone(artifact) as any;
+    for (const sample of forged.samples) {
+        for (const endpoint of sample.endpoints) {
+            endpoint.state = 'COMPLETE_ZERO';
+            endpoint.totalCount = 0;
+            endpoint.pagesFetched = 1;
+            delete endpoint.issue;
+            if (endpoint.inventory.kind === 'ATTACHED') {
+                endpoint.inventory = structuredClone(zeroAttachedInventory);
+            } else {
+                endpoint.inventory.records = [];
+                endpoint.inventory.totalRecords = 0;
+                endpoint.inventory.truncated = false;
+                endpoint.inventory.sanitizedDigest =
+                    sanitizedTestDigest([]);
+            }
+        }
+        // producer가 만든 양성 evidence/check를 그대로 남겨도 endpoint 관찰값과
+        // 결속되지 않으면 PASS witness로 인정하면 안 된다.
+        sample.failureCodes = [];
+    }
+    forged.gate.status = 'PASS';
+    forged.gate.failureCodes = [];
+
+    assert.throws(
+        () =>
+            validateLandAreaPhase0CaptureArtifact(
+                approvedManifest,
+                forged
+            ),
+        /every endpoint COMPLETE_ZERO/
+    );
+});
+
+test('attached rejected inventory는 exact reason enum·count sum·producer digest·failure code를 강제한다', async () => {
+    const approvedManifest = manifest();
+    const captured = adapter();
+    const artifact = await captureLandAreaPhase0({
+        manifest: approvedManifest,
+        adapter: captured.implementation,
+        buildingHubAuth: HUB_AUTH,
+        vworldAuth: VWORLD_AUTH,
+    });
+    const mutateAttached = (
+        mutate: (inventory: any, endpoint: any) => void,
+        pattern: RegExp
+    ) => {
+        const candidate = structuredClone(artifact) as any;
+        const endpoint = candidate.samples[0].endpoints.find(
+            (item: any) => item.inventory.kind === 'ATTACHED'
+        );
+        mutate(endpoint.inventory, endpoint);
+        assert.throws(
+            () =>
+                validateLandAreaPhase0CaptureArtifact(
+                    approvedManifest,
+                    candidate
+                ),
+            pattern
+        );
+    };
+    const validRejected = [
+        { side: 'PAIR', reason: 'SELF_RELATION', count: 1 },
+    ];
+
+    mutateAttached((inventory) => {
+        inventory.rejected = [
+            { side: 'PAIR', reason: 'MISSING_FIELD', count: 1 },
+        ];
+    }, /unsupported value/);
+    mutateAttached((inventory) => {
+        inventory.rejected = validRejected;
+        inventory.totalRejected = 2;
+    }, /rejected count sum/);
+    mutateAttached((inventory) => {
+        inventory.rejected = validRejected;
+        inventory.totalRejected = 1;
+        inventory.rejectedDigest = '0'.repeat(64);
+    }, /rejectedDigest/);
+    mutateAttached((inventory) => {
+        inventory.pairsDigest = '0'.repeat(64);
+    }, /pairsDigest/);
+    mutateAttached((inventory, endpoint) => {
+        inventory.rejected = validRejected;
+        inventory.totalRejected = 1;
+        inventory.rejectedDigest = sanitizedTestDigest(validRejected);
+        endpoint.state = 'COMPLETE';
+        endpoint.totalCount += 1;
+    }, /required semantic failure/);
+});
+
+test('compiled validator CLI는 valid FAIL에도 sentinel만 출력하고 raw PNU·오류 내용을 노출하지 않는다', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'land-area-phase0-validator-'));
+    const privateDir = path.join(cwd, '.phase0-land-area');
+    await mkdir(privateDir, { mode: 0o700 });
+    const firstObservationManifest = manifest([
+        {
+            alias: 'first-observation-a',
+            expectedBylot: 'POSITIVE',
+            pnu: ZERO_PNU,
+        },
+        {
+            alias: 'first-observation-b',
+            expectedBylot: 'ZERO',
+            pnu: POSITIVE_PNU,
+        },
+    ]);
+    const failing = adapter();
+    const failArtifact = await captureLandAreaPhase0({
+        manifest: firstObservationManifest,
+        adapter: failing.implementation,
+        buildingHubAuth: HUB_AUTH,
+        vworldAuth: VWORLD_AUTH,
+    });
+    const manifestPath = path.join(privateDir, 'manifest.json');
+    const artifactPath = path.join(privateDir, 'artifact.json');
+    await writeFile(manifestPath, `${JSON.stringify(firstObservationManifest)}\n`, {
+        mode: 0o600,
+    });
+    await writeFile(artifactPath, `${JSON.stringify(failArtifact)}\n`, {
+        mode: 0o600,
+    });
+    await chmod(manifestPath, 0o600);
+    await chmod(artifactPath, 0o600);
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const exitCode = await runLandAreaPhase0ValidationCli(
+        [
+            '--manifest',
+            '.phase0-land-area/manifest.json',
+            '--artifact',
+            '.phase0-land-area/artifact.json',
+        ],
+        {
+            cwd,
+            stdout: (message) => stdout.push(message),
+            stderr: (message) => stderr.push(message),
+        }
+    );
+    assert.equal(exitCode, 0);
+    assert.deepEqual(stdout, [LAND_AREA_PHASE0_VALIDATION_SENTINEL]);
+    assert.deepEqual(stderr, []);
+    assert.equal(stdout.join('\n').includes(ZERO_PNU), false);
+    assert.equal(stdout.join('\n').includes(POSITIVE_PNU), false);
+
+    const tampered = structuredClone(failArtifact) as any;
+    tampered.samples[0].pnuHash = '0'.repeat(64);
+    await writeFile(artifactPath, `${JSON.stringify(tampered)}\n`, {
+        mode: 0o600,
+    });
+    await chmod(artifactPath, 0o600);
+    const rejectedOutput: string[] = [];
+    const rejectedErrors: string[] = [];
+    assert.equal(
+        await runLandAreaPhase0ValidationCli(
+            [
+                '--manifest',
+                '.phase0-land-area/manifest.json',
+                '--artifact',
+                '.phase0-land-area/artifact.json',
+            ],
+            {
+                cwd,
+                stdout: (message) => rejectedOutput.push(message),
+                stderr: (message) => rejectedErrors.push(message),
+            }
+        ),
+        2
+    );
+    assert.deepEqual(rejectedOutput, []);
+    assert.deepEqual(rejectedErrors, ['Phase 0 artifact validation rejected.']);
+    assert.equal(rejectedErrors.join('\n').includes(ZERO_PNU), false);
+});
+
+test('Phase 0 workflow는 승인 environment·pinned SSH/container·exclusive remote dir·validator sentinel을 강제한다', async () => {
+    const workflow = await readFile(
+        path.join(process.cwd(), '.github/workflows/phase0-land-area-capture.yml'),
+        'utf8'
+    );
+    const deployWorkflow = await readFile(
+        path.join(process.cwd(), '.github/workflows/docker-build.yml'),
+        'utf8'
+    );
+    assert.match(
+        workflow,
+        /^name: Phase 0 Land Area First-Observation Read-Only Capture$/m
+    );
+    assert.match(workflow, /^\s+environment: phase0-production-readonly$/m);
+    assert.match(workflow, /^concurrency:\n\s+group: tonghari-api-production$/m);
+    assert.match(
+        deployWorkflow,
+        /^concurrency:\n\s+group: tonghari-api-production$/m
+    );
+    assert.match(
+        workflow,
+        /First-observation manifest; expectedBylot values are unproven hypotheses/
+    );
+    assert.match(
+        workflow,
+        /\^\[A-Za-z0-9\]\(\[A-Za-z0-9\.\-\]\*\[A-Za-z0-9\]\)\?\$/
+    );
+    for (const option of [
+        'BatchMode=yes',
+        'IdentitiesOnly=yes',
+        'StrictHostKeyChecking=yes',
+        'UserKnownHostsFile=${HOME}/.ssh/known_hosts',
+    ]) {
+        assert.ok(workflow.includes(option), option);
+    }
+    const remoteCommands = workflow
+        .split('\n')
+        .filter((line) => /^\s+(?:ssh|scp) /.test(line));
+    assert.ok(remoteCommands.length >= 7);
+    assert.ok(
+        remoteCommands.every((line) => line.includes('"${ssh_options[@]}"'))
+    );
+    assert.match(workflow, /test ! -L "\$\{application_root\}"/);
+    assert.match(workflow, /test ! -L "\$\{parent\}"/);
+    assert.match(workflow, /\(umask 077; mkdir -m 700 -- "\$\{run_root\}"\)/);
+    assert.match(
+        workflow,
+        /timeout --foreground --kill-after=15s 10m[\s\S]*phase0-land-area-capture\.js/
+    );
+    assert.match(
+        workflow,
+        /health\?[\s\S]*health\?\.gitSha !== process\.env\.EXPECTED_GIT_SHA[\s\S]*health\?\.imageTag !== process\.env\.EXPECTED_IMAGE_TAG/
+    );
+    assert.match(workflow, /docker inspect --format '\{\{\.Id\}\}'/);
+    assert.match(workflow, /docker inspect --format '\{\{\.Image\}\}'/);
+    assert.match(workflow, /docker image inspect --format '\{\{\.Id\}\}'/);
+    assert.match(
+        workflow,
+        /container_id_after[\s\S]*container_id_before[\s\S]*container_image_id_after[\s\S]*container_image_id_before/
+    );
+    assert.match(
+        workflow,
+        /verify_target_health\(\)[\s\S]*docker exec[\s\S]*http:\/\/127\.0\.0\.1:3100\/health/
+    );
+    assert.match(workflow, /phase0-land-area-validate\.js/);
+    assert.match(workflow, /LAND_AREA_PHASE0_ARTIFACT_VALIDATED/);
+    assert.match(workflow, /sha256sum phase0-output\/artifact\.json/);
+    assert.match(
+        workflow,
+        /node "\$\{GITHUB_WORKSPACE\}\/dist\/cli\/phase0-land-area-validate\.js"/
+    );
+    assert.match(workflow, /phase0-output\/validated-runner/);
+    assert.match(workflow, /artifact_size}" -gt 3145728/);
+    assert.match(
+        workflow,
+        /steps\.validate\.outcome == 'success'/
+    );
+    assert.ok(
+        workflow.indexOf('- name: Upload sanitized evidence artifact') <
+            workflow.indexOf('- name: Enforce capture gate')
+    );
+    assert.doesNotMatch(
+        workflow.slice(
+            workflow.indexOf('- name: Upload sanitized evidence artifact'),
+            workflow.indexOf('- name: Enforce capture gate')
+        ),
+        /gate_status.*PASS/
+    );
+});
+
+test('repository manifest는 미아7 최초 관찰 이름을 쓰고 expectedBylot을 입증 완료로 표현하지 않는다', async () => {
+    const manifestPath = path.join(
+        process.cwd(),
+        'phase0-manifests/mia-seven-first-observation-20260724.json'
+    );
+    const repositoryManifest = parseLandAreaPhase0Manifest(
+        JSON.parse(await readFile(manifestPath, 'utf8'))
+    );
+    assert.equal(repositoryManifest.samples.length, 2);
+    assert.ok(
+        repositoryManifest.samples.every((sample) =>
+            sample.alias.startsWith('mia7-first-observation-')
+        )
+    );
+    await assert.rejects(() =>
+        access(
+            path.join(
+                process.cwd(),
+                'phase0-manifests/mia-seven-dev-20260724.json'
+            )
+        )
+    );
 });

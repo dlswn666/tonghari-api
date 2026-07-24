@@ -7,6 +7,15 @@ on:
       - '**.md'
       - 'docs/**'
   workflow_dispatch:
+    inputs:
+      land_area_sync_allowlist_sha256:
+        description: '승인된 canonical LAND_AREA_SYNC allowlist SHA-256 (enabled=true일 때 필수)'
+        required: false
+        type: string
+      land_area_sync_allowlist_count:
+        description: '승인된 LAND_AREA_SYNC allowlist target 수 (enabled=true일 때 필수)'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -162,12 +171,15 @@ jobs:
         env:
           GHCR_USERNAME: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEPLOY_EVENT_NAME: ${{ github.event_name }}
+          EXPECTED_ALLOWLIST_DIGEST: ${{ inputs.land_area_sync_allowlist_sha256 || '' }}
+          EXPECTED_ALLOWLIST_COUNT: ${{ inputs.land_area_sync_allowlist_count || '' }}
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USERNAME }}
           key: ${{ secrets.EC2_SSH_KEY }}
           fingerprint: ${{ secrets.EC2_SSH_FINGERPRINT }}
-          envs: GHCR_USERNAME,GHCR_TOKEN
+          envs: GHCR_USERNAME,GHCR_TOKEN,DEPLOY_EVENT_NAME,EXPECTED_ALLOWLIST_DIGEST,EXPECTED_ALLOWLIST_COUNT
           script: |
             set -Eeuo pipefail
 
@@ -191,7 +203,8 @@ jobs:
 
             for variable_name in \
               GHCR_USERNAME \
-              GHCR_TOKEN
+              GHCR_TOKEN \
+              DEPLOY_EVENT_NAME
             do
               if [[ -z "${!variable_name:-}" ]]; then
                 echo "Required deployment variable ${variable_name} was not transferred to EC2."
@@ -239,9 +252,56 @@ jobs:
               echo "Runtime .env may contain at most one LAND_AREA_SYNC_ENABLED entry."
               false
             fi
-            if [[ "${land_area_sync_flag_count}" -eq 1 ]] \
-              && ! grep -qx 'LAND_AREA_SYNC_ENABLED=false' .env; then
-              echo "Runtime .env LAND_AREA_SYNC_ENABLED must be exactly false when present."
+            expected_land_area_sync_enabled=false
+            if [[ "${land_area_sync_flag_count}" -eq 1 ]]; then
+              if grep -qx 'LAND_AREA_SYNC_ENABLED=true' .env; then
+                expected_land_area_sync_enabled=true
+              elif ! grep -qx 'LAND_AREA_SYNC_ENABLED=false' .env; then
+                echo "Runtime .env LAND_AREA_SYNC_ENABLED must be exactly true or false."
+                false
+              fi
+            fi
+
+            allowed_targets_count="$(grep -c '^LAND_AREA_SYNC_ALLOWED_TARGETS=' .env || true)"
+            if [[ "${allowed_targets_count}" -gt 1 ]]; then
+              echo "Runtime .env may contain at most one LAND_AREA_SYNC_ALLOWED_TARGETS entry."
+              false
+            fi
+            if [[ "${expected_land_area_sync_enabled}" == "true" ]]; then
+              if [[ "${DEPLOY_EVENT_NAME}" != "workflow_dispatch" ]]; then
+                echo "Enabled LAND_AREA_SYNC is allowed only for an explicit workflow_dispatch."
+                false
+              fi
+              if [[ ! "${EXPECTED_ALLOWLIST_DIGEST}" =~ ^[0-9a-f]{64}$ ]]; then
+                echo "Enabled LAND_AREA_SYNC requires an approved canonical allowlist SHA-256 input."
+                false
+              fi
+              if [[ ! "${EXPECTED_ALLOWLIST_COUNT}" =~ ^[1-9][0-9]*$ ]]; then
+                echo "Enabled LAND_AREA_SYNC requires a positive approved allowlist count input."
+                false
+              fi
+              if [[ "${allowed_targets_count}" != "1" ]] \
+                || ! grep -Eq '^LAND_AREA_SYNC_ALLOWED_TARGETS=.+$' .env; then
+                echo "Enabled LAND_AREA_SYNC requires one non-empty allowlist."
+                false
+              fi
+
+              allowed_targets_line="$(grep '^LAND_AREA_SYNC_ALLOWED_TARGETS=' .env)"
+              allowed_targets_value="${allowed_targets_line#*=}"
+              IFS=',' read -r -a allowed_target_entries <<< "${allowed_targets_value}"
+              if [[ "${#allowed_target_entries[@]}" -eq 0 ]]; then
+                echo "LAND_AREA_SYNC allowlist must contain at least one target."
+                false
+              fi
+              for allowed_target_entry in "${allowed_target_entries[@]}"; do
+                if [[ ! "${allowed_target_entry}" =~ ^development:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}:[0-9]{19}$ ]]; then
+                  echo "Enabled LAND_AREA_SYNC permits only exact development:unionUuid:PNU entries."
+                  false
+                fi
+              done
+            elif [[ "${allowed_targets_count}" -eq 1 ]] \
+              && ! grep -qx 'LAND_AREA_SYNC_ALLOWED_TARGETS=' .env; then
+              echo "Disabled LAND_AREA_SYNC requires an empty allowlist."
               false
             fi
 
@@ -368,6 +428,33 @@ jobs:
               false
             fi
 
+            manifest_attestation="$(
+              docker run --rm \
+                --env-file .env \
+                "${IMAGE}" \
+                node dist/cli/land-area-sync-allowlist-manifest.js
+            )"
+            IFS=':' read -r actual_allowlist_count actual_allowlist_digest manifest_extra \
+              <<< "${manifest_attestation}"
+            if [[ -n "${manifest_extra:-}" ]] \
+              || [[ ! "${actual_allowlist_count}" =~ ^[0-9]+$ ]] \
+              || { [[ "${actual_allowlist_count}" -gt 0 ]] \
+                && [[ ! "${actual_allowlist_digest}" =~ ^[0-9a-f]{64}$ ]]; }; then
+              echo "Candidate image returned an invalid allowlist attestation."
+              false
+            fi
+            if [[ "${expected_land_area_sync_enabled}" == "true" ]]; then
+              if [[ "${actual_allowlist_count}" != "${EXPECTED_ALLOWLIST_COUNT}" ]] \
+                || [[ "${actual_allowlist_digest}" != "${EXPECTED_ALLOWLIST_DIGEST}" ]]; then
+                echo "EC2 allowlist does not match the approved workflow_dispatch artifact."
+                false
+              fi
+            elif [[ "${actual_allowlist_count}" != "0" ]] \
+              || [[ -n "${actual_allowlist_digest}" ]]; then
+              echo "Disabled LAND_AREA_SYNC attestation must be exactly count=0,digest=empty."
+              false
+            fi
+
             verify_health() {
               local container_name="$1"
               local port="$2"
@@ -378,6 +465,9 @@ jobs:
                       -e EXPECTED_GIT_SHA="${EXPECTED_GIT_SHA}" \
                       -e EXPECTED_BUILD_TIME="${EXPECTED_BUILD_TIME}" \
                       -e EXPECTED_IMAGE_TAG="${EXPECTED_IMAGE_TAG}" \
+                      -e EXPECTED_LAND_AREA_SYNC_ENABLED="${expected_land_area_sync_enabled}" \
+                      -e EXPECTED_ALLOWLIST_COUNT="${actual_allowlist_count}" \
+                      -e EXPECTED_ALLOWLIST_DIGEST="${actual_allowlist_digest}" \
                       "${container_name}" \
                       node -e '
                         let body = "";
@@ -390,7 +480,12 @@ jobs:
                               && health.gitSha === process.env.EXPECTED_GIT_SHA
                               && health.buildTime === process.env.EXPECTED_BUILD_TIME
                               && health.imageTag === process.env.EXPECTED_IMAGE_TAG
-                              && health.features?.landAreaSyncEnabled === false;
+                              && String(health.features?.landAreaSyncEnabled)
+                                === process.env.EXPECTED_LAND_AREA_SYNC_ENABLED
+                              && String(health.features?.landAreaSyncAllowedTargetCount)
+                                === process.env.EXPECTED_ALLOWLIST_COUNT
+                              && health.features?.landAreaSyncAllowedTargetsDigest
+                                === process.env.EXPECTED_ALLOWLIST_DIGEST;
                             process.exit(valid ? 0 : 1);
                           } catch {
                             process.exit(1);

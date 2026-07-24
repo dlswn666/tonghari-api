@@ -16,6 +16,7 @@ import path from 'node:path';
 import { LandAreaSyncAdapter } from '../services/land-area-sync/adapter';
 import {
     LAND_AREA_PHASE0_OUTPUT_DIRECTORY,
+    LAND_AREA_PHASE0_MAX_ARTIFACT_BYTES,
     captureLandAreaPhase0,
     parseLandAreaPhase0Manifest,
     resolveLandAreaPhase0OutputPath,
@@ -23,7 +24,6 @@ import {
 } from '../verification/land-area-phase0-capture';
 
 const MAX_MANIFEST_BYTES = 64 * 1024;
-const MAX_ARTIFACT_BYTES = 3 * 1024 * 1024;
 const STDOUT_LIMIT = 256;
 
 interface CliEnvironment {
@@ -179,7 +179,10 @@ export async function writeLandAreaPhase0Artifact(
         throw new Error('artifact 직렬화에 실패했습니다.');
     }
     const serialized = `${json}\n`;
-    if (Buffer.byteLength(serialized, 'utf8') > MAX_ARTIFACT_BYTES) {
+    if (
+        Buffer.byteLength(serialized, 'utf8') >
+        LAND_AREA_PHASE0_MAX_ARTIFACT_BYTES
+    ) {
         throw new Error('artifact 크기가 허용 범위를 벗어났습니다.');
     }
     await ensurePrivateOutputDirectory(cwd, outputPath);

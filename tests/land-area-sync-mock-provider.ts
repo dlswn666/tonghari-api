@@ -292,6 +292,7 @@ export interface IntegrationConfig {
     currentLandTuples?: unknown[];
     /** adapter 로 물린 scan 을 특정 endpoint 만 직접 주입으로 덮어쓴다(경계 테스트용). */
     scanOverrides?: Partial<LandAreaSyncDeps['scans']>;
+    assertCanaryScopeAllowed?: LandAreaSyncDeps['assertCanaryScopeAllowed'];
     spy: Spy;
 }
 
@@ -308,6 +309,8 @@ export function buildIntegrationDeps(config: IntegrationConfig): {
 
     const deps: LandAreaSyncDeps = {
         now: () => new Date('2026-07-23T00:00:00.000Z'),
+        assertCanaryScopeAllowed:
+            config.assertCanaryScopeAllowed ?? (() => undefined),
         scans: {
             scanTitle: (pnu, signal) => adapter.scanTitle(pnu, hubAuth, { signal }),
             scanAttached: (pnu, signal) => adapter.scanAttached(pnu, hubAuth, { signal }),

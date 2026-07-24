@@ -9,6 +9,10 @@ import {
     LandAreaSyncDisabledError,
     assertLandAreaSyncEnabled,
 } from '../src/security/land-area-sync-execution-policy';
+import {
+    LandAreaSyncCanaryError,
+    parseLandAreaSyncAllowedTargets,
+} from '../src/security/land-area-sync-canary-policy';
 
 Object.assign(process.env, {
     JWT_SECRET: 'test-production-jwt-secret',
@@ -123,7 +127,10 @@ test('HTTP gate는 exact true로 파싱된 ON 상태에서만 handler로 진행�
 
 test('health 응답은 배포 검증용 LAND_AREA_SYNC 상태를 노출한다', async () => {
     const source = await readFile('src/routes/health.ts', 'utf8');
-    const occurrences = source.match(/landAreaSyncEnabled:\s*env\.LAND_AREA_SYNC_ENABLED/g) ?? [];
+    assert.match(source, /landAreaSyncEnabled:\s*enabled/);
+    assert.match(source, /landAreaSyncAllowedTargetCount:/);
+    assert.match(source, /landAreaSyncAllowedTargetsDigest:/);
+    const occurrences = source.match(/\.\.\.landAreaSyncHealthFeatures\(\)/g) ?? [];
     assert.equal(occurrences.length, 2);
 });
 
@@ -145,8 +152,47 @@ test('queue 이중 방어는 discovery INSERT와 apply admission 전에 OFF를 �
         () => queue.admitApplyJob(
             '00000000-0000-4000-b000-000000000001',
             '00000000-0000-4000-a000-000000000001',
+            '1130510100107450001',
             'production'
         ),
         LandAreaSyncDisabledError
     );
+});
+
+test('queue 이중 방어는 ON이어도 databaseTarget+union+anchor 불일치를 DB 접근 전에 거부한다', async () => {
+    const [{ env }, { LandAreaSyncQueueService }] = await Promise.all([
+        import('../src/config/env'),
+        queueModule,
+    ]);
+    const queue = new LandAreaSyncQueueService();
+    const originalAllowed = env.LAND_AREA_SYNC_ALLOWED_TARGETS;
+    env.LAND_AREA_SYNC_ENABLED = true;
+    env.LAND_AREA_SYNC_ALLOWED_TARGETS = parseLandAreaSyncAllowedTargets(
+        'development:00000000-0000-4000-a000-000000000001:1130510100107450001'
+    );
+
+    try {
+        await assert.rejects(
+            queue.addDiscoveryJob({
+                unionId: '00000000-0000-4000-a000-000000000001',
+                anchorPnu: '1130510100107450001',
+                actorUserId: 'system-admin',
+                databaseTarget: 'production',
+            }),
+            LandAreaSyncCanaryError
+        );
+        assert.throws(
+            () =>
+                queue.admitApplyJob(
+                    '00000000-0000-4000-b000-000000000001',
+                    '00000000-0000-4000-a000-000000000001',
+                    '1130510100107450001',
+                    'production'
+                ),
+            LandAreaSyncCanaryError
+        );
+    } finally {
+        env.LAND_AREA_SYNC_ALLOWED_TARGETS = originalAllowed;
+        env.LAND_AREA_SYNC_ENABLED = false;
+    }
 });

@@ -126,6 +126,8 @@ export interface LandAreaSyncDeps {
     scans: LandAreaSyncScanDeps;
     db: LandAreaSyncDbDeps;
     now(): Date;
+    /** apply 직전 resolved scope의 모든 PNU를 DB target-qualified allowlist로 재검증한다. */
+    assertCanaryScopeAllowed(unionId: string, scannedPnus: readonly string[]): void;
 }
 
 export interface RunLandAreaSyncArgs {
@@ -770,6 +772,19 @@ async function callApplyAndRecord(
             });
             return;
         }
+    }
+
+    // LINKED discovery도 곧바로 apply할 수 있으므로 anchor뿐 아니라 resolved scope 전체를 검사한다.
+    // 이 검사는 apply RPC 직전에 위치해 라우트/queue admission 우회와 외부 scope 확장을 막는다.
+    try {
+        deps.assertCanaryScopeAllowed(unionId, snapshot.scannedPnus);
+    } catch {
+        await deps.db.markScopedFailed(
+            jobId,
+            unionId,
+            'resolved scope가 대지권면적 동기화 허용 대상을 벗어났습니다.'
+        );
+        return;
     }
 
     const scanCompleteness: LandAreaSyncScanCompleteness = 'COMPLETE';

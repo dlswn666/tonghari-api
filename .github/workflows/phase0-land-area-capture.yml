@@ -1,0 +1,578 @@
+name: Phase 0 Land Area First-Observation Read-Only Capture
+
+on:
+  workflow_dispatch:
+    inputs:
+      manifest:
+        description: First-observation manifest; expectedBylot values are unproven hypotheses
+        required: true
+        type: choice
+        default: mia-seven-first-observation-20260724
+        options:
+          - mia-seven-first-observation-20260724
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tonghari-api-production
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    name: Capture sanitized provider evidence
+    runs-on: ubuntu-latest
+    environment: phase0-production-readonly
+    timeout-minutes: 20
+    steps:
+      - name: Require approved main revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "::error::Phase 0 capture must run from refs/heads/main."
+            exit 1
+          fi
+
+      - name: Checkout exact revision
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Set up Node.js for runner-side validation
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Compile repository validator
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+
+      - name: Resolve approved manifest
+        id: manifest
+        shell: bash
+        env:
+          MANIFEST_NAME: ${{ inputs.manifest }}
+        run: |
+          set -euo pipefail
+
+          case "${MANIFEST_NAME}" in
+            mia-seven-first-observation-20260724)
+              manifest_path="phase0-manifests/mia-seven-first-observation-20260724.json"
+              ;;
+            *)
+              echo "::error::Manifest is not repository-approved."
+              exit 1
+              ;;
+          esac
+
+          if [[ ! -f "${manifest_path}" || -L "${manifest_path}" ]]; then
+            echo "::error::Approved manifest must be a regular non-symlink file."
+            exit 1
+          fi
+          node -e '
+            const fs = require("node:fs");
+            const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            if (
+              value?.version !== "land-area-phase0-capture-input@1"
+              || !Array.isArray(value.samples)
+              || value.samples.length < 2
+            ) process.exit(1);
+          ' "${manifest_path}"
+
+          echo "path=${manifest_path}" >> "${GITHUB_OUTPUT}"
+
+      - name: Configure pinned EC2 SSH identity
+        shell: bash
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_SSH_FINGERPRINT: ${{ secrets.EC2_SSH_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+
+          for variable_name in \
+            EC2_HOST \
+            EC2_USERNAME \
+            EC2_SSH_KEY \
+            EC2_SSH_FINGERPRINT
+          do
+            if [[ -z "${!variable_name:-}" ]]; then
+              echo "::error::Missing required EC2 connection secret."
+              exit 1
+            fi
+          done
+          if [[ ! "${EC2_USERNAME}" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+            echo "::error::EC2 username format is invalid."
+            exit 1
+          fi
+          if [[
+            ${#EC2_HOST} -gt 253
+            || ! "${EC2_HOST}" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$
+          ]]; then
+            echo "::error::EC2 host format is invalid."
+            exit 1
+          fi
+
+          install -d -m 700 "${HOME}/.ssh"
+          install -m 600 /dev/null "${HOME}/.ssh/id_ed25519"
+          printf '%s\n' "${EC2_SSH_KEY}" > "${HOME}/.ssh/id_ed25519"
+
+          host_keys="$(ssh-keyscan -T 10 -t ed25519,rsa "${EC2_HOST}" 2>/dev/null)"
+          if [[ -z "${host_keys}" ]]; then
+            echo "::error::EC2 host key scan returned no keys."
+            exit 1
+          fi
+          matched_host_key=""
+          while IFS= read -r host_key; do
+            fingerprint="$(
+              printf '%s\n' "${host_key}" \
+                | ssh-keygen -lf - -E sha256 \
+                | awk '{print $2}'
+            )"
+            if [[ "${fingerprint}" == "${EC2_SSH_FINGERPRINT}" ]]; then
+              matched_host_key="${host_key}"
+              break
+            fi
+          done <<< "${host_keys}"
+          if [[ -z "${matched_host_key}" ]]; then
+            echo "::error::EC2 SSH fingerprint mismatch."
+            exit 1
+          fi
+          printf '%s\n' "${matched_host_key}" > "${HOME}/.ssh/known_hosts"
+          chmod 600 "${HOME}/.ssh/known_hosts"
+
+      - name: Run read-only capture in current API container
+        id: remote
+        shell: bash
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
+          MANIFEST_PATH: ${{ steps.manifest.outputs.path }}
+          RUN_KEY: ${{ github.run_id }}-${{ github.run_attempt }}
+          EXPECTED_GIT_SHA: ${{ github.sha }}
+          EXPECTED_IMAGE_TAG: ghcr.io/dlswn666/alimtalk-proxy:${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${RUN_KEY}" =~ ^[0-9]+-[0-9]+$ ]]; then
+            echo "::error::Invalid workflow run key."
+            exit 1
+          fi
+
+          ssh_options=(
+            -i "${HOME}/.ssh/id_ed25519"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o "UserKnownHostsFile=${HOME}/.ssh/known_hosts"
+          )
+          remote_root="alimtalk-proxy/.phase0-workflow/${RUN_KEY}"
+          cleanup_remote() {
+            ssh "${ssh_options[@]}" "${EC2_USERNAME}@${EC2_HOST}" \
+              "RUN_KEY='${RUN_KEY}' bash -s" \
+              >/dev/null 2>&1 <<'REMOTE_CLEANUP' || true
+          set -euo pipefail
+          application_root="${HOME}/alimtalk-proxy"
+          parent="${application_root}/.phase0-workflow"
+          run_root="${parent}/${RUN_KEY}"
+          test -d "${application_root}"
+          test ! -L "${application_root}"
+          test -d "${parent}"
+          test ! -L "${parent}"
+          test -d "${run_root}"
+          test ! -L "${run_root}"
+          rm -f -- \
+            "${run_root}/manifest.json" \
+            "${run_root}/artifact.json" \
+            "${run_root}/status" \
+            "${run_root}/validated"
+          rmdir -- "${run_root}"
+          REMOTE_CLEANUP
+          }
+          trap cleanup_remote EXIT
+
+          ssh "${ssh_options[@]}" "${EC2_USERNAME}@${EC2_HOST}" \
+            "RUN_KEY='${RUN_KEY}' bash -s" <<'REMOTE_PREPARE'
+          set -euo pipefail
+          application_root="${HOME}/alimtalk-proxy"
+          parent="${application_root}/.phase0-workflow"
+          run_root="${parent}/${RUN_KEY}"
+          test -d "${application_root}"
+          test ! -L "${application_root}"
+          if [[ -e "${parent}" || -L "${parent}" ]]; then
+            test -d "${parent}"
+            test ! -L "${parent}"
+          else
+            mkdir -m 700 -- "${parent}"
+          fi
+          test "$(stat -c '%a' "${parent}")" = "700"
+          (umask 077; mkdir -m 700 -- "${run_root}")
+          test -d "${run_root}"
+          test ! -L "${run_root}"
+          test "$(stat -c '%a' "${run_root}")" = "700"
+          REMOTE_PREPARE
+
+          scp "${ssh_options[@]}" "${MANIFEST_PATH}" \
+            "${EC2_USERNAME}@${EC2_HOST}:${remote_root}/manifest.json"
+
+          ssh "${ssh_options[@]}" "${EC2_USERNAME}@${EC2_HOST}" \
+            "RUN_KEY='${RUN_KEY}' EXPECTED_GIT_SHA='${EXPECTED_GIT_SHA}' EXPECTED_IMAGE_TAG='${EXPECTED_IMAGE_TAG}' bash -s" <<'REMOTE_SCRIPT'
+          set -Eeuo pipefail
+
+          container_name="alimtalk-proxy"
+          host_root="${HOME}/alimtalk-proxy/.phase0-workflow/${RUN_KEY}"
+          host_manifest="${host_root}/manifest.json"
+          host_artifact="${host_root}/artifact.json"
+          host_status="${host_root}/status"
+          host_validated="${host_root}/validated"
+          container_manifest="/app/.phase0-land-area/workflow-manifest-${RUN_KEY}.json"
+          container_artifact="/app/.phase0-land-area/workflow-artifact-${RUN_KEY}.json"
+          validation_sentinel="LAND_AREA_PHASE0_ARTIFACT_VALIDATED"
+
+          container_id_before="$(
+            docker inspect --format '{{.Id}}' "${container_name}"
+          )"
+          container_image_id_before="$(
+            docker inspect --format '{{.Image}}' "${container_name}"
+          )"
+          expected_image_id_before="$(
+            docker image inspect --format '{{.Id}}' "${EXPECTED_IMAGE_TAG}"
+          )"
+          if [[
+            ! "${container_id_before}" =~ ^[0-9a-f]{64}$
+            || ! "${container_image_id_before}" =~ ^sha256:[0-9a-f]{64}$
+            || ! "${expected_image_id_before}" =~ ^sha256:[0-9a-f]{64}$
+            || "${container_image_id_before}" != "${expected_image_id_before}"
+          ]]; then
+            echo "Phase 0 target container image identity mismatch."
+            exit 1
+          fi
+          target_container="${container_id_before}"
+
+          cleanup_container() {
+            docker exec "${target_container}" \
+              rm -f "${container_manifest}" "${container_artifact}" \
+              >/dev/null 2>&1 || true
+          }
+          trap cleanup_container EXIT
+
+          verify_target_health() {
+            docker exec \
+              -e "EXPECTED_GIT_SHA=${EXPECTED_GIT_SHA}" \
+              -e "EXPECTED_IMAGE_TAG=${EXPECTED_IMAGE_TAG}" \
+              "${target_container}" \
+              node -e '
+                const http = require("node:http");
+                const reject = () => process.exit(1);
+                const request = http.get(
+                  "http://127.0.0.1:3100/health",
+                  { timeout: 5000 },
+                  (response) => {
+                    if (response.statusCode !== 200) return reject();
+                    let body = "";
+                    response.setEncoding("utf8");
+                    response.on("data", (chunk) => {
+                      body += chunk;
+                      if (body.length > 65536) request.destroy();
+                    });
+                    response.on("end", () => {
+                      try {
+                        const health = JSON.parse(body);
+                        if (
+                          health?.status !== "ok"
+                          || health?.gitSha !== process.env.EXPECTED_GIT_SHA
+                          || health?.imageTag !== process.env.EXPECTED_IMAGE_TAG
+                        ) return reject();
+                        process.exit(0);
+                      } catch {
+                        reject();
+                      }
+                    });
+                  }
+                );
+                request.on("timeout", () => request.destroy());
+                request.on("error", reject);
+              '
+          }
+
+          test -d "${host_root}"
+          test ! -L "${host_root}"
+          test -f "${host_manifest}"
+          test ! -L "${host_manifest}"
+          manifest_size="$(stat -c '%s' "${host_manifest}")"
+          test "${manifest_size}" -ge 1
+          test "${manifest_size}" -le 65536
+          chmod 600 "${host_manifest}"
+
+          verify_target_health
+
+          docker cp "${host_manifest}" \
+            "${target_container}:${container_manifest}"
+          docker exec "${target_container}" chmod 600 "${container_manifest}"
+
+          set +e
+          timeout --foreground --kill-after=15s 10m \
+            docker exec -w /app "${target_container}" \
+            node dist/cli/phase0-land-area-capture.js \
+            --input ".phase0-land-area/workflow-manifest-${RUN_KEY}.json" \
+            --out "workflow-artifact-${RUN_KEY}.json"
+          capture_status="$?"
+          set -e
+
+          if [[ "${capture_status}" -ne 0 && "${capture_status}" -ne 1 ]]; then
+            printf '%s\n' "${capture_status}" > "${host_status}"
+            chmod 600 "${host_status}"
+            test -f "${host_status}"
+            test ! -L "${host_status}"
+            status_size="$(stat -c '%s' "${host_status}")"
+            test "${status_size}" -ge 1
+            test "${status_size}" -le 16
+            exit 0
+          fi
+
+          set +e
+          validation_output="$(
+            timeout --foreground --kill-after=5s 30s \
+              docker exec -w /app "${target_container}" \
+              node dist/cli/phase0-land-area-validate.js \
+              --manifest ".phase0-land-area/workflow-manifest-${RUN_KEY}.json" \
+              --artifact ".phase0-land-area/workflow-artifact-${RUN_KEY}.json" \
+              2>/dev/null
+          )"
+          validation_status="$?"
+          set -e
+          if [[
+            "${validation_status}" -ne 0
+            || "${validation_output}" != "${validation_sentinel}"
+          ]]; then
+            printf '%s\n' "2" > "${host_status}"
+            chmod 600 "${host_status}"
+            exit 0
+          fi
+
+          container_id_after="$(
+            docker inspect --format '{{.Id}}' "${container_name}"
+          )"
+          container_image_id_after="$(
+            docker inspect --format '{{.Image}}' "${container_name}"
+          )"
+          expected_image_id_after="$(
+            docker image inspect --format '{{.Id}}' "${EXPECTED_IMAGE_TAG}"
+          )"
+          if [[
+            "${container_id_after}" != "${container_id_before}"
+            || "${container_image_id_after}" != "${container_image_id_before}"
+            || "${expected_image_id_after}" != "${expected_image_id_before}"
+            || "${container_image_id_after}" != "${expected_image_id_after}"
+          ]]; then
+            echo "Phase 0 target container changed during capture."
+            exit 1
+          fi
+          verify_target_health
+
+          docker cp "${target_container}:${container_artifact}" "${host_artifact}"
+          chmod 600 "${host_artifact}"
+          test -f "${host_artifact}"
+          test ! -L "${host_artifact}"
+          artifact_size="$(stat -c '%s' "${host_artifact}")"
+          test "${artifact_size}" -ge 1
+          test "${artifact_size}" -le 3145728
+          artifact_sha="$(
+            sha256sum "${host_artifact}" | awk '{print $1}'
+          )"
+          [[ "${artifact_sha}" =~ ^[0-9a-f]{64}$ ]]
+
+          printf '%s\n' "${capture_status}" > "${host_status}"
+          chmod 600 "${host_status}"
+          test -f "${host_status}"
+          test ! -L "${host_status}"
+          status_size="$(stat -c '%s' "${host_status}")"
+          test "${status_size}" -ge 1
+          test "${status_size}" -le 16
+
+          printf '%s:%s\n' \
+            "${validation_sentinel}" \
+            "${artifact_sha}" \
+            > "${host_validated}"
+          chmod 600 "${host_validated}"
+          test -f "${host_validated}"
+          test ! -L "${host_validated}"
+          validated_size="$(stat -c '%s' "${host_validated}")"
+          test "${validated_size}" -ge 1
+          test "${validated_size}" -le 128
+          REMOTE_SCRIPT
+
+          if [[ -e phase0-output || -L phase0-output ]]; then
+            echo "::error::Local Phase 0 output directory must not pre-exist."
+            exit 1
+          fi
+          mkdir -m 700 -- phase0-output
+          scp "${ssh_options[@]}" \
+            "${EC2_USERNAME}@${EC2_HOST}:${remote_root}/artifact.json" \
+            phase0-output/artifact.json || true
+          scp "${ssh_options[@]}" \
+            "${EC2_USERNAME}@${EC2_HOST}:${remote_root}/validated" \
+            phase0-output/validated || true
+          scp "${ssh_options[@]}" \
+            "${EC2_USERNAME}@${EC2_HOST}:${remote_root}/status" \
+            phase0-output/status
+          cleanup_remote
+          trap - EXIT
+
+      - name: Revalidate downloaded artifact with repository validator
+        id: validate
+        if: always() && hashFiles('phase0-output/artifact.json') != '' && hashFiles('phase0-output/validated') != ''
+        shell: bash
+        env:
+          MANIFEST_PATH: ${{ steps.manifest.outputs.path }}
+        run: |
+          set -euo pipefail
+          for candidate in \
+            phase0-output/artifact.json \
+            phase0-output/status \
+            phase0-output/validated
+          do
+            if [[ ! -f "${candidate}" || -L "${candidate}" ]]; then
+              echo "::error::Phase 0 output must be a regular non-symlink file."
+              exit 1
+            fi
+          done
+          artifact_size="$(stat -c '%s' phase0-output/artifact.json)"
+          status_size="$(stat -c '%s' phase0-output/status)"
+          validated_size="$(stat -c '%s' phase0-output/validated)"
+          if [[
+            "${artifact_size}" -lt 1
+            || "${artifact_size}" -gt 3145728
+            || "${status_size}" -lt 1
+            || "${status_size}" -gt 16
+            || "${validated_size}" -lt 1
+            || "${validated_size}" -gt 128
+          ]]; then
+            echo "::error::Phase 0 output size is outside the approved bound."
+            exit 1
+          fi
+          artifact_sha="$(
+            sha256sum phase0-output/artifact.json | awk '{print $1}'
+          )"
+          if [[ ! "${artifact_sha}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Downloaded artifact SHA-256 is invalid."
+            exit 1
+          fi
+          expected_attestation="LAND_AREA_PHASE0_ARTIFACT_VALIDATED:${artifact_sha}"
+          remote_attestation="$(
+            tr -d '\r\n' < phase0-output/validated
+          )"
+          if [[ "${remote_attestation}" != "${expected_attestation}" ]]; then
+            echo "::error::Candidate validator artifact attestation is invalid."
+            exit 1
+          fi
+          chmod 600 \
+            phase0-output/artifact.json \
+            phase0-output/status \
+            phase0-output/validated
+
+          validation_cwd="$(mktemp -d)"
+          validation_private="${validation_cwd}/.phase0-land-area"
+          cleanup_runner_validation() {
+            rm -f -- \
+              "${validation_private}/manifest.json" \
+              "${validation_private}/artifact.json"
+            rmdir -- "${validation_private}" 2>/dev/null || true
+            rmdir -- "${validation_cwd}" 2>/dev/null || true
+          }
+          trap cleanup_runner_validation EXIT
+          mkdir -m 700 -- "${validation_private}"
+          install -m 600 "${MANIFEST_PATH}" \
+            "${validation_private}/manifest.json"
+          install -m 600 phase0-output/artifact.json \
+            "${validation_private}/artifact.json"
+          runner_validation_output="$(
+            cd "${validation_cwd}"
+            node "${GITHUB_WORKSPACE}/dist/cli/phase0-land-area-validate.js" \
+              --manifest ".phase0-land-area/manifest.json" \
+              --artifact ".phase0-land-area/artifact.json"
+          )"
+          if [[ "${runner_validation_output}" != "LAND_AREA_PHASE0_ARTIFACT_VALIDATED" ]]; then
+            echo "::error::Repository validator rejected the downloaded artifact."
+            exit 1
+          fi
+          printf '%s\n' "${expected_attestation}" \
+            > phase0-output/validated-runner
+          chmod 600 phase0-output/validated-runner
+          cleanup_runner_validation
+          trap - EXIT
+
+      - name: Upload sanitized evidence artifact
+        if: always() && steps.validate.outcome == 'success' && hashFiles('phase0-output/validated-runner') != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: land-area-phase0-${{ inputs.manifest }}-${{ github.run_id }}
+          path: phase0-output/artifact.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Enforce capture gate
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! -f phase0-output/status ]]; then
+            echo "::error::Remote capture status is missing."
+            exit 1
+          fi
+          capture_status="$(tr -d '[:space:]' < phase0-output/status)"
+          if [[ ! "${capture_status}" =~ ^[0-9]+$ ]]; then
+            echo "::error::Remote capture status is invalid."
+            exit 1
+          fi
+          if [[ ! -f phase0-output/artifact.json ]]; then
+            echo "::error::Sanitized capture artifact is missing."
+            exit 1
+          fi
+          if [[
+            ! -f phase0-output/validated-runner
+            || -L phase0-output/validated-runner
+          ]]; then
+            echo "::error::Runner artifact attestation is missing."
+            exit 1
+          fi
+          artifact_sha="$(
+            sha256sum phase0-output/artifact.json | awk '{print $1}'
+          )"
+          runner_attestation="$(
+            tr -d '\r\n' < phase0-output/validated-runner
+          )"
+          if [[ "${runner_attestation}" != "LAND_AREA_PHASE0_ARTIFACT_VALIDATED:${artifact_sha}" ]]; then
+            echo "::error::Runner artifact attestation no longer matches."
+            exit 1
+          fi
+
+          gate_status="$(node -e '
+            const fs = require("node:fs");
+            const value = JSON.parse(fs.readFileSync("phase0-output/artifact.json", "utf8"));
+            process.stdout.write(String(value?.gate?.status ?? ""));
+          ')"
+          failure_count="$(node -e '
+            const fs = require("node:fs");
+            const value = JSON.parse(fs.readFileSync("phase0-output/artifact.json", "utf8"));
+            process.stdout.write(String(value?.gate?.failureCodes?.length ?? -1));
+          ')"
+
+          {
+            echo "### Phase 0 land-area capture"
+            echo
+            echo "- Manifest: \`${{ inputs.manifest }}\`"
+            echo "- Gate: \`${gate_status}\`"
+            echo "- Failure codes: \`${failure_count}\`"
+            echo "- Artifact: sanitized JSON uploaded"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          if [[ "${capture_status}" != "0" || "${gate_status}" != "PASS" ]]; then
+            echo "::error::Phase 0 capture gate did not pass."
+            exit 1
+          fi

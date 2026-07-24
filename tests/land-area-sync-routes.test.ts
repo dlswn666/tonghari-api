@@ -8,7 +8,7 @@ async function gisRoute(): Promise<string> {
 
 test('LAND_AREA_SYNC POST는 인증·SYSTEM_ADMIN 뒤 fail-closed gate를 거치고 GET은 조회 가능하다', async () => {
     const s = await gisRoute();
-    assert.match(s, /router\.post\('\/land-area-sync',\s*authMiddleware,\s*gisSystemAdminMiddleware,\s*landAreaSyncEnabledMiddleware/);
+    assert.match(s, /router\.post\('\/land-area-sync',\s*authMiddleware,\s*gisSystemAdminMiddleware,\s*landAreaSyncEnabledMiddleware,\s*landAreaSyncDiscoveryCanaryMiddleware/);
     assert.match(s, /router\.post\('\/land-area-sync\/:discoveryJobId\/confirm',\s*authMiddleware,\s*gisSystemAdminMiddleware,\s*landAreaSyncEnabledMiddleware/);
     assert.match(s, /router\.get\('\/land-area-sync\/latest',\s*authMiddleware,\s*gisSystemAdminMiddleware/);
     assert.match(s, /router\.get\('\/land-area-sync\/:jobId',\s*authMiddleware,\s*gisSystemAdminMiddleware/);
@@ -43,7 +43,19 @@ test('confirm route 는 확인자·시각 body 금지 + scope hash·정렬 prope
     assert.match(s, /parcelScopeConfirmed !== true/);
     // admission RPC 경유 + 새 apply job 재실행.
     assert.match(s, /createLandAreaSyncConfirmationJob\(/);
-    assert.match(s, /admitApplyJob\(newJobId, unionId, req\.user!\.databaseTarget\)/);
+    assert.match(s, /admitApplyJob\([\s\S]*newJobId,[\s\S]*discoveryJob\.union_id,[\s\S]*discoveryAnchorPnu as string,[\s\S]*req\.user!\.databaseTarget/);
+    // canary는 body anchor가 아니라 저장된 discovery lineage를 RPC INSERT 전에 검사한다.
+    assert.match(s, /const discoveryLandAreaSync = readLandAreaSync\(discoveryJob\)/);
+    assert.match(s, /const discoveryAnchorPnu = discoveryLandAreaSync\?\.anchorPnu/);
+    assert.ok(
+        s.indexOf('assertLandAreaSyncCanaryAllowed(') <
+            s.indexOf('createLandAreaSyncConfirmationJob(')
+    );
+    assert.match(s, /assertLandAreaSyncScopeAllowed\([\s\S]*discoveryScannedPnus/);
+    assert.ok(
+        s.indexOf('assertLandAreaSyncScopeAllowed(') <
+            s.indexOf('createLandAreaSyncConfirmationJob(')
+    );
     // 확인자는 서버 세션 actorUserId 만 전달.
     assert.match(s, /p_actor_user_id: req\.user!\.actorUserId!/);
 });

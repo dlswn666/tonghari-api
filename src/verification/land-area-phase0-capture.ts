@@ -45,6 +45,9 @@ export const LAND_AREA_PHASE0_PLAN_VERSION =
     'land-area-phase0-capture-plan@1' as const;
 export const LAND_AREA_PHASE0_ARTIFACT_VERSION =
     'land-area-phase0-capture-artifact@2' as const;
+export const LAND_AREA_PHASE0_ARTIFACT_SCHEMA_HASH =
+    'e26d6aafd54fd42f70e0d87a10c1b0d1009e69cd3f5d847dedaf762ef0c17fd4' as const;
+export const LAND_AREA_PHASE0_MAX_ARTIFACT_BYTES = 3 * 1024 * 1024;
 export const LAND_AREA_PHASE0_OUTPUT_DIRECTORY = '.phase0-land-area';
 
 const MAX_SAMPLES = 20;
@@ -71,7 +74,7 @@ const OTHER_PURPOSE_SIGNAL_RULES = [
     ['NEIGHBORHOOD_LIVING', '근린생활시설'],
 ] as const;
 
-const ENDPOINT_ORDER = [
+export const LAND_AREA_PHASE0_ENDPOINTS = [
     'getBrTitleInfo',
     'getBrBasisOulnInfo',
     'getBrAtchJibunInfo',
@@ -1771,8 +1774,8 @@ export function buildLandAreaPhase0CapturePlan(
     return {
         version: LAND_AREA_PHASE0_PLAN_VERSION,
         sampleCount: samples.length,
-        requestCount: samples.length * ENDPOINT_ORDER.length,
-        endpoints: ENDPOINT_ORDER,
+        requestCount: samples.length * LAND_AREA_PHASE0_ENDPOINTS.length,
+        endpoints: LAND_AREA_PHASE0_ENDPOINTS,
         samples,
     };
 }
@@ -1876,44 +1879,48 @@ export async function captureLandAreaPhase0(input: {
     const artifacts = rawCaptures.map((raw) =>
         buildSampleArtifact(raw, isSensitive)
     );
-    const failureCodes = new Set(
-        artifacts.flatMap((sample) => sample.failureCodes)
-    );
-    const reviewCodes = new Set(
-        artifacts.flatMap((sample) => sample.reviewCodes)
-    );
     if (
         !rawCaptures.some((raw) =>
             hasPositiveLadfrlEvidence(raw, isSensitive)
         )
     ) {
-        failureCodes.add('LADFRL_POSITIVE_EVIDENCE_MISSING');
+        for (const sample of artifacts) {
+            if (sample.expectedBylot === 'POSITIVE') {
+                sample.failureCodes = [
+                    ...new Set([
+                        ...sample.failureCodes,
+                        'LADFRL_POSITIVE_EVIDENCE_MISSING',
+                    ]),
+                ].sort();
+            }
+        }
     }
     if (
         !rawCaptures.some((raw) =>
             hasPositiveLdaregEvidence(raw, isSensitive)
         )
     ) {
-        failureCodes.add('LDAREG_POSITIVE_EVIDENCE_MISSING');
+        for (const sample of artifacts) {
+            if (sample.expectedBylot === 'POSITIVE') {
+                sample.failureCodes = [
+                    ...new Set([
+                        ...sample.failureCodes,
+                        'LDAREG_POSITIVE_EVIDENCE_MISSING',
+                    ]),
+                ].sort();
+            }
+        }
     }
+    const failureCodes = new Set(
+        artifacts.flatMap((sample) => sample.failureCodes)
+    );
+    const reviewCodes = new Set(
+        artifacts.flatMap((sample) => sample.reviewCodes)
+    );
 
     return {
         version: LAND_AREA_PHASE0_ARTIFACT_VERSION,
-        schemaHash: sha256(
-            stableStringify({
-                version: LAND_AREA_PHASE0_ARTIFACT_VERSION,
-                endpointOrder: ENDPOINT_ORDER,
-                inventories: [
-                    'TITLE_CODES_BYLOT_HASHED_IDENTITY',
-                    'BASIS_BYLOT_HASHED_IDENTITY',
-                    'ATTACHED_HASHED_RELATION',
-                    'EXPOS_CODES_AREA_HASHED_IDENTITY',
-                    'LADFRL_CODES_AREA_HASHED_PNU',
-                    'LADFRL_SCOPE_HASHED_PNU_AREA_SUM',
-                    'LDAREG_CODES_RATIO_HASHED_IDENTITY',
-                ],
-            })
-        ),
+        schemaHash: LAND_AREA_PHASE0_ARTIFACT_SCHEMA_HASH,
         gate: {
             status: failureCodes.size === 0 ? 'PASS' : 'FAIL',
             failureCodes: [...failureCodes].sort(),
