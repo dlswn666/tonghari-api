@@ -437,13 +437,14 @@ test('abort: 재시도 지연(backoff) 중 취소되면 재조회 없이 FAILED(
 
 // ── endpoint별 파라미터 / envelope / zero label ──────────────────
 
-test('scanTitle: Building HUB URL + serviceKey/sigunguCd/bjdongCd/bun/ji 파라미터', async () => {
+test('scanTitle: Building HUB URL + exact 필지 파라미터', async () => {
     const { httpClient, sleep, calls } = scripted(() => ok(hubBody(0, [])));
     await makeAdapter(httpClient, sleep).scanTitle(PNU, HUB_AUTH);
     assert.match(calls[0].url, /apis\.data\.go\.kr\/1613000\/BldRgstHubService\/getBrTitleInfo$/);
     assert.equal(calls[0].params.serviceKey, 'test-service-key');
     assert.equal(calls[0].params.sigunguCd, '11680');
     assert.equal(calls[0].params.bjdongCd, '10100');
+    assert.equal(calls[0].params.platGbCd, '0');
     assert.equal(calls[0].params.bun, '0736');
     assert.equal(calls[0].params.ji, '0024');
     assert.equal(calls[0].params.numOfRows, 1000);
@@ -484,13 +485,15 @@ test('scanLadfrl: V-World ladfrlList URL + ladfrlVOList envelope', async () => {
     assert.equal(res.state, 'COMPLETE_ZERO');
 });
 
-test('scanExpos / scanBasis: Building HUB endpoint URL', async () => {
+test('scanExpos / scanBasis: Building HUB endpoint URL과 exact platGbCd', async () => {
     const { httpClient, sleep, calls } = scripted(() => ok(hubBody(0, [])));
     const adapter = makeAdapter(httpClient, sleep);
     await adapter.scanExpos(PNU, HUB_AUTH);
     await adapter.scanBasis(PNU, HUB_AUTH);
     assert.match(calls[0].url, /getBrExposInfo$/);
     assert.match(calls[1].url, /getBrBasisOulnInfo$/);
+    assert.equal(calls[0].params.platGbCd, '0');
+    assert.equal(calls[1].params.platGbCd, '0');
 });
 
 test('잘못된 PNU 형식은 호출 없이 FAILED(SCHEMA_ERROR)', async () => {

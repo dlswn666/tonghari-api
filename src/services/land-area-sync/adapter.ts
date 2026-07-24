@@ -249,22 +249,22 @@ export class LandAreaSyncAdapter {
 
     /** 표제부 strict 전체 페이지 (getBrTitleInfo) */
     scanTitle(pnu: string, auth: BuildingHubAuth, opts: StrictScanOptions = {}): Promise<StrictScan<BrTitleRow>> {
-        return this.scanBuildingHub<BrTitleRow>('getBrTitleInfo', pnu, auth, false, opts);
+        return this.scanBuildingHub<BrTitleRow>('getBrTitleInfo', pnu, auth, opts);
     }
 
-    /** 부속지번 strict 전체 페이지 (getBrAtchJibunInfo) — anchor 기준 platGbCd 포함 */
+    /** 부속지번 strict 전체 페이지 (getBrAtchJibunInfo) */
     scanAttached(pnu: string, auth: BuildingHubAuth, opts: StrictScanOptions = {}): Promise<StrictScan<BrAtchJibunRow>> {
-        return this.scanBuildingHub<BrAtchJibunRow>('getBrAtchJibunInfo', pnu, auth, true, opts);
+        return this.scanBuildingHub<BrAtchJibunRow>('getBrAtchJibunInfo', pnu, auth, opts);
     }
 
     /** 전유부 strict 전체 페이지 (getBrExposInfo) */
     scanExpos(pnu: string, auth: BuildingHubAuth, opts: StrictScanOptions = {}): Promise<StrictScan<BrExposRow>> {
-        return this.scanBuildingHub<BrExposRow>('getBrExposInfo', pnu, auth, false, opts);
+        return this.scanBuildingHub<BrExposRow>('getBrExposInfo', pnu, auth, opts);
     }
 
     /** 기본개요 strict 전체 페이지 (getBrBasisOulnInfo) — bylotCnt basis fallback 원천 */
     scanBasis(pnu: string, auth: BuildingHubAuth, opts: StrictScanOptions = {}): Promise<StrictScan<BrBasisOulnRow>> {
-        return this.scanBuildingHub<BrBasisOulnRow>('getBrBasisOulnInfo', pnu, auth, false, opts);
+        return this.scanBuildingHub<BrBasisOulnRow>('getBrBasisOulnInfo', pnu, auth, opts);
     }
 
     /** 토지대장 strict 전체 페이지 (ladfrlList) */
@@ -283,10 +283,9 @@ export class LandAreaSyncAdapter {
         endpoint: GisSharedEndpointName,
         pnu: string,
         auth: BuildingHubAuth,
-        includePlatGbCd: boolean,
         opts: StrictScanOptions
     ): Promise<StrictScan<T>> {
-        if (!/^\d{19}$/.test(pnu)) {
+        if (!/^\d{10}[12]\d{8}$/.test(pnu)) {
             return Promise.resolve(this.schemaFailure<T>(endpoint, 'PNU 형식이 올바르지 않습니다.'));
         }
         const sigunguCd = pnu.slice(0, 5);
@@ -298,14 +297,11 @@ export class LandAreaSyncAdapter {
             serviceKey: auth.serviceKey,
             sigunguCd,
             bjdongCd,
+            platGbCd: landGbn === '2' ? '1' : '0',
             bun,
             ji,
             _type: 'json',
         };
-        // 부속지번 조회는 anchor 기준 platGbCd(0/1)를 포함한다 (PNU landGbn 1/2 → platGbCd 0/1)
-        if (includePlatGbCd) {
-            baseParams.platGbCd = landGbn === '2' ? '1' : '0';
-        }
         return this.scan<T>(
             endpoint,
             GIS_SHARED_ENDPOINTS[endpoint],

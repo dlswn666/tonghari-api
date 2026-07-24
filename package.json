@@ -8,6 +8,7 @@
     "build": "tsc",
     "test": "node --import tsx --test tests/*.test.ts",
     "phase0-s:gate": "tsx scripts/phase0-s-gate.ts",
+    "phase0-land-area:capture": "tsx scripts/phase0-land-area-capture.ts",
     "start": "node dist/index.js",
     "docker:build": "docker build --build-arg GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo unknown) --build-arg BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) --build-arg IMAGE_TAG=alimtalk-proxy:local -t alimtalk-proxy .",
     "docker:logs": "docker logs -f alimtalk-proxy",

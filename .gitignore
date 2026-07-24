@@ -17,6 +17,9 @@ npm-debug.log*
 # Phase 0-S clone snapshots (hash-only, local verification artifacts)
 .phase0-s/
 
+# Phase 0 land-area live capture artifacts (de-identified, local-only)
+.phase0-land-area/
+
 # Supabase CLI local project link metadata
 supabase/.temp/
 

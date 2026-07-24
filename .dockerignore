@@ -18,6 +18,7 @@ docker-compose*.yml
 
 # 빌드 결과물 (로컬)
 dist
+.phase0-land-area
 
 # 로그
 logs
@@ -43,4 +44,3 @@ docs
 # 기타
 .DS_Store
 Thumbs.db
-
