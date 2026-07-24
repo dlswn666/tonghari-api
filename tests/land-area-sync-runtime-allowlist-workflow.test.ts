@@ -166,8 +166,19 @@ test('runtime action slot과 monotonic sequence는 pending disable 대체와 sta
         workflow,
         /group: tonghari-api-production-runtime-\$\{\{ inputs\.action \}\}/
     );
-    assert.match(workflow, /REQUEST_SEQUENCE: \$\{\{ github\.run_id \}\}/);
-    assert.match(workflow, /\.land-area-sync-runtime-sequence/);
+    assert.match(
+        workflow,
+        /REQUEST_SEQUENCE: \$\{\{ github\.run_number \}\}/
+    );
+    assert.match(
+        workflow,
+        /REQUEST_ATTEMPT: \$\{\{ github\.run_attempt \}\}/
+    );
+    assert.doesNotMatch(
+        workflow,
+        /REQUEST_SEQUENCE: \$\{\{ github\.run_id \}\}/
+    );
+    assert.match(workflow, /\.land-area-sync-runtime-watermark/);
     assert.match(workflow, /REQUEST_SEQUENCE < last_sequence/);
     assert.match(workflow, /Stale enable request skipped/);
     assert.match(
@@ -176,19 +187,62 @@ test('runtime action slot과 monotonic sequence는 pending disable 대체와 sta
     );
     assert.match(
         workflow,
-        /disable은 안전 동작이므로 stale이어도 실행/
+        /disable은 안전 tombstone이므로 stale이어도 실행/
     );
     assert.match(
         workflow,
-        /sequence_to_store.*RUNTIME_ACTION.*runtime_sequence_path/s
+        /watermark_sequence_to_store.*watermark_attempt_to_store.*RUNTIME_ACTION/s
     );
     assert.ok(
         workflow.indexOf(
-            'mv -f -- "${sequence_next}" "${runtime_sequence_path}"'
+            'mv -f -- "${watermark_next}" "${runtime_watermark_path}"'
         ) <
             workflow.indexOf('mv -f -- "${env_next}" "${env_path}"'),
-        'sequence intent는 runtime env 변경보다 먼저 원자적으로 기록해야 한다'
+        'requested watermark는 runtime env 변경보다 먼저 원자적으로 기록해야 한다'
     );
+    const rollbackBody =
+        workflow.split('          rollback() {')[1]?.split(
+            '          trap rollback ERR'
+        )[0] ?? '';
+    assert.doesNotMatch(
+        rollbackBody,
+        /mv -f -- .*runtime_watermark_path/
+    );
+    assert.doesNotMatch(
+        rollbackBody,
+        /rm -f -- .*runtime_watermark_path/
+    );
+});
+
+test('정상-success cleanup은 rollback container와 secret backup 부재를 검증하고 실패를 green 처리하지 않는다', () => {
+    const successCleanupBody =
+        workflow.split('          rollback_cleanup_command_failed=0')[1]?.split(
+            '          echo "Runtime action'
+        )[0] ?? '';
+
+    assert.notEqual(successCleanupBody, '');
+    assert.doesNotMatch(workflow, /sequence_backup/);
+    assert.doesNotMatch(
+        successCleanupBody,
+        /docker rm -f "\$\{rollback_container\}"[^\n]*\|\| true/
+    );
+    assert.doesNotMatch(
+        successCleanupBody,
+        /rm -f -- "\$\{env_backup\}"[^\n]*\|\| true/
+    );
+    assert.match(
+        successCleanupBody,
+        /if ! docker rm -f "\$\{rollback_container\}"/
+    );
+    assert.match(
+        successCleanupBody,
+        /docker container inspect "\$\{rollback_container\}"[\s\S]*false/
+    );
+    assert.match(
+        successCleanupBody,
+        /! rm -f -- "\$\{env_backup\}"[\s\S]*-e "\$\{env_backup\}"[\s\S]*-L "\$\{env_backup\}"/
+    );
+    assert.match(successCleanupBody, /CLEANUP_FAILED:[\s\S]*exit 71/);
 });
 
 test('runtime allowlist workflow는 Supabase나 DB에 연결하거나 운영 target을 구성하지 않는다', () => {

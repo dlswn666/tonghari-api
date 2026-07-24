@@ -97,9 +97,15 @@ GitHub의 concurrency group에는 running 1개와 pending 1개만 남기므로 e
 후속 enable에 의해 대체되지 않게 한다. EC2에서는 runtime 변경, 일반 Docker 배포, Phase 0
 읽기 전용 capture가 모두 deploy-user 소유 mode `600`의
 `.tonghari-api-production.lock`을 `flock`으로 독점 획득한다. runtime 요청은 GitHub
-`run_id` 기반 sequence intent를 `.env`와 컨테이너보다 먼저 mode `600` 파일에 원자적으로
-기록하며, stale enable은 fail-closed로 건너뛴다. disable은 stale sequence여도 실행하고
-sequence를 되감지 않는다. production lock 대기는 최대 2,400초로 제한한다.
+workflow 내부에서 monotonic한 `github.run_number`와 `github.run_attempt`를 요청
+watermark로 사용한다. `run_attempt`는 같은 요청의 재시도 metadata이며 ordering을
+앞당기지 않는다. 같은 enable 재시도는 이미 health가 정확히 적용된 경우만 성공하며, 적용
+실패 뒤 enable은 새 dispatch/run_number가 필요하다. 같은 disable 재시도는 항상 다시
+실행한다. requested watermark는 `.env`와 컨테이너보다 먼저 mode `600` 파일에
+원자적으로 기록한다. stale enable은 fail-closed로 거부하고, disable은 stale
+run_number여도 실행하면서 watermark를 되감지 않는다. disable 적용이 실패해 env/container를
+이전 상태로 rollback하더라도 disable watermark tombstone은 rollback하지 않으므로 더 오래된
+enable이 다시 적용될 수 없다. production lock 대기는 최대 2,400초로 제한한다.
 
 컨테이너를 재기동하는 runtime 변경과 일반 Docker 배포는 production lock을 먼저 얻은 뒤
 deploy-user 소유 mode `600`의 `.land-area-sync-operation.lock`도 획득한다. 향후 dev
@@ -131,6 +137,8 @@ EC2 적용 시에는 다음 보호 조건을 모두 확인한다.
 5. 후보와 최종 `/health`의 enabled/count/digest가 승인 입력과 일치한다.
 6. 실패 시 원래 `.env`, 컨테이너 이름, 실행 상태와 이전 health attestation을 복구한다.
 7. 컨테이너 재기동 전 production lock과 land-area operation lock을 고정 순서로 획득한다.
+8. 성공 보고 전 runtime rollback container와 secret-bearing `.env` backup의 삭제 및
+   부재를 재검증하고, cleanup 명령이나 부재 검증이 실패하면 exit `71`로 green을 금지한다.
 
 값을 출력하지 않고 항목 수만 확인한다.
 
