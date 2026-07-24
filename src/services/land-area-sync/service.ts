@@ -18,7 +18,7 @@ import {
 } from './scope';
 import { BYLOT_SOURCE_POLICY, bylotBasisFallbackPlan } from './bylot';
 import { assembleAttachedPnus, type AtchJibunRowInput } from '../gis-shared/pnu';
-import { buildScopeEvidence, buildScopeSnapshot, capIssues, sanitizeIssue, emptyCounts, type CappedIssues } from './preview';
+import { buildScopeEvidence, buildScopeSnapshot, capIssues, sanitizeIssue, emptyCounts } from './preview';
 import {
     assembleLdaregApply,
     selectCanonicalExposSourcePnu,
@@ -100,22 +100,6 @@ export interface LandAreaSyncDbDeps {
         }
     ): Promise<boolean>;
     writeDiscoveryTerminal(jobId: string, unionId: string, input: LandAreaSyncTerminalInput): Promise<boolean>;
-    writeScopeState(jobId: string, unionId: string, scopeState: LandAreaSyncScopeState): Promise<boolean>;
-    /**
-     * apply RPC 성공 뒤(terminal=COMPLETED 은 RPC 가 이미 기록) scopeState 와 함께 병합된
-     * terminal issues 를 반영한다(Finding 3). RPC 가 알 수 없는 discovery 단계 extraIssues 를
-     * 보존하기 위한 경로. status 는 건드리지 않는다.
-     */
-    writeAppliedIssues(
-        jobId: string,
-        unionId: string,
-        patch: {
-            scopeState: LandAreaSyncScopeState;
-            issues: LandAreaSyncIssue[];
-            issuesTotal: number;
-            issuesTruncated: boolean;
-        }
-    ): Promise<boolean>;
     markScopedFailed(jobId: string, unionId: string, message: string): Promise<boolean>;
     readBuildingUnits(unionId: string, scopePnus: string[]): Promise<BuildingUnitCandidate[]>;
     readPropertyUnits(unionId: string, scopePnus: string[]): Promise<PropertyUnitCandidate[]>;
@@ -799,7 +783,12 @@ async function callApplyAndRecord(
         p_scope_hash: snapshot.scopeHash,
         p_scanned_pnus: snapshot.scannedPnus,
         p_items: items,
-        p_result_summary: { counts },
+        // RPC가 extraIssues를 다시 allowlist 정제한 뒤 DB에서 산출한 issues와
+        // dedup/cap하여 terminal summary + immutable receipt를 같은 transaction에 쓴다.
+        p_result_summary: {
+            counts,
+            extraIssues: extraIssues.map(sanitizeIssue),
+        },
     });
 
     if (res.error) {
@@ -808,85 +797,9 @@ async function callApplyAndRecord(
         return;
     }
 
-    const rpcIssues = parseRpcIssues(res.data);
-    const outcome = str((res.data as { outcome?: unknown })?.outcome) as LandAreaSyncOutcome;
-    const issueCodes = new Set(rpcIssues.map((i) => i.code as string));
-    const scopeState = deriveApplyScopeState(ctx, strategy, outcome, issueCodes);
-
-    // Finding 3 — discovery 단계 extraIssues(component 단위 RATIO_PARSE_FAILED·matcher NO_CHANGE·
-    // dedup conflict 등)는 RPC 가 재계산할 수 없다(해당 component 는 p_items 에서 이미 제외). RPC 가
-    // 쓴 terminal issues 에 병합해 유실을 막는다. extraIssues 가 없으면 기존 경로(scopeState 만) 유지.
-    if (extraIssues.length > 0) {
-        const merged = mergeTerminalIssues(rpcIssues, extraIssues);
-        await deps.db.writeAppliedIssues(jobId, unionId, {
-            scopeState,
-            issues: merged.issues,
-            issuesTotal: merged.issuesTotal,
-            issuesTruncated: merged.issuesTruncated,
-        });
-        return;
-    }
-    await deps.db.writeScopeState(jobId, unionId, scopeState);
-}
-
-/** apply RPC 반환 issues 를 §17.3 allowlist 로 정제해 뽑는다(임의 필드 유입 방지). */
-function parseRpcIssues(data: unknown): LandAreaSyncIssue[] {
-    const arr = (data as { issues?: unknown })?.issues;
-    if (!Array.isArray(arr)) return [];
-    return arr
-        .filter((x): x is Record<string, unknown> => !!x && typeof x === 'object')
-        .map((x) =>
-            sanitizeIssue({
-                code: str(x.code) as LandAreaSyncIssueCode,
-                propertyUnitId: typeof x.propertyUnitId === 'string' ? x.propertyUnitId : undefined,
-                targetPnu: typeof x.targetPnu === 'string' ? x.targetPnu : undefined,
-                dong: typeof x.dong === 'string' ? x.dong : undefined,
-                ho: typeof x.ho === 'string' ? x.ho : undefined,
-            })
-        );
-}
-
-/**
- * RPC terminal issues 와 discovery extraIssues 를 병합한다(Finding 3). sanitize 후 (code·
- * propertyUnitId·targetPnu·dong·ho) 정체성 기준으로 중복을 제거하고, capIssues 로 200건 상한·
- * truncated 규칙을 SINGLE 경로(finalizeDiscoveryTerminal)와 동일하게 적용한다. RPC issues 를 앞에
- * 두어 상한 절단 시 RPC 결과가 우선 보존된다.
- */
-function mergeTerminalIssues(rpcIssues: LandAreaSyncIssue[], extraIssues: LandAreaSyncIssue[]): CappedIssues {
-    const seen = new Set<string>();
-    const deduped: LandAreaSyncIssue[] = [];
-    for (const issue of [...rpcIssues, ...extraIssues]) {
-        const s = sanitizeIssue(issue);
-        const key = `${s.code}|${s.propertyUnitId ?? ''}|${s.targetPnu ?? ''}|${s.dong ?? ''}|${s.ho ?? ''}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        deduped.push(s);
-    }
-    return capIssues(deduped);
-}
-
-function deriveApplyScopeState(
-    ctx: BranchContext,
-    strategy: LandAreaSyncStrategy,
-    outcome: LandAreaSyncOutcome,
-    issueCodes: Set<string>
-): LandAreaSyncScopeState {
-    if (outcome === 'REVIEW_REQUIRED') {
-        if (issueCodes.has('MANUAL_OVERWRITE_CONFIRMATION_REQUIRED')) {
-            return 'MANUAL_OVERWRITE_CONFIRMATION_REQUIRED';
-        }
-        return 'REVIEW_REQUIRED';
-    }
-    // APPLIED / PARTIAL / NO_DATA
-    if (ctx.isApplyJob) {
-        // MANUAL overwrite(LINKED)는 LDAREG(다중 PNU 계열) 확인 apply 에만 해당한다. LADFRL 은
-        // 단일 PNU 전략이라 overwrite 확인 apply 여도 SINGLE_PNU_CONFIRMED 로 표기한다(원장 승격 —
-        // 기존엔 overwriteManualConfirmed=true 인 LADFRL 을 LINKED_SCOPE_RESOLVED 로 오표기했다).
-        return strategy !== 'LADFRL' && ctx.overwriteManualConfirmed
-            ? 'LINKED_SCOPE_RESOLVED'
-            : 'SINGLE_PNU_CONFIRMED';
-    }
-    return 'LINKED_SCOPE_RESOLVED';
+    // 성공 응답 이후에는 어떤 preview/status UPDATE도 하지 않는다. apply RPC가
+    // scopeState/outcome/counts/issues metadata/workerFinalization을 한 transaction에서
+    // 확정하는 것이 유일한 terminal 경로다.
 }
 
 async function finalizeDiscoveryTerminal(
@@ -903,7 +816,7 @@ async function finalizeDiscoveryTerminal(
     }
 ): Promise<void> {
     const capped = capIssues(input.issues);
-    await deps.db.writeDiscoveryTerminal(jobId, unionId, {
+    const finalized = await deps.db.writeDiscoveryTerminal(jobId, unionId, {
         status: input.status,
         scopeState: input.scopeState,
         outcome: input.outcome,
@@ -913,6 +826,12 @@ async function finalizeDiscoveryTerminal(
         issuesTruncated: capped.issuesTruncated,
         errorLog: input.errorLog,
     });
+    if (!finalized) {
+        throw Object.assign(
+            new Error('discovery worker finalization 기록에 실패했습니다.'),
+            { code: 'WORKER_FINALIZATION_FAILED' }
+        );
+    }
 }
 
 /** gate 단계까지의 scan row count 를 counts 골격에 채운다. */

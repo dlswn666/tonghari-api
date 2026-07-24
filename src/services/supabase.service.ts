@@ -1439,15 +1439,16 @@ export class SupabaseService {
     }
 
     /**
-     * LAND_AREA_SYNC confirmation-job admission RPC (migration [5.2]). actor SYSTEM_ADMIN·discovery
-     * lineage 를 재검증하고 sourceDiscoveryJobId 를 가진 새 PROCESSING apply job id 를 돌려준다.
+     * LAND_AREA_SYNC confirmation-job admission RPC v2. actor SYSTEM_ADMIN·discovery
+     * lineage와 admission key request digest를 재검증하고, replay-safe apply job id를 돌려준다.
      */
     async createLandAreaSyncConfirmationJob(
         params: CreateConfirmationJobParams
     ): Promise<{ data: string | null; error: { message: string; code?: string } | null }> {
-        const { data, error } = await this.client.rpc('create_land_area_sync_confirmation_job_v1', {
+        const { data, error } = await this.client.rpc('create_land_area_sync_confirmation_job_v2', {
             p_union_id: params.p_union_id,
             p_discovery_job_id: params.p_discovery_job_id,
+            p_admission_key: params.p_admission_key,
             p_actor_user_id: params.p_actor_user_id,
             p_expected_scope_hash: params.p_expected_scope_hash,
             p_property_unit_ids: params.p_property_unit_ids,

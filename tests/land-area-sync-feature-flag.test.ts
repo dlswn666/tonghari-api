@@ -142,6 +142,7 @@ test('queue 이중 방어는 discovery INSERT와 apply admission 전에 OFF를 �
         queue.addDiscoveryJob({
             unionId: '00000000-0000-4000-a000-000000000001',
             anchorPnu: '1130510100107450001',
+            admissionKey: '00000000-0000-4000-b000-000000000001',
             actorUserId: 'system-admin',
             databaseTarget: 'production',
         }),
@@ -176,6 +177,7 @@ test('queue 이중 방어는 ON이어도 databaseTarget+union+anchor 불일치�
             queue.addDiscoveryJob({
                 unionId: '00000000-0000-4000-a000-000000000001',
                 anchorPnu: '1130510100107450001',
+                admissionKey: '00000000-0000-4000-b000-000000000001',
                 actorUserId: 'system-admin',
                 databaseTarget: 'production',
             }),

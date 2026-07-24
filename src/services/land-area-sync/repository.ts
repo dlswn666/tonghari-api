@@ -72,6 +72,7 @@ export async function insertDiscoveryJob(
                     schemaVersion: LAND_AREA_SYNC_SCHEMA_VERSION,
                     anchorPnu: input.anchorPnu,
                     sourceDiscoveryJobId: null,
+                    admissionKey: jobId,
                 },
             },
         })
@@ -115,6 +116,27 @@ export async function getLatestScopedJob(
         .maybeSingle();
     if (error) {
         throw Object.assign(new Error('LAND_AREA_SYNC latest 조회 실패'), { code: 'JOB_LOOKUP_FAILED' });
+    }
+    return (data as LandAreaSyncJobRow | null) ?? null;
+}
+
+/** response-loss 복구용 union+admissionKey exact 조회. actual job id는 admission key와 다를 수 있다. */
+export async function getScopedAdmissionJob(
+    client: SupabaseClient,
+    admissionKey: string,
+    unionId: string
+): Promise<LandAreaSyncJobRow | null> {
+    const { data, error } = await client
+        .from('sync_jobs')
+        .select(SELECT_COLUMNS)
+        .eq('union_id', unionId)
+        .eq('job_type', LAND_AREA_SYNC_JOB_TYPE)
+        .eq('preview_data->landAreaSync->>admissionKey', admissionKey)
+        .maybeSingle();
+    if (error) {
+        throw Object.assign(new Error('LAND_AREA_SYNC admission 조회 실패'), {
+            code: 'JOB_LOOKUP_FAILED',
+        });
     }
     return (data as LandAreaSyncJobRow | null) ?? null;
 }
@@ -200,6 +222,7 @@ export async function writeDiscoveryTerminal(
     unionId: string,
     input: TerminalInput
 ): Promise<boolean> {
+    const finalizedAt = new Date().toISOString();
     const previewData = await mergeLandAreaSync(client, jobId, unionId, {
         scopeState: input.scopeState,
         outcome: input.outcome,
@@ -207,12 +230,13 @@ export async function writeDiscoveryTerminal(
         issues: input.issues,
         issuesTotal: input.issuesTotal,
         issuesTruncated: input.issuesTruncated,
+        workerFinalization: { version: 1, finalizedAt },
     });
     const update: Record<string, unknown> = {
         status: input.status,
         progress: 100,
         preview_data: previewData,
-        updated_at: new Date().toISOString(),
+        updated_at: finalizedAt,
     };
     if (input.errorLog !== undefined) update.error_log = input.errorLog;
     const { data, error } = await client
@@ -231,64 +255,6 @@ export async function writeDiscoveryTerminal(
 }
 
 /**
- * apply RPC 가 terminal(status=COMPLETED)을 이미 기록한 뒤, 보호 대상이 아닌 scopeState 만
- * 반영한다(SINGLE_PNU_CONFIRMED / MANUAL_OVERWRITE_CONFIRMATION_REQUIRED 등). status 는 건드리지
- * 않는다. id+union+type 스코프.
- */
-export async function writeScopeState(
-    client: SupabaseClient,
-    jobId: string,
-    unionId: string,
-    scopeState: LandAreaSyncScopeState
-): Promise<boolean> {
-    const previewData = await mergeLandAreaSync(client, jobId, unionId, { scopeState });
-    const { data, error } = await client
-        .from('sync_jobs')
-        .update({ preview_data: previewData, updated_at: new Date().toISOString() })
-        .eq('id', jobId)
-        .eq('union_id', unionId)
-        .eq('job_type', LAND_AREA_SYNC_JOB_TYPE)
-        .select('id')
-        .maybeSingle();
-    if (error) return false;
-    return data?.id === jobId;
-}
-
-/**
- * apply RPC 가 terminal(status=COMPLETED)을 이미 기록한 뒤, scopeState 와 함께 병합된 terminal
- * issues(discovery extraIssues 포함)를 반영한다(Finding 3). status 는 건드리지 않고 보호 대상 6키도
- * mergeLandAreaSync 로 보존한다(snapshot guard 통과). id+union+type 스코프.
- */
-export async function writeAppliedIssues(
-    client: SupabaseClient,
-    jobId: string,
-    unionId: string,
-    patch: {
-        scopeState: LandAreaSyncScopeState;
-        issues: LandAreaSyncIssue[];
-        issuesTotal: number;
-        issuesTruncated: boolean;
-    }
-): Promise<boolean> {
-    const previewData = await mergeLandAreaSync(client, jobId, unionId, {
-        scopeState: patch.scopeState,
-        issues: patch.issues,
-        issuesTotal: patch.issuesTotal,
-        issuesTruncated: patch.issuesTruncated,
-    });
-    const { data, error } = await client
-        .from('sync_jobs')
-        .update({ preview_data: previewData, updated_at: new Date().toISOString() })
-        .eq('id', jobId)
-        .eq('union_id', unionId)
-        .eq('job_type', LAND_AREA_SYNC_JOB_TYPE)
-        .select('id')
-        .maybeSingle();
-    if (error) return false;
-    return data?.id === jobId;
-}
-
-/**
  * id+union+type 스코프 FAILED 기록. RPC EXCEPTION(rollback) 후 job 을 FAILED 로 남기거나
  * admission 실패 시 사용한다. scopeState=FAILED·outcome=FAILED 로 병합한다.
  *
@@ -302,9 +268,11 @@ export async function markScopedFailed(
     unionId: string,
     message: string
 ): Promise<boolean> {
+    const finalizedAt = new Date().toISOString();
     const previewData = await mergeLandAreaSync(client, jobId, unionId, {
         scopeState: 'FAILED',
         outcome: 'FAILED',
+        workerFinalization: { version: 1, finalizedAt },
     });
     const { data, error } = await client
         .from('sync_jobs')
@@ -313,7 +281,7 @@ export async function markScopedFailed(
             progress: 100,
             error_log: message,
             preview_data: previewData,
-            updated_at: new Date().toISOString(),
+            updated_at: finalizedAt,
         })
         .eq('id', jobId)
         .eq('union_id', unionId)

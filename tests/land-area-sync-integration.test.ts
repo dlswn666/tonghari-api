@@ -362,8 +362,10 @@ test('LDAREG_COMPLETE_ZERO(LINKED) → apply RPC 1회·NO_DATA (TITLE/ATTACHED/L
     });
     // LINKED 즉시적용 경로 — LDAREG zero 는 lifecycle 평가용 empty-component item으로 호출.
     assert.equal(spy.applyCalls, 1, 'LDAREG zero 는 apply RPC 1회(NO_DATA)');
-    assert.deepEqual(spy.scopeStateCalls, ['LINKED_SCOPE_RESOLVED']);
-    const params = spy.lastApplyParams as { p_items: unknown[] };
+    const params = spy.lastApplyParams as {
+        p_items: unknown[];
+        p_result_summary: { extraIssues: unknown[] };
+    };
     assert.deepEqual(params.p_items, [
         {
             propertyUnitId: LDAREG_PROPERTY.id,
@@ -371,6 +373,7 @@ test('LDAREG_COMPLETE_ZERO(LINKED) → apply RPC 1회·NO_DATA (TITLE/ATTACHED/L
             components: [],
         },
     ]);
+    assert.deepEqual(params.p_result_summary.extraIssues, []);
 });
 
 test('BASIS_COMPLETE_ZERO 는 TITLE_ONLY 정책에서 소비되지 않는다(basis endpoint 미호출)', async () => {

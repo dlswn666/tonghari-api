@@ -32,6 +32,7 @@ export const DEVELOPMENT_GIS_JWT_TTL_SECONDS = 10 * 60;
 export const DEVELOPMENT_API_QUEUE_TIMEOUT_MS = 10 * 60_000;
 export const DEVELOPMENT_JOB_POLL_SOFT_TIMEOUT_MS =
     DEVELOPMENT_API_QUEUE_TIMEOUT_MS + 60_000;
+export const DEVELOPMENT_ADMISSION_RECONCILIATION_ATTEMPTS = 10;
 
 export interface DevelopmentTargetManifest {
     version: typeof DEVELOPMENT_TARGET_MANIFEST_VERSION;
@@ -130,6 +131,11 @@ export interface LandAreaSyncApiJob {
     landAreaSync: {
         anchorPnu?: string;
         sourceDiscoveryJobId?: string | null;
+        admissionKey?: string;
+        workerFinalization?: {
+            version?: number;
+            finalizedAt?: string;
+        };
         scopeState?: LandAreaSyncScopeState;
         scopeSnapshot?: LandAreaSyncScopeSnapshot | null;
         branch?: LandAreaSyncStrategy | null;
@@ -137,6 +143,7 @@ export interface LandAreaSyncApiJob {
         counts?: Partial<LandAreaSyncCounts>;
         issues?: Array<{ code?: string }>;
         issuesTotal?: number;
+        issuesTruncated?: boolean;
     } | null;
     createdAt?: string;
     updatedAt?: string;
@@ -145,11 +152,21 @@ export interface LandAreaSyncApiJob {
 export interface LandAreaSyncApiClient {
     getLatest(unionId: string, pnu: string): Promise<LandAreaSyncApiJob | null>;
     getJob(unionId: string, jobId: string): Promise<LandAreaSyncApiJob>;
-    admitDiscovery(unionId: string, pnu: string): Promise<string>;
+    getAdmission?(
+        unionId: string,
+        admissionKey: string,
+        sourceDiscoveryJobId: string | null
+    ): Promise<LandAreaSyncApiJob | null>;
+    admitDiscovery(
+        unionId: string,
+        pnu: string,
+        admissionKey: string
+    ): Promise<string>;
     confirmDiscovery(
         discoveryJobId: string,
         body: {
             unionId: string;
+            admissionKey: string;
             expectedScopeHash: string;
             propertyUnitIds: string[];
             parcelScopeConfirmed: true;
@@ -940,17 +957,63 @@ export class LocalhostDevelopmentLandAreaSyncClient
         return job;
     }
 
-    async admitDiscovery(unionId: string, pnu: string): Promise<string> {
+    async getAdmission(
+        unionId: string,
+        admissionKey: string,
+        sourceDiscoveryJobId: string | null
+    ): Promise<LandAreaSyncApiJob | null> {
+        try {
+            const response = await this.request(
+                `/api/gis/land-area-sync/admissions/${encodeURIComponent(
+                    admissionKey
+                )}?unionId=${encodeURIComponent(
+                    unionId
+                )}&sourceDiscoveryJobId=${encodeURIComponent(
+                    sourceDiscoveryJobId ?? 'none'
+                )}`,
+                { method: 'GET' }
+            );
+            const job = requireApiJob(response.value);
+            if (
+                job.unionId.toLowerCase() !== unionId.toLowerCase() ||
+                job.landAreaSync?.admissionKey?.toLowerCase() !==
+                    admissionKey.toLowerCase() ||
+                job.landAreaSync?.sourceDiscoveryJobId !==
+                    sourceDiscoveryJobId
+            ) {
+                throw new ControlledRunnerError(
+                    'API_ADMISSION_SCOPE_MISMATCH'
+                );
+            }
+            return job;
+        } catch (error) {
+            if (
+                error instanceof ControlledApiError &&
+                error.status === 404 &&
+                error.code === 'JOB_NOT_FOUND'
+            ) {
+                return null;
+            }
+            throw error;
+        }
+    }
+
+    async admitDiscovery(
+        unionId: string,
+        pnu: string,
+        admissionKey: string
+    ): Promise<string> {
         const response = await this.request('/api/gis/land-area-sync', {
             method: 'POST',
-            body: { unionId, anchorPnu: pnu },
+            body: { unionId, anchorPnu: pnu, admissionKey },
         });
         const value = asRecord(response.value, 'API_RESPONSE_INVALID');
         if (
             response.status !== 202 ||
             value.success !== true ||
             typeof value.jobId !== 'string' ||
-            !UUID_RE.test(value.jobId)
+            !UUID_RE.test(value.jobId) ||
+            value.jobId.toLowerCase() !== admissionKey.toLowerCase()
         ) {
             throw new ControlledRunnerError('API_RESPONSE_INVALID');
         }
@@ -1039,11 +1102,20 @@ function hasBlockingIssue(job: LandAreaSyncApiJob): boolean {
     return codes.some((code) => blockingPattern.test(code));
 }
 
-function isAmbiguousApiNetworkError(error: unknown): boolean {
+function isAmbiguousAdmissionError(error: unknown): boolean {
     return (
         error instanceof ControlledApiError &&
-        error.status === 0 &&
-        error.code === 'API_NETWORK_ERROR'
+        (error.status === 0 ||
+            (error.status >= 500 && error.status <= 599))
+    );
+}
+
+function hasWorkerFinalization(job: LandAreaSyncApiJob): boolean {
+    const receipt = job.landAreaSync?.workerFinalization;
+    return (
+        receipt?.version === 1 &&
+        typeof receipt.finalizedAt === 'string' &&
+        !Number.isNaN(Date.parse(receipt.finalizedAt))
     );
 }
 
@@ -1051,33 +1123,77 @@ async function reconcileAmbiguousAdmission(input: {
     client: LandAreaSyncApiClient;
     unionId: string;
     pnu: string;
+    admissionKey: string;
     sourceDiscoveryJobId: string | null;
     pollIntervalMs: number;
+    maxAttempts: number;
     sleep: (milliseconds: number) => Promise<void>;
+    replayAdmission: () => Promise<string>;
 }): Promise<LandAreaSyncApiJob> {
-    // POST 응답이 유실되면 서버가 durable job을 만들었는지 클라이언트가 알 수
-    // 없다. cancel/idempotency endpoint가 없으므로 latest lineage가 나타날 때까지
-    // operation lock을 보유한다. 영구 미확인은 영구 lock인 fail-closed 상태다.
-    for (;;) {
+    // 최초 POST는 동일 admission UUID로 한 번 호출한다. 5xx/timeout이면 latest를
+    // 추정하지 않고 exact durable id만 제한된 횟수 조회한다. durable PROCESSING 행을
+    // 찾은 경우에만 DB INSERT 뒤 메모리 queue admission 유실을 복구하도록 같은
+    // admission UUID/digest POST를 한 번 재전송하고 immutable receipt까지 drain한다.
+    for (let attempt = 0; attempt < input.maxAttempts; attempt += 1) {
         await input.sleep(input.pollIntervalMs);
-        try {
-            const latest = await input.client.getLatest(
-                input.unionId,
-                input.pnu
+        if (!input.client.getAdmission) {
+            throw new ControlledRunnerError(
+                'ADMISSION_LOOKUP_UNAVAILABLE'
             );
-            if (
-                latest &&
-                (input.sourceDiscoveryJobId === null
-                    ? latest.landAreaSync?.sourceDiscoveryJobId == null
-                    : latest.landAreaSync?.sourceDiscoveryJobId ===
-                      input.sourceDiscoveryJobId)
-            ) {
-                return latest;
+        }
+        let exact: LandAreaSyncApiJob | null = null;
+        try {
+            exact = await input.client.getAdmission(
+                input.unionId,
+                input.admissionKey,
+                input.sourceDiscoveryJobId
+            );
+        } catch (error) {
+            if (!isAmbiguousAdmissionError(error)) {
+                throw error;
             }
-        } catch {
-            // 승인 여부가 불명확한 동안에는 반환하지 않는다.
+            // 일시적 network/5xx만 bounded window 안에서 다시 확인한다.
+            continue;
+        }
+        if (
+            exact &&
+            exact.landAreaSync?.admissionKey?.toLowerCase() ===
+                input.admissionKey.toLowerCase() &&
+            exact.landAreaSync?.anchorPnu === input.pnu &&
+            (input.sourceDiscoveryJobId === null
+                ? exact.landAreaSync?.sourceDiscoveryJobId == null
+                : exact.landAreaSync?.sourceDiscoveryJobId ===
+                  input.sourceDiscoveryJobId)
+        ) {
+            if (
+                exact.status === 'PROCESSING' &&
+                !hasWorkerFinalization(exact)
+            ) {
+                try {
+                    const replayedJobId =
+                        await input.replayAdmission();
+                    if (
+                        replayedJobId.toLowerCase() !==
+                        exact.jobId.toLowerCase()
+                    ) {
+                        throw new ControlledRunnerError(
+                            'ADMISSION_REPLAY_JOB_MISMATCH'
+                        );
+                    }
+                } catch (error) {
+                    if (!isAmbiguousAdmissionError(error)) {
+                        throw error;
+                    }
+                    // replay response도 유실될 수 있으나 exact durable job은 이미
+                    // 확인했으므로 해당 job의 immutable receipt까지 drain한다.
+                }
+            }
+            return exact;
         }
     }
+    throw new ControlledRunnerError(
+        'AMBIGUOUS_ADMISSION_NOT_DURABLE'
+    );
 }
 
 async function pollTerminal(
@@ -1098,7 +1214,11 @@ async function pollTerminal(
     let current = initial;
     const deadline = input.nowMs() + input.jobTimeoutMs;
     let softDeadlineExceeded = false;
-    while (current === null || current.status === 'PROCESSING') {
+    while (
+        current === null ||
+        current.status === 'PROCESSING' ||
+        !hasWorkerFinalization(current)
+    ) {
         if (input.nowMs() >= deadline) {
             // p-queue의 10분 제한은 worker 실행 상한이며 queue 대기 시간은 별도다.
             // deadline 이후에도 durable terminal을 확인할 때까지 drain하여 runner/SSH
@@ -1148,12 +1268,48 @@ function resultFromJob(
 function assertAppliedTerminal(job: LandAreaSyncApiJob): void {
     if (
         job.status !== 'COMPLETED' ||
+        !hasWorkerFinalization(job) ||
         job.landAreaSync?.outcome !== 'APPLIED' ||
         job.landAreaSync.scopeState === 'REVIEW_REQUIRED' ||
         job.landAreaSync.scopeState === 'FAILED' ||
         hasBlockingIssue(job)
     ) {
         throw new ControlledRunnerError('APPLY_TERMINAL_NOT_PASS');
+    }
+    assertCompleteTerminalIssues(
+        job,
+        'APPLY_TERMINAL_ISSUES_INCOMPLETE'
+    );
+}
+
+function assertCompleteTerminalIssues(
+    job: LandAreaSyncApiJob,
+    failureCode: string
+): void {
+    const issues = job.landAreaSync?.issues;
+    const issuesTotal = job.landAreaSync?.issuesTotal;
+    const issuesTruncated = job.landAreaSync?.issuesTruncated;
+    if (
+        !Array.isArray(issues) ||
+        issues.length > 200 ||
+        !Number.isSafeInteger(issuesTotal) ||
+        (issuesTotal as number) < issues.length ||
+        typeof issuesTruncated !== 'boolean' ||
+        issuesTruncated !== ((issuesTotal as number) > issues.length) ||
+        !issues.every(
+            (issue) =>
+                issue !== null &&
+                typeof issue === 'object' &&
+                typeof issue.code === 'string' &&
+                /^[A-Z0-9_]{1,100}$/.test(issue.code)
+        )
+    ) {
+        throw new ControlledRunnerError(failureCode);
+    }
+    // 일반 terminal은 capped shape를 허용하지만 이 canary PASS는 전체 이슈를
+    // 관측했을 때만 가능하다.
+    if (issuesTruncated || issuesTotal !== issues.length) {
+        throw new ControlledRunnerError(failureCode);
     }
 }
 
@@ -1477,8 +1633,10 @@ export async function runDevelopmentLandAreaSync(input: {
     preflightReader: DevelopmentReadOnlyPreflightReader;
     pollIntervalMs?: number;
     jobTimeoutMs?: number;
+    admissionReconciliationAttempts?: number;
     sleep?: (milliseconds: number) => Promise<void>;
     now?: () => Date;
+    createAdmissionKey?: () => string;
 }): Promise<DevelopmentRunArtifact> {
     validateDevelopmentRunnerManifests(
         input.target,
@@ -1488,13 +1646,19 @@ export async function runDevelopmentLandAreaSync(input: {
     const pollIntervalMs = input.pollIntervalMs ?? 3_000;
     const jobTimeoutMs =
         input.jobTimeoutMs ?? DEVELOPMENT_JOB_POLL_SOFT_TIMEOUT_MS;
+    const admissionReconciliationAttempts =
+        input.admissionReconciliationAttempts ??
+        DEVELOPMENT_ADMISSION_RECONCILIATION_ATTEMPTS;
     if (
         !Number.isSafeInteger(pollIntervalMs) ||
         pollIntervalMs < 100 ||
         pollIntervalMs > 30_000 ||
         !Number.isSafeInteger(jobTimeoutMs) ||
         jobTimeoutMs < DEVELOPMENT_JOB_POLL_SOFT_TIMEOUT_MS ||
-        jobTimeoutMs > 30 * 60_000
+        jobTimeoutMs > 30 * 60_000 ||
+        !Number.isSafeInteger(admissionReconciliationAttempts) ||
+        admissionReconciliationAttempts < 1 ||
+        admissionReconciliationAttempts > 100
     ) {
         throw new ControlledRunnerError('POLL_CONFIGURATION_INVALID');
     }
@@ -1503,6 +1667,7 @@ export async function runDevelopmentLandAreaSync(input: {
         ((milliseconds: number) =>
             new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
     const now = input.now ?? (() => new Date());
+    const createAdmissionKey = input.createAdmissionKey ?? randomUUID;
     const startedAt = now().toISOString();
     const results: DevelopmentRunTargetResult[] = [];
     const observedPropertyUnitIds = new Set<string>();
@@ -1546,28 +1711,44 @@ export async function runDevelopmentLandAreaSync(input: {
             let applyJobId: string | null = null;
             if (!latest) {
                 admission = 'NEW_DISCOVERY';
+                const discoveryAdmissionKey = createAdmissionKey();
+                if (!UUID_RE.test(discoveryAdmissionKey)) {
+                    throw new ControlledRunnerError(
+                        'ADMISSION_KEY_INVALID'
+                    );
+                }
                 try {
                     discoveryJobId =
                         await input.client.admitDiscovery(
                             input.target.unionId,
-                            pnu
+                            pnu,
+                            discoveryAdmissionKey
                         );
                 } catch (error) {
-                    if (!isAmbiguousApiNetworkError(error)) {
+                    if (!isAmbiguousAdmissionError(error)) {
                         throw error;
                     }
                     latest = await reconcileAmbiguousAdmission({
                         client: input.client,
                         unionId: input.target.unionId,
                         pnu,
+                        admissionKey: discoveryAdmissionKey,
                         sourceDiscoveryJobId: null,
                         pollIntervalMs,
+                        maxAttempts: admissionReconciliationAttempts,
                         sleep,
+                        replayAdmission: () =>
+                            input.client.admitDiscovery(
+                                input.target.unionId,
+                                pnu,
+                                discoveryAdmissionKey
+                            ),
                     });
                     discoveryJobId = latest.jobId;
                 }
             } else if (
                 latest.status === 'COMPLETED' &&
+                hasWorkerFinalization(latest) &&
                 latest.landAreaSync?.outcome === 'APPLIED'
             ) {
                 admission = 'ALREADY_APPLIED';
@@ -1614,6 +1795,10 @@ export async function runDevelopmentLandAreaSync(input: {
                 terminal.landAreaSync?.scopeState ===
                     'MANUAL_OVERWRITE_CONFIRMATION_REQUIRED'
             ) {
+                assertCompleteTerminalIssues(
+                    terminal,
+                    'DISCOVERY_TERMINAL_ISSUES_INCOMPLETE'
+                );
                 if (hasBlockingIssue(terminal)) {
                     throw new ControlledRunnerError(
                         'DISCOVERY_BLOCKING_ISSUE'
@@ -1638,33 +1823,43 @@ export async function runDevelopmentLandAreaSync(input: {
                         ? evidence.landOwnershipEvidence!
                         : null;
                 let reconciledApply: LandAreaSyncApiJob | null = null;
+                const applyAdmissionKey = createAdmissionKey();
+                if (!UUID_RE.test(applyAdmissionKey)) {
+                    throw new ControlledRunnerError(
+                        'ADMISSION_KEY_INVALID'
+                    );
+                }
+                const confirmationBody: Parameters<
+                    LandAreaSyncApiClient['confirmDiscovery']
+                >[1] = {
+                    unionId: input.target.unionId,
+                    admissionKey: applyAdmissionKey,
+                    expectedScopeHash: snapshot.scopeHash,
+                    propertyUnitIds:
+                        snapshot.candidatePropertyUnitIds,
+                    parcelScopeConfirmed: true,
+                    landOwnershipConfirmed:
+                        evidence.expectedStrategy === 'LADFRL'
+                            ? true
+                            : null,
+                    overwriteManualConfirmed: isManual,
+                    parcelScopeEvidenceKind:
+                        evidence.parcelScopeEvidence.kind,
+                    parcelScopeEvidenceRef:
+                        evidence.parcelScopeEvidence.ref,
+                    landOwnershipEvidenceKind:
+                        ownership?.kind ?? null,
+                    landOwnershipEvidenceRef:
+                        ownership?.ref ?? null,
+                };
                 try {
                     applyJobId =
                         await input.client.confirmDiscovery(
                             discoveryJobId,
-                            {
-                                unionId: input.target.unionId,
-                                expectedScopeHash: snapshot.scopeHash,
-                                propertyUnitIds:
-                                    snapshot.candidatePropertyUnitIds,
-                                parcelScopeConfirmed: true,
-                                landOwnershipConfirmed:
-                                    evidence.expectedStrategy === 'LADFRL'
-                                        ? true
-                                        : null,
-                                overwriteManualConfirmed: isManual,
-                                parcelScopeEvidenceKind:
-                                    evidence.parcelScopeEvidence.kind,
-                                parcelScopeEvidenceRef:
-                                    evidence.parcelScopeEvidence.ref,
-                                landOwnershipEvidenceKind:
-                                    ownership?.kind ?? null,
-                                landOwnershipEvidenceRef:
-                                    ownership?.ref ?? null,
-                            }
+                            confirmationBody
                         );
                 } catch (error) {
-                    if (!isAmbiguousApiNetworkError(error)) {
+                    if (!isAmbiguousAdmissionError(error)) {
                         throw error;
                     }
                     reconciledApply =
@@ -1672,9 +1867,16 @@ export async function runDevelopmentLandAreaSync(input: {
                             client: input.client,
                             unionId: input.target.unionId,
                             pnu,
+                            admissionKey: applyAdmissionKey,
                             sourceDiscoveryJobId: discoveryJobId,
                             pollIntervalMs,
+                            maxAttempts: admissionReconciliationAttempts,
                             sleep,
+                            replayAdmission: () =>
+                                input.client.confirmDiscovery(
+                                    discoveryJobId!,
+                                    confirmationBody
+                                ),
                         });
                     applyJobId = reconciledApply.jobId;
                 }

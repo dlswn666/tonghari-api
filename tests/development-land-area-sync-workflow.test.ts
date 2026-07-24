@@ -166,7 +166,7 @@ test('runner soft timeout은 API queue 10분보다 길고 terminal 전 반환하
     );
     assert.match(
         runner,
-        /while \(current === null \|\| current\.status === 'PROCESSING'\)/
+        /current\.status === 'PROCESSING'[\s\S]+!hasWorkerFinalization\(current\)/
     );
     assert.match(runner, /JOB_POLL_SOFT_TIMEOUT_AFTER_TERMINAL/);
 });
