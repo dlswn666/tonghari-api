@@ -744,6 +744,79 @@ test('직렬 runner는 discovery terminal을 증거와 exact 대조한 뒤 1회 
     );
 });
 
+test('discovery 증거 불일치는 raw 값을 노출하지 않는 필드별 코드로 쓰기 전 중단한다', async () => {
+    const targetManifest = target();
+    const evidenceManifest = evidence(targetManifest);
+    const baseSnapshot = snapshot();
+    const cases: Array<{
+        name: string;
+        scopeSnapshot: LandAreaSyncScopeSnapshot;
+        expectedCode: string;
+    }> = [
+        {
+            name: 'property units',
+            scopeSnapshot: {
+                ...baseSnapshot,
+                candidatePropertyUnitIds: [
+                    'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+                ],
+            },
+            expectedCode: 'JOB_EVIDENCE_PROPERTY_UNITS_MISMATCH',
+        },
+        {
+            name: 'LADFRL total',
+            scopeSnapshot: {
+                ...baseSnapshot,
+                ladfrlAreaEvidence: {
+                    ...baseSnapshot.ladfrlAreaEvidence!,
+                    totalArea: '162',
+                },
+            },
+            expectedCode: 'JOB_EVIDENCE_LADFRL_TOTAL_MISMATCH',
+        },
+    ];
+
+    for (const testCase of cases) {
+        let confirms = 0;
+        const artifact = await runDevelopmentLandAreaSync({
+            target: targetManifest,
+            dbApproval: approval(targetManifest),
+            evidence: evidenceManifest,
+            client: {
+                async getLatest() {
+                    return job(DISCOVERY_JOB_ID, {
+                        status: 'COMPLETED',
+                        scopeState:
+                            'SINGLE_SCOPE_CONFIRMATION_REQUIRED',
+                        outcome: 'REVIEW_REQUIRED',
+                        scopeSnapshot: testCase.scopeSnapshot,
+                    });
+                },
+                async getJob() {
+                    throw new Error('호출되면 안 됨');
+                },
+                async admitDiscovery() {
+                    throw new Error('호출되면 안 됨');
+                },
+                async confirmDiscovery() {
+                    confirms += 1;
+                    return APPLY_JOB_ID;
+                },
+            },
+            preflightReader: preflightReader(
+                evidenceManifest.entries
+            ),
+        });
+
+        assert.equal(
+            artifact.gate.failureCode,
+            testCase.expectedCode,
+            testCase.name
+        );
+        assert.equal(confirms, 0, testCase.name);
+    }
+});
+
 test('latest DB COMPLETED라도 receipt 전에는 terminal로 보지 않고 finalized row를 다시 읽는다', async () => {
     const targetManifest = target();
     const evidenceManifest = evidence(targetManifest);
