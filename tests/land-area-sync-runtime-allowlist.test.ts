@@ -39,6 +39,8 @@ test('enable은 production, wildcard, duplicate, 비정규 raw allowlist를 거�
         `development:${UNION.toUpperCase()}:${PNU_A}`,
         `development:${UNION}:${PNU_B},development:${UNION}:${PNU_A}`,
         `development:${UNION}:${PNU_A}, development:${UNION}:${PNU_B}`,
+        `development:${UNION}:${PNU_A}\n`,
+        `development:${UNION}:${PNU_A}\0`,
     ];
 
     for (const rawAllowedTargets of rejected) {

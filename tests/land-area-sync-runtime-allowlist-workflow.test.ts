@@ -14,6 +14,10 @@ const dockerBuildWorkflow = readFileSync(
     join(process.cwd(), '.github/workflows/docker-build.yml'),
     'utf8'
 );
+const phase0CaptureWorkflow = readFileSync(
+    join(process.cwd(), '.github/workflows/phase0-land-area-capture.yml'),
+    'utf8'
+);
 
 test('runtime allowlist workflow는 main workflow_dispatch와 보호 environment만 사용한다', () => {
     assert.match(workflow, /^on:\n  workflow_dispatch:/m);
@@ -24,23 +28,51 @@ test('runtime allowlist workflow는 main workflow_dispatch와 보호 environment
         workflow,
         /environment: land-area-sync-development-backfill/
     );
-    assert.match(workflow, /group: tonghari-api-production/);
+    assert.match(
+        workflow,
+        /group: tonghari-api-production-runtime-\$\{\{ inputs\.action \}\}/
+    );
     assert.match(workflow, /cancel-in-progress: false/);
 });
 
-test('runtime allowlist workflow는 raw 입력을 validator와 mode 600 파일로만 전달한다', () => {
+test('runtime allowlist workflow는 event payload에서 raw를 읽고 exact mask 뒤에만 사용한다', () => {
     assert.match(
         workflow,
         /node dist\/cli\/land-area-sync-runtime-allowlist\.js/
+    );
+    assert.match(workflow, /GITHUB_EVENT_PATH/);
+    assert.match(
+        workflow,
+        /event\?\.inputs\?\.land_area_sync_allowed_targets/
+    );
+    assert.match(workflow, /::add-mask::\$\{commandValue\}/);
+    assert.match(workflow, /\.replaceAll\("%", "%25"\)/);
+    assert.match(workflow, /\.replaceAll\("\\r", "%0D"\)/);
+    assert.match(workflow, /\.replaceAll\("\\n", "%0A"\)/);
+    assert.ok(
+        workflow.indexOf('::add-mask::${commandValue}') <
+            workflow.indexOf('fs.writeFileSync(outputPath, raw'),
+        'exact raw mask는 staged file 사용보다 먼저 등록해야 한다'
     );
     assert.match(
         workflow,
         /install -m 600 \/dev\/null "\$\{allowlist_path\}"/
     );
+    assert.doesNotMatch(
+        workflow,
+        /\$\{\{ inputs\.land_area_sync_allowed_targets \}\}/
+    );
+    assert.doesNotMatch(workflow, /RAW_ALLOWED_TARGETS:/);
     assert.match(
         workflow,
-        /printf '%s' "\$\{RAW_ALLOWED_TARGETS\}" > "\$\{allowlist_path\}"/
+        /IFS= read -r -d '' LAND_AREA_SYNC_ALLOWED_TARGETS/
     );
+    assert.match(workflow, /IFS= read -r -d '' raw_allowed_targets/);
+    assert.doesNotMatch(
+        workflow,
+        /LAND_AREA_SYNC_ALLOWED_TARGETS="\$\(</
+    );
+    assert.doesNotMatch(workflow, /raw_allowed_targets="\$\(</);
     assert.doesNotMatch(workflow, /echo [^\n]*RAW_ALLOWED_TARGETS/);
     assert.doesNotMatch(workflow, /echo [^\n]*EC2_SSH_KEY/);
     assert.doesNotMatch(workflow, /set -x/);
@@ -87,6 +119,76 @@ test('runtime allowlist workflow는 현재 image ID, health attestation, rollbac
     );
     assert.doesNotMatch(workflow, /docker pull/);
     assert.doesNotMatch(workflow, /docker build/);
+});
+
+test('모든 production workflow는 동일한 EC2 advisory lock 계약을 강제한다', () => {
+    for (const productionWorkflow of [
+        workflow,
+        dockerBuildWorkflow,
+        phase0CaptureWorkflow,
+    ]) {
+        assert.match(
+            productionWorkflow,
+            /\.tonghari-api-production\.lock/
+        );
+        assert.match(productionWorkflow, /exec 9>>"\$\{production_lock_path\}"/);
+        assert.match(productionWorkflow, /flock -w 2400 9/);
+        assert.match(
+            productionWorkflow,
+            /deploy-user-owned regular mode 600 file/
+        );
+    }
+});
+
+test('컨테이너 재기동 workflow는 future runner와 동일한 bounded operation lock을 사용한다', () => {
+    for (const restartWorkflow of [workflow, dockerBuildWorkflow]) {
+        assert.match(restartWorkflow, /\.land-area-sync-operation\.lock/);
+        assert.match(
+            restartWorkflow,
+            /exec 8>>"\$\{operation_lock_path\}"/
+        );
+        assert.match(restartWorkflow, /flock -w 2700 8/);
+        assert.match(
+            restartWorkflow,
+            /Land-area operation lock must be a deploy-user-owned regular mode 600 file/
+        );
+        assert.ok(
+            restartWorkflow.indexOf('flock -w 2400 9') <
+                restartWorkflow.indexOf('flock -w 2700 8'),
+            'production lock은 operation lock보다 먼저 획득해야 한다'
+        );
+    }
+    assert.match(workflow, /batch runner는[\s\S]*최대 2400초만 보유/);
+});
+
+test('runtime action slot과 monotonic sequence는 pending disable 대체와 stale enable을 막는다', () => {
+    assert.match(
+        workflow,
+        /group: tonghari-api-production-runtime-\$\{\{ inputs\.action \}\}/
+    );
+    assert.match(workflow, /REQUEST_SEQUENCE: \$\{\{ github\.run_id \}\}/);
+    assert.match(workflow, /\.land-area-sync-runtime-sequence/);
+    assert.match(workflow, /REQUEST_SEQUENCE < last_sequence/);
+    assert.match(workflow, /Stale enable request skipped/);
+    assert.match(
+        workflow,
+        /Stale enable request skipped[\s\S]*exit 75/
+    );
+    assert.match(
+        workflow,
+        /disable은 안전 동작이므로 stale이어도 실행/
+    );
+    assert.match(
+        workflow,
+        /sequence_to_store.*RUNTIME_ACTION.*runtime_sequence_path/s
+    );
+    assert.ok(
+        workflow.indexOf(
+            'mv -f -- "${sequence_next}" "${runtime_sequence_path}"'
+        ) <
+            workflow.indexOf('mv -f -- "${env_next}" "${env_path}"'),
+        'sequence intent는 runtime env 변경보다 먼저 원자적으로 기록해야 한다'
+    );
 });
 
 test('runtime allowlist workflow는 Supabase나 DB에 연결하거나 운영 target을 구성하지 않는다', () => {

@@ -29,7 +29,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: tonghari-api-production
+  # enable과 disable을 같은 pending slot에 두면 후속 enable이 pending disable을
+  # 대체할 수 있다. action별 slot과 EC2 lock/sequence를 함께 사용한다.
+  group: tonghari-api-production-runtime-${{ inputs.action }}
   cancel-in-progress: false
 
 jobs:
@@ -57,6 +59,42 @@ jobs:
       - name: Checkout exact main revision
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
+      - name: Read and mask raw allowlist from the event payload
+        id: validate-runtime-input
+        shell: bash
+        env:
+          RUN_KEY: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${RUN_KEY}" =~ ^[0-9]+-[0-9]+$ ]]; then
+            echo "::error::Invalid workflow run key."
+            exit 1
+          fi
+          local_root="${RUNNER_TEMP}/land-area-sync-validate-${RUN_KEY}"
+          install -d -m 700 "${local_root}"
+          allowlist_path="${local_root}/allowlist"
+          install -m 600 /dev/null "${allowlist_path}"
+
+          node -e '
+            const fs = require("node:fs");
+            const eventPath = process.argv[1];
+            const outputPath = process.argv[2];
+            const event = JSON.parse(fs.readFileSync(eventPath, "utf8"));
+            const raw = event?.inputs?.land_area_sync_allowed_targets ?? "";
+            if (typeof raw !== "string" || raw.includes("\0")) process.exit(1);
+            if (raw.length > 0) {
+              const commandValue = raw
+                .replaceAll("%", "%25")
+                .replaceAll("\r", "%0D")
+                .replaceAll("\n", "%0A");
+              process.stdout.write(`::add-mask::${commandValue}\n`);
+            }
+            fs.writeFileSync(outputPath, raw, { mode: 0o600 });
+          ' "${GITHUB_EVENT_PATH}" "${allowlist_path}"
+
+          echo "path=${allowlist_path}" >> "${GITHUB_OUTPUT}"
+
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
@@ -76,12 +114,21 @@ jobs:
         shell: bash
         env:
           LAND_AREA_SYNC_RUNTIME_ACTION: ${{ inputs.action }}
-          LAND_AREA_SYNC_ALLOWED_TARGETS: ${{ inputs.land_area_sync_allowed_targets }}
+          ALLOWLIST_PATH: ${{ steps.validate-runtime-input.outputs.path }}
           EXPECTED_ALLOWLIST_COUNT: ${{ inputs.expected_allowlist_count }}
           EXPECTED_ALLOWLIST_DIGEST: ${{ inputs.expected_allowlist_sha256 }}
         run: |
           set -euo pipefail
 
+          if [[ ! -f "${ALLOWLIST_PATH}" || -L "${ALLOWLIST_PATH}" ]] \
+            || [[ "$(stat -c '%a' "${ALLOWLIST_PATH}")" != "600" ]]; then
+            echo "::error::Masked allowlist input is not a protected regular file."
+            exit 1
+          fi
+          LAND_AREA_SYNC_ALLOWED_TARGETS=""
+          IFS= read -r -d '' LAND_AREA_SYNC_ALLOWED_TARGETS \
+            < "${ALLOWLIST_PATH}" || true
+          export LAND_AREA_SYNC_ALLOWED_TARGETS
           attestation="$(
             node dist/cli/land-area-sync-runtime-allowlist.js
           )"
@@ -104,13 +151,61 @@ jobs:
           echo "digest=${actual_digest}" >> "${GITHUB_OUTPUT}"
           echo "Runtime manifest validated (count=${actual_count}, digest=${actual_digest:-empty})."
 
+      - name: Remove staged validator input
+        if: always()
+        shell: bash
+        env:
+          ALLOWLIST_PATH: ${{ steps.validate-runtime-input.outputs.path }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${ALLOWLIST_PATH}" && -f "${ALLOWLIST_PATH}" ]] \
+            && [[ ! -L "${ALLOWLIST_PATH}" ]]; then
+            rm -f -- "${ALLOWLIST_PATH}"
+          fi
+
   apply-runtime-gate:
     name: Apply or disable development runtime gate
     needs: validate
     runs-on: ubuntu-latest
     environment: land-area-sync-development-backfill
-    timeout-minutes: 15
+    timeout-minutes: 100
     steps:
+      - name: Read and mask raw allowlist from the event payload
+        id: runtime-input
+        shell: bash
+        env:
+          RUN_KEY: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${RUN_KEY}" =~ ^[0-9]+-[0-9]+$ ]]; then
+            echo "::error::Invalid workflow run key."
+            exit 1
+          fi
+          local_root="${RUNNER_TEMP}/land-area-sync-runtime-${RUN_KEY}"
+          install -d -m 700 "${local_root}"
+          allowlist_path="${local_root}/allowlist"
+          install -m 600 /dev/null "${allowlist_path}"
+
+          node -e '
+            const fs = require("node:fs");
+            const eventPath = process.argv[1];
+            const outputPath = process.argv[2];
+            const event = JSON.parse(fs.readFileSync(eventPath, "utf8"));
+            const raw = event?.inputs?.land_area_sync_allowed_targets ?? "";
+            if (typeof raw !== "string" || raw.includes("\0")) process.exit(1);
+            if (raw.length > 0) {
+              const commandValue = raw
+                .replaceAll("%", "%25")
+                .replaceAll("\r", "%0D")
+                .replaceAll("\n", "%0A");
+              process.stdout.write(`::add-mask::${commandValue}\n`);
+            }
+            fs.writeFileSync(outputPath, raw, { mode: 0o600 });
+          ' "${GITHUB_EVENT_PATH}" "${allowlist_path}"
+
+          echo "path=${allowlist_path}" >> "${GITHUB_OUTPUT}"
+
       - name: Require EC2 connection secrets
         shell: bash
         env:
@@ -189,26 +284,6 @@ jobs:
           printf '%s\n' "${matched_host_key}" > "${HOME}/.ssh/known_hosts"
           chmod 600 "${HOME}/.ssh/known_hosts"
 
-      - name: Stage raw allowlist without printing it
-        id: runtime-input
-        shell: bash
-        env:
-          RAW_ALLOWED_TARGETS: ${{ inputs.land_area_sync_allowed_targets }}
-          RUN_KEY: ${{ github.run_id }}-${{ github.run_attempt }}
-        run: |
-          set -euo pipefail
-
-          if [[ ! "${RUN_KEY}" =~ ^[0-9]+-[0-9]+$ ]]; then
-            echo "::error::Invalid workflow run key."
-            exit 1
-          fi
-          local_root="${RUNNER_TEMP}/land-area-sync-runtime-${RUN_KEY}"
-          install -d -m 700 "${local_root}"
-          allowlist_path="${local_root}/allowlist"
-          install -m 600 /dev/null "${allowlist_path}"
-          printf '%s' "${RAW_ALLOWED_TARGETS}" > "${allowlist_path}"
-          echo "path=${allowlist_path}" >> "${GITHUB_OUTPUT}"
-
       - name: Apply atomic EC2 runtime change using the current immutable image
         shell: bash
         env:
@@ -216,6 +291,7 @@ jobs:
           EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
           ALLOWLIST_PATH: ${{ steps.runtime-input.outputs.path }}
           RUN_KEY: ${{ github.run_id }}-${{ github.run_attempt }}
+          REQUEST_SEQUENCE: ${{ github.run_id }}
           RUNTIME_ACTION: ${{ inputs.action }}
           EXPECTED_ALLOWLIST_COUNT: ${{ needs.validate.outputs.count }}
           EXPECTED_ALLOWLIST_DIGEST: ${{ needs.validate.outputs.digest }}
@@ -224,6 +300,10 @@ jobs:
 
           if [[ ! "${RUN_KEY}" =~ ^[0-9]+-[0-9]+$ ]]; then
             echo "::error::Invalid workflow run key."
+            exit 1
+          fi
+          if [[ ! "${REQUEST_SEQUENCE}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::Invalid runtime request sequence."
             exit 1
           fi
           if [[ ! "${RUNTIME_ACTION}" =~ ^(enable|disable)$ ]]; then
@@ -297,10 +377,11 @@ jobs:
             "${EC2_USERNAME}@${EC2_HOST}:${remote_root}/allowlist"
 
           ssh "${ssh_options[@]}" "${EC2_USERNAME}@${EC2_HOST}" \
-            "RUN_KEY='${RUN_KEY}' RUNTIME_ACTION='${RUNTIME_ACTION}' EXPECTED_ALLOWLIST_COUNT='${EXPECTED_ALLOWLIST_COUNT}' EXPECTED_ALLOWLIST_DIGEST='${EXPECTED_ALLOWLIST_DIGEST}' bash -s" <<'REMOTE_RUNTIME'
+            "RUN_KEY='${RUN_KEY}' REQUEST_SEQUENCE='${REQUEST_SEQUENCE}' RUNTIME_ACTION='${RUNTIME_ACTION}' EXPECTED_ALLOWLIST_COUNT='${EXPECTED_ALLOWLIST_COUNT}' EXPECTED_ALLOWLIST_DIGEST='${EXPECTED_ALLOWLIST_DIGEST}' bash -s" <<'REMOTE_RUNTIME'
           set -Eeuo pipefail
 
           [[ "${RUN_KEY}" =~ ^[0-9]+-[0-9]+$ ]]
+          [[ "${REQUEST_SEQUENCE}" =~ ^[1-9][0-9]*$ ]]
           [[ "${RUNTIME_ACTION}" =~ ^(enable|disable)$ ]]
           [[ "${EXPECTED_ALLOWLIST_COUNT}" =~ ^[0-9]+$ ]]
           if [[ -n "${EXPECTED_ALLOWLIST_DIGEST}" ]]; then
@@ -314,9 +395,19 @@ jobs:
           candidate_container="${container_name}-runtime-candidate"
           rollback_container="${container_name}-runtime-rollback"
           env_path="${application_root}/.env"
+          production_lock_path="${application_root}/.tonghari-api-production.lock"
+          operation_lock_path="${application_root}/.land-area-sync-operation.lock"
+          runtime_sequence_path="${application_root}/.land-area-sync-runtime-sequence"
           env_backup=""
           env_next=""
           env_replaced=0
+          sequence_backup=""
+          sequence_next=""
+          sequence_replaced=0
+          sequence_had_previous=0
+          last_sequence=0
+          last_sequence_action="disable"
+          sequence_to_store="${REQUEST_SEQUENCE}"
           previous_renamed=0
           new_current_attempted=0
           current_image_id=""
@@ -400,8 +491,54 @@ jobs:
             [[ "${actual_health}" == "${expected_health}" ]]
           }
 
+          acquire_production_lock() {
+            if [[ ! -e "${production_lock_path}" && ! -L "${production_lock_path}" ]]; then
+              (
+                umask 077
+                set -o noclobber
+                : > "${production_lock_path}"
+              ) 2>/dev/null || true
+            fi
+            if [[ ! -f "${production_lock_path}" || -L "${production_lock_path}" ]] \
+              || [[ "$(stat -c '%u' "${production_lock_path}")" != "$(id -u)" ]] \
+              || [[ "$(stat -c '%a' "${production_lock_path}")" != "600" ]]; then
+              echo "Shared production lock must be a deploy-user-owned regular mode 600 file."
+              return 1
+            fi
+            exec 9>>"${production_lock_path}"
+            if ! flock -w 2400 9; then
+              echo "Timed out waiting for the shared production deployment lock."
+              return 1
+            fi
+          }
+
+          acquire_land_area_operation_lock() {
+            if [[ ! -e "${operation_lock_path}" && ! -L "${operation_lock_path}" ]]; then
+              (
+                umask 077
+                set -o noclobber
+                : > "${operation_lock_path}"
+              ) 2>/dev/null || true
+            fi
+            if [[ ! -f "${operation_lock_path}" || -L "${operation_lock_path}" ]] \
+              || [[ "$(stat -c '%u' "${operation_lock_path}")" != "$(id -u)" ]] \
+              || [[ "$(stat -c '%a' "${operation_lock_path}")" != "600" ]]; then
+              echo "Land-area operation lock must be a deploy-user-owned regular mode 600 file."
+              return 1
+            fi
+            exec 8>>"${operation_lock_path}"
+            if ! flock -w 2700 8; then
+              echo "Timed out waiting for the bounded land-area operation lock."
+              return 1
+            fi
+          }
+
           test -d "${application_root}"
           test ! -L "${application_root}"
+          acquire_production_lock
+          # 고정 순서: production lock 뒤 operation lock. 향후 batch runner는
+          # operation lock을 최대 2400초만 보유해 disable이 영구 대기하지 않게 한다.
+          acquire_land_area_operation_lock
           test -d "${run_root}"
           test ! -L "${run_root}"
           test "$(stat -c '%u' "${run_root}")" = "$(id -u)"
@@ -421,6 +558,24 @@ jobs:
             echo "Runtime .env must be owned by the deploy user with mode 600."
             false
           fi
+
+          if [[ -e "${runtime_sequence_path}" || -L "${runtime_sequence_path}" ]]; then
+            if [[ ! -f "${runtime_sequence_path}" || -L "${runtime_sequence_path}" ]] \
+              || [[ "$(stat -c '%u' "${runtime_sequence_path}")" != "$(id -u)" ]] \
+              || [[ "$(stat -c '%a' "${runtime_sequence_path}")" != "600" ]]; then
+              echo "Runtime sequence must be a deploy-user-owned regular mode 600 file."
+              false
+            fi
+            sequence_value="$(<"${runtime_sequence_path}")"
+            if [[ ! "${sequence_value}" =~ ^([1-9][0-9]*):(enable|disable)$ ]]; then
+              echo "Runtime sequence state is invalid."
+              false
+            fi
+            last_sequence="${BASH_REMATCH[1]}"
+            last_sequence_action="${BASH_REMATCH[2]}"
+            sequence_had_previous=1
+          fi
+
           if docker container inspect "${candidate_container}" >/dev/null 2>&1 \
             || docker container inspect "${rollback_container}" >/dev/null 2>&1; then
             echo "A previous runtime candidate or rollback container requires review."
@@ -450,7 +605,8 @@ jobs:
             false
           fi
 
-          raw_allowed_targets="$(<"${allowlist_path}")"
+          raw_allowed_targets=""
+          IFS= read -r -d '' raw_allowed_targets < "${allowlist_path}" || true
           export LAND_AREA_SYNC_ALLOWED_TARGETS="${raw_allowed_targets}"
           runtime_attestation="$(
             docker run --rm \
@@ -510,6 +666,28 @@ jobs:
           fi
           expected_health_attestation="${desired_enabled}:${actual_count}:${actual_digest}"
 
+          if [[ "${RUNTIME_ACTION}" == "enable" ]]; then
+            if (( REQUEST_SEQUENCE < last_sequence )); then
+              echo "Stale enable request skipped by the runtime sequence gate."
+              exit 75
+            fi
+            if (( REQUEST_SEQUENCE == last_sequence )); then
+              if [[ "${last_sequence_action}" == "enable" ]] \
+                && verify_container \
+                  "${container_name}" \
+                  3100 \
+                  "${expected_health_attestation}"; then
+                echo "Runtime enable request was already applied and verified."
+                exit 0
+              fi
+              echo "Conflicting enable request skipped by the runtime sequence gate."
+              exit 75
+            fi
+          elif (( last_sequence > REQUEST_SEQUENCE )); then
+            # disable은 안전 동작이므로 stale이어도 실행하되 sequence를 되감지 않는다.
+            sequence_to_store="${last_sequence}"
+          fi
+
           rollback() {
             exit_code=$?
             rollback_failed=0
@@ -540,6 +718,26 @@ jobs:
             fi
             if [[ -n "${env_next}" ]]; then
               rm -f -- "${env_next}" >/dev/null 2>&1 || true
+            fi
+
+            if [[ "${sequence_replaced}" -eq 1 ]]; then
+              if [[ "${sequence_had_previous}" -eq 1 ]] \
+                && [[ -f "${sequence_backup}" && ! -L "${sequence_backup}" ]] \
+                && [[ "$(stat -c '%u' "${sequence_backup}")" == "$(id -u)" ]] \
+                && [[ "$(stat -c '%a' "${sequence_backup}")" == "600" ]]; then
+                mv -f -- "${sequence_backup}" "${runtime_sequence_path}" \
+                  || rollback_failed=1
+              elif [[ "${sequence_had_previous}" -eq 0 ]]; then
+                rm -f -- "${runtime_sequence_path}" >/dev/null 2>&1 \
+                  || rollback_failed=1
+              else
+                rollback_failed=1
+              fi
+            elif [[ -n "${sequence_backup}" ]]; then
+              rm -f -- "${sequence_backup}" >/dev/null 2>&1 || true
+            fi
+            if [[ -n "${sequence_next}" ]]; then
+              rm -f -- "${sequence_next}" >/dev/null 2>&1 || true
             fi
 
             if [[ "${previous_renamed}" -eq 1 ]]; then
@@ -590,6 +788,40 @@ jobs:
             mktemp "${application_root}/.env.land-area-sync.next.XXXXXX"
           )"
           chmod 600 "${env_next}"
+          if [[ "${sequence_had_previous}" -eq 1 ]]; then
+            sequence_backup="$(
+              mktemp "${application_root}/.land-area-sync-sequence.backup.XXXXXX"
+            )"
+            cp -p -- "${runtime_sequence_path}" "${sequence_backup}"
+            chmod 600 "${sequence_backup}"
+          fi
+
+          # sequence intent를 .env/container 변경보다 먼저 원자적으로 고정한다.
+          # 비정상 종료로 ERR trap이 실행되지 않아도 이전 enable이 뒤늦게 적용되지 않는다.
+          sequence_next="$(
+            mktemp "${application_root}/.land-area-sync-sequence.next.XXXXXX"
+          )"
+          chmod 600 "${sequence_next}"
+          printf '%s:%s\n' \
+            "${sequence_to_store}" \
+            "${RUNTIME_ACTION}" \
+            > "${sequence_next}"
+          if [[ "$(stat -c '%u' "${sequence_next}")" != "$(id -u)" ]] \
+            || [[ "$(stat -c '%a' "${sequence_next}")" != "600" ]] \
+            || [[ "$(<"${sequence_next}")" != "${sequence_to_store}:${RUNTIME_ACTION}" ]]; then
+            echo "Next runtime sequence state is invalid."
+            false
+          fi
+          mv -f -- "${sequence_next}" "${runtime_sequence_path}"
+          sequence_next=""
+          sequence_replaced=1
+          if [[ ! -f "${runtime_sequence_path}" || -L "${runtime_sequence_path}" ]] \
+            || [[ "$(stat -c '%u' "${runtime_sequence_path}")" != "$(id -u)" ]] \
+            || [[ "$(stat -c '%a' "${runtime_sequence_path}")" != "600" ]] \
+            || [[ "$(<"${runtime_sequence_path}")" != "${sequence_to_store}:${RUNTIME_ACTION}" ]]; then
+            echo "Atomic runtime sequence replacement failed validation."
+            false
+          fi
 
           export DESIRED_LAND_AREA_SYNC_ENABLED="${desired_enabled}"
           export DESIRED_LAND_AREA_SYNC_ALLOWED_TARGETS="${raw_allowed_targets}"
@@ -704,7 +936,9 @@ jobs:
           trap - ERR
           docker rm -f "${rollback_container}" >/dev/null 2>&1 || true
           rm -f -- "${env_backup}" >/dev/null 2>&1 || true
+          rm -f -- "${sequence_backup}" >/dev/null 2>&1 || true
           env_backup=""
+          sequence_backup=""
           echo "Runtime action ${RUNTIME_ACTION} verified (count=${actual_count}, digest=${actual_digest:-empty})."
           REMOTE_RUNTIME
 

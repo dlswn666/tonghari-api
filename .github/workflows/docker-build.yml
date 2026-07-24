@@ -98,7 +98,7 @@ jobs:
     name: Build immutable image
     needs: quality-gates
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 100
     permissions:
       contents: read
       packages: write
@@ -160,7 +160,7 @@ jobs:
     name: Deploy and verify exact revision
     needs: [preflight, build-and-push]
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: read
@@ -184,6 +184,46 @@ jobs:
             set -Eeuo pipefail
 
             cd "$HOME/alimtalk-proxy"
+
+            production_lock_path="${HOME}/alimtalk-proxy/.tonghari-api-production.lock"
+            operation_lock_path="${HOME}/alimtalk-proxy/.land-area-sync-operation.lock"
+            if [[ ! -e "${production_lock_path}" && ! -L "${production_lock_path}" ]]; then
+              (
+                umask 077
+                set -o noclobber
+                : > "${production_lock_path}"
+              ) 2>/dev/null || true
+            fi
+            if [[ ! -f "${production_lock_path}" || -L "${production_lock_path}" ]] \
+              || [[ "$(stat -c '%u' "${production_lock_path}")" != "$(id -u)" ]] \
+              || [[ "$(stat -c '%a' "${production_lock_path}")" != "600" ]]; then
+              echo "Shared production lock must be a deploy-user-owned regular mode 600 file."
+              false
+            fi
+            exec 9>>"${production_lock_path}"
+            if ! flock -w 2400 9; then
+              echo "Timed out waiting for the shared production deployment lock."
+              false
+            fi
+
+            if [[ ! -e "${operation_lock_path}" && ! -L "${operation_lock_path}" ]]; then
+              (
+                umask 077
+                set -o noclobber
+                : > "${operation_lock_path}"
+              ) 2>/dev/null || true
+            fi
+            if [[ ! -f "${operation_lock_path}" || -L "${operation_lock_path}" ]] \
+              || [[ "$(stat -c '%u' "${operation_lock_path}")" != "$(id -u)" ]] \
+              || [[ "$(stat -c '%a' "${operation_lock_path}")" != "600" ]]; then
+              echo "Land-area operation lock must be a deploy-user-owned regular mode 600 file."
+              false
+            fi
+            exec 8>>"${operation_lock_path}"
+            if ! flock -w 2700 8; then
+              echo "Timed out waiting for the bounded land-area operation lock."
+              false
+            fi
 
             IMAGE_REPOSITORY="${{ env.IMAGE_REPOSITORY }}"
             IMAGE_TAG="${IMAGE_REPOSITORY}:${{ github.sha }}"
