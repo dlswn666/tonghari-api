@@ -49,6 +49,7 @@ jobs:
           set -euo pipefail
           npm ci
           npm run build
+          bash -n scripts/development-land-area-sync-remote-guardian.sh
 
       - name: Validate exact actor UUID
         shell: bash
@@ -183,7 +184,7 @@ jobs:
           printf '%s\n' "${matched_host_key}" > "${HOME}/.ssh/known_hosts"
           chmod 600 "${HOME}/.ssh/known_hosts"
 
-      - name: Run serial development sync in current API container
+      - name: Run guarded serial development sync
         id: remote
         shell: bash
         env:
@@ -192,12 +193,13 @@ jobs:
           TARGET_PATH: ${{ steps.manifest.outputs.target_path }}
           DB_APPROVAL_PATH: ${{ steps.manifest.outputs.db_approval_path }}
           EVIDENCE_PATH: ${{ steps.manifest.outputs.evidence_path }}
+          GUARDIAN_PATH: scripts/development-land-area-sync-remote-guardian.sh
           ACTOR_AUTH_USER_ID: ${{ inputs.actor_auth_user_id }}
           RUN_KEY: ${{ github.run_id }}-${{ github.run_attempt }}
           EXPECTED_GIT_SHA: ${{ github.sha }}
           EXPECTED_IMAGE_TAG: ghcr.io/dlswn666/alimtalk-proxy:${{ github.sha }}
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
           if [[ ! "${RUN_KEY}" =~ ^[0-9]+-[0-9]+$ ]]; then
             echo "::error::Invalid workflow run key."
             exit 1
@@ -206,6 +208,11 @@ jobs:
             echo "::error::Invalid actor UUID."
             exit 1
           fi
+          if [[ ! -f "${GUARDIAN_PATH}" || -L "${GUARDIAN_PATH}" ]]; then
+            echo "::error::Remote guardian must be a repository regular file."
+            exit 1
+          fi
+          bash -n "${GUARDIAN_PATH}"
 
           ssh_options=(
             -i "${HOME}/.ssh/id_ed25519"
@@ -215,25 +222,48 @@ jobs:
             -o "UserKnownHostsFile=${HOME}/.ssh/known_hosts"
           )
           remote_root="alimtalk-proxy/.development-land-area-sync-workflow/${RUN_KEY}"
+          cleanup_finished=0
+
           cleanup_remote() {
             ssh "${ssh_options[@]}" "${EC2_USERNAME}@${EC2_HOST}" \
-              "RUN_KEY='${RUN_KEY}' bash -s" \
-              >/dev/null 2>&1 <<'REMOTE_CLEANUP' || true
+              "RUN_KEY='${RUN_KEY}' bash -s" <<'REMOTE_CLEANUP'
           set -euo pipefail
+          operation_lock_path="${HOME}/alimtalk-proxy/.land-area-sync-operation.lock"
           run_root="${HOME}/alimtalk-proxy/.development-land-area-sync-workflow/${RUN_KEY}"
+          test -f "${operation_lock_path}"
+          test ! -L "${operation_lock_path}"
+          exec 9>>"${operation_lock_path}"
+          flock -w 30 9
           test -d "${run_root}"
           test ! -L "${run_root}"
           rm -f -- \
             "${run_root}/target.json" \
             "${run_root}/db-approval.json" \
             "${run_root}/evidence.json" \
+            "${run_root}/guardian.sh" \
+            "${run_root}/guardian.log" \
+            "${run_root}/guardian.pid" \
+            "${run_root}/guardian-started" \
             "${run_root}/artifact.json" \
             "${run_root}/status" \
             "${run_root}/validated"
           rmdir -- "${run_root}"
+          test ! -e "${run_root}"
+          test ! -L "${run_root}"
           REMOTE_CLEANUP
           }
-          trap cleanup_remote EXIT
+
+          finish_step() {
+            local prior_status="$?"
+            trap - EXIT
+            if [[ "${cleanup_finished}" -ne 1 ]]; then
+              if ! cleanup_remote; then
+                echo "::error::Remote cleanup or sensitive-file absence verification failed."
+                exit 1
+              fi
+            fi
+            exit "${prior_status}"
+          }
 
           ssh "${ssh_options[@]}" "${EC2_USERNAME}@${EC2_HOST}" \
             "RUN_KEY='${RUN_KEY}' bash -s" <<'REMOTE_PREPARE'
@@ -241,6 +271,7 @@ jobs:
           application_root="${HOME}/alimtalk-proxy"
           parent="${application_root}/.development-land-area-sync-workflow"
           run_root="${parent}/${RUN_KEY}"
+          operation_lock_path="${application_root}/.land-area-sync-operation.lock"
           test -d "${application_root}"
           test ! -L "${application_root}"
           if [[ -e "${parent}" || -L "${parent}" ]]; then
@@ -251,8 +282,23 @@ jobs:
           fi
           test "$(stat -c '%u' "${parent}")" = "$(id -u)"
           chmod 700 "${parent}"
+          if [[ ! -e "${operation_lock_path}" && ! -L "${operation_lock_path}" ]]; then
+            if ! (
+              umask 077
+              set -o noclobber
+              : > "${operation_lock_path}"
+            ) 2>/dev/null; then
+              test -f "${operation_lock_path}"
+              test ! -L "${operation_lock_path}"
+            fi
+          fi
+          test -f "${operation_lock_path}"
+          test ! -L "${operation_lock_path}"
+          test "$(stat -c '%u' "${operation_lock_path}")" = "$(id -u)"
+          chmod 600 "${operation_lock_path}"
           (umask 077; mkdir -m 700 -- "${run_root}")
           REMOTE_PREPARE
+          trap finish_step EXIT
 
           scp "${ssh_options[@]}" "${TARGET_PATH}" \
             "${EC2_USERNAME}@${EC2_HOST}:${remote_root}/target.json"
@@ -260,196 +306,77 @@ jobs:
             "${EC2_USERNAME}@${EC2_HOST}:${remote_root}/db-approval.json"
           scp "${ssh_options[@]}" "${EVIDENCE_PATH}" \
             "${EC2_USERNAME}@${EC2_HOST}:${remote_root}/evidence.json"
+          scp "${ssh_options[@]}" "${GUARDIAN_PATH}" \
+            "${EC2_USERNAME}@${EC2_HOST}:${remote_root}/guardian.sh"
 
           ssh "${ssh_options[@]}" "${EC2_USERNAME}@${EC2_HOST}" \
-            "RUN_KEY='${RUN_KEY}' ACTOR_AUTH_USER_ID='${ACTOR_AUTH_USER_ID}' EXPECTED_GIT_SHA='${EXPECTED_GIT_SHA}' EXPECTED_IMAGE_TAG='${EXPECTED_IMAGE_TAG}' bash -s" <<'REMOTE_RUN'
-          set -Eeuo pipefail
-          container_name="alimtalk-proxy"
-          host_root="${HOME}/alimtalk-proxy/.development-land-area-sync-workflow/${RUN_KEY}"
-          host_target="${host_root}/target.json"
-          host_db_approval="${host_root}/db-approval.json"
-          host_evidence="${host_root}/evidence.json"
-          host_artifact="${host_root}/artifact.json"
-          host_status="${host_root}/status"
-          host_validated="${host_root}/validated"
-          operation_lock_path="${HOME}/alimtalk-proxy/.land-area-sync-operation.lock"
-          container_root="/app/.development-land-area-sync"
-          container_target="${container_root}/target-${RUN_KEY}.json"
-          container_db_approval="${container_root}/db-approval-${RUN_KEY}.json"
-          container_evidence="${container_root}/evidence-${RUN_KEY}.json"
-          container_artifact="${container_root}/artifact-${RUN_KEY}.json"
-          validation_sentinel="LAND_AREA_DEVELOPMENT_RUN_ARTIFACT_VALIDATED"
-
-          if [[ ! -e "${operation_lock_path}" && ! -L "${operation_lock_path}" ]]; then
-            (
-              umask 077
-              set -o noclobber
-              : > "${operation_lock_path}"
-            ) 2>/dev/null || true
-          fi
-          if [[ ! -f "${operation_lock_path}" || -L "${operation_lock_path}" ]] \
-            || [[ "$(stat -c '%u' "${operation_lock_path}")" != "$(id -u)" ]] \
-            || [[ "$(stat -c '%a' "${operation_lock_path}")" != "600" ]]; then
-            echo "Land-area operation lock must be a deploy-user-owned regular mode 600 file."
-            exit 1
-          fi
-          exec 8>>"${operation_lock_path}"
-          if ! flock -w 900 8; then
-            echo "Timed out waiting for the bounded land-area operation lock."
-            exit 1
-          fi
-
-          target_container="$(docker inspect --format '{{.Id}}' "${container_name}")"
-          target_image_id="$(docker inspect --format '{{.Image}}' "${container_name}")"
-          target_revision="$(
-            docker image inspect \
-              --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
-              "${target_image_id}"
-          )"
-          if [[
-            ! "${target_container}" =~ ^[0-9a-f]{64}$
-            || ! "${target_image_id}" =~ ^sha256:[0-9a-f]{64}$
-            || "${target_revision}" != "${EXPECTED_GIT_SHA}"
-          ]]; then
-            echo "Development runner target container image identity mismatch."
-            exit 1
-          fi
-
-          cleanup_container() {
-            docker exec "${target_container}" rm -f -- \
-              "${container_target}" \
-              "${container_db_approval}" \
-              "${container_evidence}" \
-              "${container_artifact}" \
-              >/dev/null 2>&1 || true
-          }
-          trap cleanup_container EXIT
-
-          verify_health() {
-            docker exec \
-              -e "EXPECTED_GIT_SHA=${EXPECTED_GIT_SHA}" \
-              -e "EXPECTED_IMAGE_TAG=${EXPECTED_IMAGE_TAG}" \
-              "${target_container}" \
-              node -e '
-                const http = require("node:http");
-                const reject = () => process.exit(1);
-                const request = http.get(
-                  "http://127.0.0.1:3100/health",
-                  { timeout: 5000 },
-                  (response) => {
-                    if (response.statusCode !== 200) return reject();
-                    let body = "";
-                    response.setEncoding("utf8");
-                    response.on("data", (chunk) => {
-                      body += chunk;
-                      if (body.length > 65536) request.destroy();
-                    });
-                    response.on("end", () => {
-                      try {
-                        const health = JSON.parse(body);
-                        if (
-                          health?.status !== "ok"
-                          || health?.gitSha !== process.env.EXPECTED_GIT_SHA
-                          || health?.imageTag !== process.env.EXPECTED_IMAGE_TAG
-                        ) return reject();
-                        process.exit(0);
-                      } catch {
-                        reject();
-                      }
-                    });
-                  }
-                );
-                request.on("timeout", () => request.destroy());
-                request.on("error", reject);
-              '
-          }
-
+            "RUN_KEY='${RUN_KEY}' ACTOR_AUTH_USER_ID='${ACTOR_AUTH_USER_ID}' EXPECTED_GIT_SHA='${EXPECTED_GIT_SHA}' EXPECTED_IMAGE_TAG='${EXPECTED_IMAGE_TAG}' bash -s" <<'REMOTE_START'
+          set -euo pipefail
+          run_root="${HOME}/alimtalk-proxy/.development-land-area-sync-workflow/${RUN_KEY}"
+          guardian="${run_root}/guardian.sh"
+          guardian_log="${run_root}/guardian.log"
+          guardian_pid_file="${run_root}/guardian.pid"
           for candidate in \
-            "${host_target}" \
-            "${host_db_approval}" \
-            "${host_evidence}"
+            "${run_root}/target.json" \
+            "${run_root}/db-approval.json" \
+            "${run_root}/evidence.json"
           do
             test -f "${candidate}"
             test ! -L "${candidate}"
             test "$(stat -c '%u' "${candidate}")" = "$(id -u)"
             chmod 600 "${candidate}"
-            size="$(stat -c '%s' "${candidate}")"
-            test "${size}" -ge 2
-            test "${size}" -le 1048576
           done
-          verify_health
-
-          stream_file() {
-            local source="$1"
-            local target="$2"
-            docker exec -i \
-              -e "PRIVATE_INPUT_PATH=${target}" \
-              "${target_container}" \
-              node -e '
-                const fs = require("node:fs");
-                const target = process.env.PRIVATE_INPUT_PATH ?? "";
-                if (!/^\/app\/\.development-land-area-sync\/[a-z-]+-[0-9]+-[0-9]+\.json$/.test(target)) {
-                  process.exit(1);
-                }
-                const chunks = [];
-                let size = 0;
-                process.stdin.on("data", (chunk) => {
-                  size += chunk.length;
-                  if (size > 1048576) process.exit(1);
-                  chunks.push(chunk);
-                });
-                process.stdin.on("end", () => {
-                  if (size < 2) process.exit(1);
-                  fs.writeFileSync(target, Buffer.concat(chunks), {
-                    flag: "wx",
-                    mode: 0o600,
-                  });
-                });
-                process.stdin.on("error", () => process.exit(1));
-              ' < "${source}"
-          }
-          stream_file "${host_target}" "${container_target}"
-          stream_file "${host_db_approval}" "${container_db_approval}"
-          stream_file "${host_evidence}" "${container_evidence}"
-
-          set +e
-          timeout --foreground --kill-after=15s 2400s \
-            docker exec -w /app "${target_container}" \
-            node dist/cli/development-land-area-sync-runner.js \
-            --target ".development-land-area-sync/target-${RUN_KEY}.json" \
-            --db-approval ".development-land-area-sync/db-approval-${RUN_KEY}.json" \
-            --evidence ".development-land-area-sync/evidence-${RUN_KEY}.json" \
-            --actor-auth-user-id "${ACTOR_AUTH_USER_ID}" \
-            --out ".development-land-area-sync/artifact-${RUN_KEY}.json"
-          runner_status="$?"
-          set -e
-          printf '%s\n' "${runner_status}" > "${host_status}"
-          chmod 600 "${host_status}"
-
-          if [[ "${runner_status}" -ne 0 && "${runner_status}" -ne 1 ]]; then
-            exit 0
-          fi
-          validation_output="$(
-            docker exec -w /app "${target_container}" \
-              node dist/cli/development-land-area-sync-validate.js \
-              --target ".development-land-area-sync/target-${RUN_KEY}.json" \
-              --artifact ".development-land-area-sync/artifact-${RUN_KEY}.json"
-          )"
-          if [[ "${validation_output}" != "${validation_sentinel}" ]]; then
-            exit 0
-          fi
-          verify_health
-          container_after="$(docker inspect --format '{{.Id}}' "${container_name}")"
-          if [[ "${container_after}" != "${target_container}" ]]; then
-            echo "Development runner target container changed while operation lock was held."
+          test -f "${guardian}"
+          test ! -L "${guardian}"
+          test "$(stat -c '%u' "${guardian}")" = "$(id -u)"
+          chmod 700 "${guardian}"
+          install -m 600 /dev/null "${guardian_log}"
+          nohup setsid env \
+            "RUN_KEY=${RUN_KEY}" \
+            "ACTOR_AUTH_USER_ID=${ACTOR_AUTH_USER_ID}" \
+            "EXPECTED_GIT_SHA=${EXPECTED_GIT_SHA}" \
+            "EXPECTED_IMAGE_TAG=${EXPECTED_IMAGE_TAG}" \
+            bash "${guardian}" \
+            </dev/null >>"${guardian_log}" 2>&1 &
+          guardian_pid="$!"
+          if [[ ! "${guardian_pid}" =~ ^[1-9][0-9]*$ ]]; then
             exit 1
           fi
-          docker cp "${target_container}:${container_artifact}" "${host_artifact}"
-          chmod 600 "${host_artifact}"
-          artifact_sha="$(sha256sum "${host_artifact}" | awk '{print $1}')"
-          printf '%s:%s\n' "${validation_sentinel}" "${artifact_sha}" > "${host_validated}"
-          chmod 600 "${host_validated}"
-          REMOTE_RUN
+          install -m 600 /dev/null "${guardian_pid_file}"
+          printf '%s\n' "${guardian_pid}" > "${guardian_pid_file}"
+          sleep 1
+          if ! kill -0 "${guardian_pid}" 2>/dev/null; then
+            test -f "${run_root}/status"
+          fi
+          REMOTE_START
+
+          # 이 SSH wait가 취소되어도 setsid guardian은 계속 operation lock을
+          # 보유하고 runner의 durable terminal drain과 cleanup을 마친다.
+          ssh "${ssh_options[@]}" "${EC2_USERNAME}@${EC2_HOST}" \
+            "RUN_KEY='${RUN_KEY}' bash -s" <<'REMOTE_WAIT'
+          set -euo pipefail
+          run_root="${HOME}/alimtalk-proxy/.development-land-area-sync-workflow/${RUN_KEY}"
+          operation_lock_path="${HOME}/alimtalk-proxy/.land-area-sync-operation.lock"
+          guardian_pid_file="${run_root}/guardian.pid"
+          status_file="${run_root}/status"
+          test -f "${guardian_pid_file}"
+          test ! -L "${guardian_pid_file}"
+          guardian_pid="$(tr -d '[:space:]' < "${guardian_pid_file}")"
+          [[ "${guardian_pid}" =~ ^[1-9][0-9]*$ ]]
+          while [[ ! -f "${status_file}" ]]; do
+            test ! -L "${status_file}"
+            kill -0 "${guardian_pid}" 2>/dev/null
+            sleep 5
+          done
+          test ! -L "${status_file}"
+          test "$(stat -c '%a' "${status_file}")" = "600"
+          test -f "${operation_lock_path}"
+          test ! -L "${operation_lock_path}"
+          test "$(stat -c '%u' "${operation_lock_path}")" = "$(id -u)"
+          test "$(stat -c '%a' "${operation_lock_path}")" = "600"
+          exec 7>>"${operation_lock_path}"
+          flock -w 30 7
+          REMOTE_WAIT
 
           if [[ -e development-land-area-sync-output || -L development-land-area-sync-output ]]; then
             echo "::error::Local output directory must not pre-exist."
@@ -457,15 +384,25 @@ jobs:
           fi
           mkdir -m 700 -- development-land-area-sync-output
           scp "${ssh_options[@]}" \
-            "${EC2_USERNAME}@${EC2_HOST}:${remote_root}/artifact.json" \
-            development-land-area-sync-output/artifact.json || true
-          scp "${ssh_options[@]}" \
-            "${EC2_USERNAME}@${EC2_HOST}:${remote_root}/validated" \
-            development-land-area-sync-output/validated || true
-          scp "${ssh_options[@]}" \
             "${EC2_USERNAME}@${EC2_HOST}:${remote_root}/status" \
             development-land-area-sync-output/status
+          runner_status="$(
+            tr -d '[:space:]' < development-land-area-sync-output/status
+          )"
+          if [[ ! "${runner_status}" =~ ^[0-9]+$ ]]; then
+            echo "::error::Remote guardian status is invalid."
+            exit 1
+          fi
+          if [[ "${runner_status}" -eq 0 || "${runner_status}" -eq 1 ]]; then
+            scp "${ssh_options[@]}" \
+              "${EC2_USERNAME}@${EC2_HOST}:${remote_root}/artifact.json" \
+              development-land-area-sync-output/artifact.json
+            scp "${ssh_options[@]}" \
+              "${EC2_USERNAME}@${EC2_HOST}:${remote_root}/validated" \
+              development-land-area-sync-output/validated
+          fi
           cleanup_remote
+          cleanup_finished=1
           trap - EXIT
 
       - name: Revalidate downloaded artifact
@@ -493,15 +430,17 @@ jobs:
           fi
 
           validation_root="$(mktemp -d)"
+          mkdir -m 700 -- "${validation_root}/.development-land-area-sync"
           cleanup_validation() {
             rm -f -- \
               "${validation_root}/.development-land-area-sync/target.json" \
               "${validation_root}/.development-land-area-sync/artifact.json"
-            rmdir -- "${validation_root}/.development-land-area-sync" 2>/dev/null || true
-            rmdir -- "${validation_root}" 2>/dev/null || true
+            rmdir -- "${validation_root}/.development-land-area-sync"
+            rmdir -- "${validation_root}"
+            test ! -e "${validation_root}"
+            test ! -L "${validation_root}"
           }
           trap cleanup_validation EXIT
-          mkdir -m 700 -- "${validation_root}/.development-land-area-sync"
           install -m 600 "${TARGET_PATH}" \
             "${validation_root}/.development-land-area-sync/target.json"
           install -m 600 "${artifact}" \

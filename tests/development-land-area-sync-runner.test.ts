@@ -7,7 +7,9 @@ import {
     DEVELOPMENT_DB_APPROVAL_MANIFEST_VERSION,
     DEVELOPMENT_EVIDENCE_MANIFEST_VERSION,
     DEVELOPMENT_GIS_JWT_TTL_SECONDS,
+    DEVELOPMENT_JOB_POLL_SOFT_TIMEOUT_MS,
     DEVELOPMENT_TARGET_MANIFEST_VERSION,
+    LocalhostDevelopmentLandAreaSyncClient,
     computeDevelopmentTargetDigest,
     createDevelopmentGisSystemAdminJwt,
     parseDevelopmentDbApprovalManifest,
@@ -124,7 +126,8 @@ function evidenceEntry(
 
 function preflightReader(
     entries: DevelopmentEvidenceEntry[],
-    initiallyApplied = false
+    initiallyApplied = false,
+    writerJobId = APPLY_JOB_ID
 ): DevelopmentReadOnlyPreflightReader {
     let reads = 0;
     return {
@@ -139,6 +142,19 @@ function preflightReader(
                     landAreaSource: applied
                         ? (entry.expectedStrategy as 'LADFRL')
                         : ('LEGACY_UNKNOWN' as const),
+                    landAreaSyncedAt: applied
+                        ? '2026-07-25T00:01:00.000Z'
+                        : null,
+                    landAreaSyncJobId: applied ? writerJobId : null,
+                }))
+            );
+        },
+        async readPropertyUnitsBySyncJobIds() {
+            return entries.flatMap((entry) =>
+                entry.expectedPropertyUnitIds.map((id) => ({
+                    id,
+                    unionId: UNION_ID,
+                    landAreaSyncJobId: writerJobId,
                 }))
             );
         },
@@ -476,7 +492,7 @@ test('직렬 runner는 discovery terminal을 증거와 exact 대조한 뒤 1회 
         client,
         preflightReader: preflightReader(evidenceManifest.entries),
         pollIntervalMs: 100,
-        jobTimeoutMs: 10_000,
+        jobTimeoutMs: DEVELOPMENT_JOB_POLL_SOFT_TIMEOUT_MS,
         sleep: async (milliseconds) => {
             clock += milliseconds;
         },
@@ -485,6 +501,15 @@ test('직렬 runner는 discovery terminal을 증거와 exact 대조한 뒤 1회 
 
     assert.equal(artifact.gate.status, 'PASS');
     assert.equal(artifact.observedPropertyUnitCount, 1);
+    assert.equal(
+        artifact.preflight?.nonTargetTupleDigest,
+        artifact.postflight?.nonTargetTupleDigest
+    );
+    assert.equal(artifact.writeAttribution?.writerJobCount, 1);
+    assert.equal(
+        artifact.writeAttribution?.attributedPropertyUnitCount,
+        1
+    );
     assert.deepEqual(calls, [
         'latest',
         'admit-discovery',
@@ -516,6 +541,20 @@ test('직렬 runner는 discovery terminal을 증거와 exact 대조한 뒤 1회 
                 targetManifest
             ),
         /RUN_ARTIFACT_INVALID/
+    );
+    assert.throws(
+        () =>
+            validateDevelopmentRunArtifact(
+                {
+                    ...artifact,
+                    postflight: {
+                        ...artifact.postflight!,
+                        nonTargetTupleDigest: '0'.repeat(64),
+                    },
+                },
+                targetManifest
+            ),
+        /RUN_ARTIFACT_NON_TARGET_TUPLE_CHANGED/
     );
 });
 
@@ -594,8 +633,13 @@ test('read-only preflight membership/prestate가 다르면 API admission 전에 
                         pnu: PNU,
                         landArea: '999',
                         landAreaSource: 'MANUAL',
+                        landAreaSyncedAt: null,
+                        landAreaSyncJobId: null,
                     },
                 ];
+            },
+            async readPropertyUnitsBySyncJobIds() {
+                throw new Error('호출되면 안 됨');
             },
         },
     });
@@ -606,6 +650,316 @@ test('read-only preflight membership/prestate가 다르면 API admission 전에 
     );
     assert.equal(apiCalls, 0);
     assert.equal(artifact.results.length, 0);
+});
+
+test('10분 queue 상한과 전파 여유를 지난 job도 durable terminal까지 drain한 뒤 FAIL한다', async () => {
+    const targetManifest = target();
+    const evidenceManifest = evidence(targetManifest);
+    let clock = Date.parse('2026-07-25T00:00:00.000Z');
+    let getJobCalls = 0;
+    let terminalObserved = false;
+    const client: LandAreaSyncApiClient = {
+        async getLatest() {
+            return null;
+        },
+        async admitDiscovery() {
+            return DISCOVERY_JOB_ID;
+        },
+        async getJob() {
+            getJobCalls += 1;
+            if (getJobCalls < 23) {
+                if (getJobCalls % 2 === 0) {
+                    throw new Error('일시적 API 조회 실패');
+                }
+                return job(DISCOVERY_JOB_ID, {
+                    status: 'PROCESSING',
+                    scopeState: undefined,
+                    outcome: null,
+                    scopeSnapshot: null,
+                });
+            }
+            terminalObserved = true;
+            return job(DISCOVERY_JOB_ID, {
+                status: 'COMPLETED',
+                scopeState: 'LINKED_SCOPE_RESOLVED',
+                outcome: 'APPLIED',
+            });
+        },
+        async confirmDiscovery() {
+            throw new Error('호출되면 안 됨');
+        },
+    };
+    const artifact = await runDevelopmentLandAreaSync({
+        target: targetManifest,
+        dbApproval: approval(targetManifest),
+        evidence: evidenceManifest,
+        client,
+        preflightReader: preflightReader(
+            evidenceManifest.entries,
+            false,
+            DISCOVERY_JOB_ID
+        ),
+        pollIntervalMs: 30_000,
+        jobTimeoutMs: DEVELOPMENT_JOB_POLL_SOFT_TIMEOUT_MS,
+        sleep: async (milliseconds) => {
+            clock += milliseconds;
+        },
+        now: () => new Date(clock),
+    });
+
+    assert.equal(terminalObserved, true);
+    assert.equal(getJobCalls, 23);
+    assert.equal(artifact.gate.status, 'FAIL');
+    assert.equal(
+        artifact.gate.failureCode,
+        'JOB_POLL_SOFT_TIMEOUT_AFTER_TERMINAL'
+    );
+    await assert.rejects(
+        runDevelopmentLandAreaSync({
+            target: targetManifest,
+            dbApproval: approval(targetManifest),
+            evidence: evidenceManifest,
+            client,
+            preflightReader: preflightReader(evidenceManifest.entries),
+            jobTimeoutMs: 10 * 60_000,
+        }),
+        /POLL_CONFIGURATION_INVALID/
+    );
+});
+
+test('confirmation POST 응답 유실은 latest lineage를 복구해 apply terminal까지 drain한다', async () => {
+    const targetManifest = target();
+    const evidenceManifest = evidence(targetManifest);
+    const networkFailureClient =
+        new LocalhostDevelopmentLandAreaSyncClient(
+            'development-secret-value',
+            ACTOR_AUTH_ID,
+            () => new Date('2026-07-25T00:00:00.000Z'),
+            async () => {
+                throw new Error('응답 유실');
+            }
+        );
+    let latestReads = 0;
+    const client: LandAreaSyncApiClient = {
+        async getLatest() {
+            latestReads += 1;
+            if (latestReads === 1) {
+                return job(DISCOVERY_JOB_ID, {
+                    status: 'COMPLETED',
+                    scopeState:
+                        'SINGLE_SCOPE_CONFIRMATION_REQUIRED',
+                    outcome: 'REVIEW_REQUIRED',
+                });
+            }
+            return job(APPLY_JOB_ID, {
+                status: 'COMPLETED',
+                scopeState: 'SINGLE_PNU_CONFIRMED',
+                outcome: 'APPLIED',
+                sourceDiscoveryJobId: DISCOVERY_JOB_ID,
+            });
+        },
+        async getJob() {
+            throw new Error('호출되면 안 됨');
+        },
+        async admitDiscovery() {
+            throw new Error('호출되면 안 됨');
+        },
+        async confirmDiscovery(discoveryJobId, body) {
+            return networkFailureClient.confirmDiscovery(
+                discoveryJobId,
+                body
+            );
+        },
+    };
+
+    const artifact = await runDevelopmentLandAreaSync({
+        target: targetManifest,
+        dbApproval: approval(targetManifest),
+        evidence: evidenceManifest,
+        client,
+        preflightReader: preflightReader(evidenceManifest.entries),
+        pollIntervalMs: 100,
+        sleep: async () => undefined,
+    });
+
+    assert.equal(latestReads, 2);
+    assert.equal(artifact.gate.status, 'PASS');
+    assert.equal(artifact.results[0].applyJobId, APPLY_JOB_ID);
+    assert.equal(artifact.results[0].writerJobId, APPLY_JOB_ID);
+});
+
+test('discovery POST 응답 유실도 latest durable job을 복구해 terminal 전 반환하지 않는다', async () => {
+    const targetManifest = target();
+    const evidenceManifest = evidence(targetManifest);
+    const networkFailureClient =
+        new LocalhostDevelopmentLandAreaSyncClient(
+            'development-secret-value',
+            ACTOR_AUTH_ID,
+            () => new Date('2026-07-25T00:00:00.000Z'),
+            async () => {
+                throw new Error('응답 유실');
+            }
+        );
+    let latestReads = 0;
+    const client: LandAreaSyncApiClient = {
+        async getLatest() {
+            latestReads += 1;
+            if (latestReads === 1) {
+                return null;
+            }
+            return job(DISCOVERY_JOB_ID, {
+                status: 'COMPLETED',
+                scopeState: 'LINKED_SCOPE_RESOLVED',
+                outcome: 'APPLIED',
+            });
+        },
+        async getJob() {
+            throw new Error('호출되면 안 됨');
+        },
+        async admitDiscovery(unionId, pnu) {
+            return networkFailureClient.admitDiscovery(unionId, pnu);
+        },
+        async confirmDiscovery() {
+            throw new Error('호출되면 안 됨');
+        },
+    };
+
+    const artifact = await runDevelopmentLandAreaSync({
+        target: targetManifest,
+        dbApproval: approval(targetManifest),
+        evidence: evidenceManifest,
+        client,
+        preflightReader: preflightReader(
+            evidenceManifest.entries,
+            false,
+            DISCOVERY_JOB_ID
+        ),
+        pollIntervalMs: 100,
+        sleep: async () => undefined,
+    });
+
+    assert.equal(latestReads, 2);
+    assert.equal(artifact.gate.status, 'PASS');
+    assert.equal(
+        artifact.results[0].discoveryJobId,
+        DISCOVERY_JOB_ID
+    );
+    assert.equal(
+        artifact.results[0].writerJobId,
+        DISCOVERY_JOB_ID
+    );
+});
+
+test('postflight는 승인 대상 밖의 land area/source/synced/job tuple 변경을 exact 거부한다', async () => {
+    const targetManifest = {
+        ...target(),
+        expectedUnionActivePropertyUnitCount: 2,
+        expectedUnionActivePnuCount: 2,
+    };
+    const evidenceManifest = evidence(targetManifest);
+    const nonTargetId = '6a1a4cbb-c8ad-45a3-ae40-b90665dc949c';
+    let reads = 0;
+    const artifact = await runDevelopmentLandAreaSync({
+        target: targetManifest,
+        dbApproval: approval(targetManifest),
+        evidence: evidenceManifest,
+        client: {
+            async getLatest() {
+                return job(APPLY_JOB_ID, {
+                    status: 'COMPLETED',
+                    scopeState: 'SINGLE_PNU_CONFIRMED',
+                    outcome: 'APPLIED',
+                    sourceDiscoveryJobId: DISCOVERY_JOB_ID,
+                });
+            },
+            async getJob() {
+                throw new Error('호출되면 안 됨');
+            },
+            async admitDiscovery() {
+                throw new Error('호출되면 안 됨');
+            },
+            async confirmDiscovery() {
+                throw new Error('호출되면 안 됨');
+            },
+        },
+        preflightReader: {
+            async readActivePropertyUnits() {
+                reads += 1;
+                return [
+                    {
+                        id: PROPERTY_UNIT_ID,
+                        pnu: PNU,
+                        landArea: '161',
+                        landAreaSource: 'LADFRL',
+                        landAreaSyncedAt:
+                            '2026-07-25T00:01:00.000Z',
+                        landAreaSyncJobId: APPLY_JOB_ID,
+                    },
+                    {
+                        id: nonTargetId,
+                        pnu: SECOND_PNU,
+                        landArea: reads === 1 ? null : '99',
+                        landAreaSource: 'LEGACY_UNKNOWN',
+                        landAreaSyncedAt: null,
+                        landAreaSyncJobId: null,
+                    },
+                ];
+            },
+            async readPropertyUnitsBySyncJobIds() {
+                throw new Error('호출되면 안 됨');
+            },
+        },
+    });
+
+    assert.equal(artifact.gate.status, 'FAIL');
+    assert.equal(
+        artifact.gate.failureCode,
+        'POSTFLIGHT_NON_TARGET_TUPLE_CHANGED'
+    );
+});
+
+test('writer job attribution bounded read는 타 조합 또는 승인 scope 밖 write를 FAIL한다', async () => {
+    const targetManifest = target();
+    const evidenceManifest = evidence(targetManifest);
+    const reader = preflightReader(evidenceManifest.entries, true);
+    reader.readPropertyUnitsBySyncJobIds = async () => [
+        {
+            id: PROPERTY_UNIT_ID,
+            unionId: '10f48b95-e9bc-4c92-a0e5-6b9a57adcfb9',
+            landAreaSyncJobId: APPLY_JOB_ID,
+        },
+    ];
+    const artifact = await runDevelopmentLandAreaSync({
+        target: targetManifest,
+        dbApproval: approval(targetManifest),
+        evidence: evidenceManifest,
+        client: {
+            async getLatest() {
+                return job(APPLY_JOB_ID, {
+                    status: 'COMPLETED',
+                    scopeState: 'SINGLE_PNU_CONFIRMED',
+                    outcome: 'APPLIED',
+                    sourceDiscoveryJobId: DISCOVERY_JOB_ID,
+                });
+            },
+            async getJob() {
+                throw new Error('호출되면 안 됨');
+            },
+            async admitDiscovery() {
+                throw new Error('호출되면 안 됨');
+            },
+            async confirmDiscovery() {
+                throw new Error('호출되면 안 됨');
+            },
+        },
+        preflightReader: reader,
+    });
+
+    assert.equal(artifact.gate.status, 'FAIL');
+    assert.equal(
+        artifact.gate.failureCode,
+        'POSTFLIGHT_CROSS_UNION_OR_SCOPE_WRITE_DETECTED'
+    );
 });
 
 test('FAILED/review/cache conflict이면 다음 PNU admission을 즉시 중단한다', async () => {

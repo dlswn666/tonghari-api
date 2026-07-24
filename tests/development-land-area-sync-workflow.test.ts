@@ -20,6 +20,13 @@ const cli = fs.readFileSync(
     'utf8'
 );
 const dockerfile = fs.readFileSync(path.join(root, 'Dockerfile'), 'utf8');
+const guardian = fs.readFileSync(
+    path.join(
+        root,
+        'scripts/development-land-area-sync-remote-guardian.sh'
+    ),
+    'utf8'
+);
 
 test('workflow는 protected environment, main-only, repository choice, exact actor UUID를 요구한다', () => {
     assert.match(workflow, /environment: land-area-sync-development-write/);
@@ -36,19 +43,24 @@ test('workflow는 protected environment, main-only, repository choice, exact act
     );
 });
 
-test('workflow는 batch 전체에 공통 operation lock만 고정 순서로 보유하고 2400초로 제한한다', () => {
+test('workflow는 SSH와 분리된 guardian이 공통 operation lock을 terminal drain과 cleanup까지 보유한다', () => {
+    assert.match(
+        guardian,
+        /application_root="\$\{HOME\}\/alimtalk-proxy"[\s\S]+operation_lock_path="\$\{application_root\}\/\.land-area-sync-operation\.lock"/
+    );
+    assert.match(guardian, /exec 8>>"\$\{operation_lock_path\}"/);
+    assert.match(guardian, /flock -w 900 8/);
     assert.match(
         workflow,
-        /operation_lock_path="\$\{HOME\}\/alimtalk-proxy\/\.land-area-sync-operation\.lock"/
+        /nohup setsid env[\s\S]+bash "\$\{guardian\}"/
     );
-    assert.match(workflow, /exec 8>>"\$\{operation_lock_path\}"/);
-    assert.match(workflow, /flock -w 900 8/);
-    assert.match(
-        workflow,
-        /timeout --foreground --kill-after=15s 2400s[\s\S]+development-land-area-sync-runner\.js/
-    );
+    assert.match(workflow, /while \[\[ ! -f "\$\{status_file\}" \]\]/);
+    assert.match(workflow, /kill -0 "\$\{guardian_pid\}"/);
+    assert.match(workflow, /exec 7>>"\$\{operation_lock_path\}"/);
+    assert.match(workflow, /flock -w 30 7/);
+    assert.doesNotMatch(workflow, /timeout .*development-land-area-sync-runner/);
     assert.doesNotMatch(
-        workflow,
+        `${workflow}\n${guardian}`,
         /production_lock_path|\.tonghari-api-production\.lock/
     );
 });
@@ -69,6 +81,11 @@ test('DB 직접 접근은 development service-role read-only select이며 write�
     assert.match(cli, /process\.env\.DEV_SUPABASE_URL/);
     assert.match(cli, /process\.env\.DEV_SUPABASE_SERVICE_ROLE_KEY/);
     assert.match(cli, /\.from\('property_units'\)[\s\S]+\.select\(/);
+    assert.match(
+        cli,
+        /land_area_synced_at, land_area_sync_job_id/
+    );
+    assert.match(cli, /\.in\('land_area_sync_job_id', syncJobIds\)/);
     assert.doesNotMatch(
         cli,
         /\.(?:insert|update|upsert|delete|rpc)\s*\(/
@@ -78,6 +95,32 @@ test('DB 직접 접근은 development service-role read-only select이며 write�
     assert.match(runner, /databaseTarget: 'development'/);
     assert.match(runner, /iss: 'tonghari-web-dev'/);
     assert.match(runner, /aud: 'tonghari-api'/);
+});
+
+test('cleanup은 host/container/local evidence 부재를 재검증하며 실패를 무시하지 않는다', () => {
+    assert.doesNotMatch(workflow, /\|\| true/);
+    assert.doesNotMatch(guardian, /\|\| true/);
+    assert.match(guardian, /cleanup_container_inputs/);
+    assert.match(guardian, /cleanup_host_inputs/);
+    assert.match(
+        guardian,
+        /docker exec "\$\{target_container\}" test ! -e "\$\{candidate\}"/
+    );
+    assert.match(workflow, /test ! -e "\$\{run_root\}"/);
+    assert.match(workflow, /test ! -e "\$\{validation_root\}"/);
+});
+
+test('runner soft timeout은 API queue 10분보다 길고 terminal 전 반환하지 않는다', () => {
+    assert.match(runner, /DEVELOPMENT_API_QUEUE_TIMEOUT_MS = 10 \* 60_000/);
+    assert.match(
+        runner,
+        /DEVELOPMENT_JOB_POLL_SOFT_TIMEOUT_MS =[\s\S]+DEVELOPMENT_API_QUEUE_TIMEOUT_MS \+ 60_000/
+    );
+    assert.match(
+        runner,
+        /while \(current === null \|\| current\.status === 'PROCESSING'\)/
+    );
+    assert.match(runner, /JOB_POLL_SOFT_TIMEOUT_AFTER_TERMINAL/);
 });
 
 test('image는 non-root runner private directory를 mode 700으로 준비한다', () => {

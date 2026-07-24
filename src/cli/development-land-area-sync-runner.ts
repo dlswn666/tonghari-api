@@ -163,7 +163,9 @@ async function main(): Promise<void> {
             async readActivePropertyUnits(unionId) {
                 const { data, error } = await developmentDatabase
                     .from('property_units')
-                    .select('id, pnu, land_area, land_area_source')
+                    .select(
+                        'id, pnu, land_area, land_area_source, land_area_synced_at, land_area_sync_job_id'
+                    )
                     .eq('union_id', unionId)
                     .eq('is_deleted', false)
                     .order('id', { ascending: true })
@@ -195,8 +197,44 @@ async function main(): Promise<void> {
                                 ? null
                                 : String(row.land_area),
                         landAreaSource: source,
+                        landAreaSyncedAt:
+                            row.land_area_synced_at == null
+                                ? null
+                                : String(row.land_area_synced_at),
+                        landAreaSyncJobId:
+                            row.land_area_sync_job_id == null
+                                ? null
+                                : String(row.land_area_sync_job_id),
                     };
                 });
+            },
+            async readPropertyUnitsBySyncJobIds(syncJobIds) {
+                if (
+                    syncJobIds.length < 1 ||
+                    syncJobIds.length > target.targetCount
+                ) {
+                    throw new Error(
+                        'DEVELOPMENT_WRITE_ATTRIBUTION_SCOPE_INVALID'
+                    );
+                }
+                const { data, error } = await developmentDatabase
+                    .from('property_units')
+                    .select('id, union_id, land_area_sync_job_id')
+                    .in('land_area_sync_job_id', syncJobIds)
+                    .order('id', { ascending: true })
+                    .range(0, target.expectedPropertyUnitCount);
+                if (error || !Array.isArray(data)) {
+                    throw new Error(
+                        'DEVELOPMENT_WRITE_ATTRIBUTION_READ_FAILED'
+                    );
+                }
+                return data.map((row: Record<string, unknown>) => ({
+                    id: String(row.id ?? ''),
+                    unionId: String(row.union_id ?? ''),
+                    landAreaSyncJobId: String(
+                        row.land_area_sync_job_id ?? ''
+                    ),
+                }));
             },
         },
     });

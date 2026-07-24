@@ -27,6 +27,9 @@ export const DEVELOPMENT_EVIDENCE_MANIFEST_VERSION =
 export const DEVELOPMENT_RUN_ARTIFACT_VERSION =
     'land-area-development-run-artifact@1';
 export const DEVELOPMENT_GIS_JWT_TTL_SECONDS = 10 * 60;
+export const DEVELOPMENT_API_QUEUE_TIMEOUT_MS = 10 * 60_000;
+export const DEVELOPMENT_JOB_POLL_SOFT_TIMEOUT_MS =
+    DEVELOPMENT_API_QUEUE_TIMEOUT_MS + 60_000;
 
 export interface DevelopmentTargetManifest {
     version: typeof DEVELOPMENT_TARGET_MANIFEST_VERSION;
@@ -163,12 +166,23 @@ export interface DevelopmentActivePropertyUnit {
     pnu: string;
     landArea: string | null;
     landAreaSource: 'LEGACY_UNKNOWN' | 'MANUAL' | 'LADFRL' | 'LDAREG';
+    landAreaSyncedAt: string | null;
+    landAreaSyncJobId: string | null;
+}
+
+export interface DevelopmentAttributedPropertyUnit {
+    id: string;
+    unionId: string;
+    landAreaSyncJobId: string;
 }
 
 export interface DevelopmentReadOnlyPreflightReader {
     readActivePropertyUnits(
         unionId: string
     ): Promise<DevelopmentActivePropertyUnit[]>;
+    readPropertyUnitsBySyncJobIds(
+        syncJobIds: string[]
+    ): Promise<DevelopmentAttributedPropertyUnit[]>;
 }
 
 export interface DevelopmentReadOnlySnapshot {
@@ -177,6 +191,13 @@ export interface DevelopmentReadOnlySnapshot {
     positiveLandAreaCount: number;
     identityDigest: string;
     tupleDigest: string;
+    nonTargetTupleDigest: string;
+}
+
+export interface DevelopmentWriteAttribution {
+    writerJobCount: number;
+    attributedPropertyUnitCount: number;
+    attributionDigest: string;
 }
 
 export interface DevelopmentRunTargetResult {
@@ -184,6 +205,7 @@ export interface DevelopmentRunTargetResult {
     admission: 'NEW_DISCOVERY' | 'RESUMED_LATEST' | 'ALREADY_APPLIED';
     discoveryJobId: string | null;
     applyJobId: string | null;
+    writerJobId: string;
     status: 'COMPLETED' | 'FAILED';
     strategy: LandAreaSyncStrategy | null;
     scopeState: LandAreaSyncScopeState | null;
@@ -205,6 +227,7 @@ export interface DevelopmentRunArtifact {
     completedAt: string;
     preflight: DevelopmentReadOnlySnapshot | null;
     postflight: DevelopmentReadOnlySnapshot | null;
+    writeAttribution: DevelopmentWriteAttribution | null;
     results: DevelopmentRunTargetResult[];
     gate: {
         status: 'PASS' | 'FAIL';
@@ -858,7 +881,14 @@ export class LocalhostDevelopmentLandAreaSyncClient
             )}?unionId=${encodeURIComponent(unionId)}`,
             { method: 'GET' }
         );
-        return requireApiJob(response.value);
+        const job = requireApiJob(response.value);
+        if (
+            job.jobId.toLowerCase() !== jobId.toLowerCase() ||
+            job.unionId.toLowerCase() !== unionId.toLowerCase()
+        ) {
+            throw new ControlledRunnerError('API_JOB_SCOPE_MISMATCH');
+        }
+        return job;
     }
 
     async admitDiscovery(unionId: string, pnu: string): Promise<string> {
@@ -960,27 +990,85 @@ function hasBlockingIssue(job: LandAreaSyncApiJob): boolean {
     return codes.some((code) => blockingPattern.test(code));
 }
 
+function isAmbiguousApiNetworkError(error: unknown): boolean {
+    return (
+        error instanceof ControlledApiError &&
+        error.status === 0 &&
+        error.code === 'API_NETWORK_ERROR'
+    );
+}
+
+async function reconcileAmbiguousAdmission(input: {
+    client: LandAreaSyncApiClient;
+    unionId: string;
+    pnu: string;
+    sourceDiscoveryJobId: string | null;
+    pollIntervalMs: number;
+    sleep: (milliseconds: number) => Promise<void>;
+}): Promise<LandAreaSyncApiJob> {
+    // POST 응답이 유실되면 서버가 durable job을 만들었는지 클라이언트가 알 수
+    // 없다. cancel/idempotency endpoint가 없으므로 latest lineage가 나타날 때까지
+    // operation lock을 보유한다. 영구 미확인은 영구 lock인 fail-closed 상태다.
+    for (;;) {
+        await input.sleep(input.pollIntervalMs);
+        try {
+            const latest = await input.client.getLatest(
+                input.unionId,
+                input.pnu
+            );
+            if (
+                latest &&
+                (input.sourceDiscoveryJobId === null
+                    ? latest.landAreaSync?.sourceDiscoveryJobId == null
+                    : latest.landAreaSync?.sourceDiscoveryJobId ===
+                      input.sourceDiscoveryJobId)
+            ) {
+                return latest;
+            }
+        } catch {
+            // 승인 여부가 불명확한 동안에는 반환하지 않는다.
+        }
+    }
+}
+
 async function pollTerminal(
     client: LandAreaSyncApiClient,
     unionId: string,
-    initial: LandAreaSyncApiJob,
+    jobId: string,
+    initial: LandAreaSyncApiJob | null,
     input: {
         pollIntervalMs: number;
         jobTimeoutMs: number;
         sleep: (milliseconds: number) => Promise<void>;
         nowMs: () => number;
     }
-): Promise<LandAreaSyncApiJob> {
+): Promise<{
+    job: LandAreaSyncApiJob;
+    softDeadlineExceeded: boolean;
+}> {
     let current = initial;
     const deadline = input.nowMs() + input.jobTimeoutMs;
-    while (current.status === 'PROCESSING') {
+    let softDeadlineExceeded = false;
+    while (current === null || current.status === 'PROCESSING') {
         if (input.nowMs() >= deadline) {
-            throw new ControlledRunnerError('JOB_POLL_TIMEOUT');
+            // p-queue의 10분 제한은 worker 실행 상한이며 queue 대기 시간은 별도다.
+            // deadline 이후에도 durable terminal을 확인할 때까지 drain하여 runner/SSH
+            // 종료가 진행 중인 DB write와 operation lock을 분리하지 못하게 한다.
+            softDeadlineExceeded = true;
         }
         await input.sleep(input.pollIntervalMs);
-        current = await client.getJob(unionId, current.jobId);
+        try {
+            current = await client.getJob(unionId, jobId);
+        } catch {
+            // 이미 admission된 job의 terminal을 모르는 상태에서 반환하면 orphan write가
+            // 가능하다. API/DB가 복구될 때까지 lock 보유 프로세스가 fail-closed한다.
+            current = null;
+        }
+        if (input.nowMs() >= deadline) {
+            softDeadlineExceeded = true;
+        }
     }
-    return current;
+    return { job: current, softDeadlineExceeded };
 }
 
 function resultFromJob(
@@ -995,6 +1083,7 @@ function resultFromJob(
         admission,
         discoveryJobId,
         applyJobId,
+        writerJobId: job.jobId,
         status: job.status === 'FAILED' ? 'FAILED' : 'COMPLETED',
         strategy: job.landAreaSync?.branch ?? null,
         scopeState: job.landAreaSync?.scopeState ?? null,
@@ -1035,6 +1124,17 @@ function isPositiveLandArea(value: string | null): boolean {
     return value !== null && assertPositiveDecimal(value);
 }
 
+function canonicalLandTuple(row: DevelopmentActivePropertyUnit) {
+    return {
+        id: row.id,
+        pnu: row.pnu,
+        landArea: row.landArea,
+        landAreaSource: row.landAreaSource,
+        landAreaSyncedAt: row.landAreaSyncedAt,
+        landAreaSyncJobId: row.landAreaSyncJobId,
+    };
+}
+
 async function readAndValidateDevelopmentSnapshot(input: {
     reader: DevelopmentReadOnlyPreflightReader;
     target: DevelopmentTargetManifest;
@@ -1058,7 +1158,18 @@ async function readAndValidateDevelopmentSnapshot(input: {
                     !/^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/.test(row.landArea)) ||
                 !['LEGACY_UNKNOWN', 'MANUAL', 'LADFRL', 'LDAREG'].includes(
                     row.landAreaSource
-                )
+                ) ||
+                (row.landAreaSyncedAt !== null &&
+                    !Number.isFinite(Date.parse(row.landAreaSyncedAt))) ||
+                (row.landAreaSyncJobId !== null &&
+                    !UUID_RE.test(row.landAreaSyncJobId)) ||
+                (['LEGACY_UNKNOWN', 'MANUAL'].includes(row.landAreaSource) &&
+                    (row.landAreaSyncedAt !== null ||
+                        row.landAreaSyncJobId !== null)) ||
+                (['LADFRL', 'LDAREG'].includes(row.landAreaSource) &&
+                    (!isPositiveLandArea(row.landArea) ||
+                        row.landAreaSyncedAt === null ||
+                        row.landAreaSyncJobId === null))
         ) ||
         new Set(rows.map((row) => row.id)).size !== rows.length
     ) {
@@ -1124,12 +1235,15 @@ async function readAndValidateDevelopmentSnapshot(input: {
     }
 
     const identityRows = rows.map((row) => ({ id: row.id, pnu: row.pnu }));
-    const tupleRows = rows.map((row) => ({
-        id: row.id,
-        pnu: row.pnu,
-        landArea: row.landArea,
-        landAreaSource: row.landAreaSource,
-    }));
+    const tupleRows = rows.map(canonicalLandTuple);
+    const targetPropertyUnitIds = new Set(
+        input.evidence.entries.flatMap(
+            (entry) => entry.expectedPropertyUnitIds
+        )
+    );
+    const nonTargetTupleRows = tupleRows.filter(
+        (row) => !targetPropertyUnitIds.has(row.id)
+    );
     const summary: DevelopmentReadOnlySnapshot = {
         activePropertyUnitCount: rows.length,
         activePnuCount,
@@ -1138,6 +1252,7 @@ async function readAndValidateDevelopmentSnapshot(input: {
         ).length,
         identityDigest: digestJson(identityRows),
         tupleDigest: digestJson(tupleRows),
+        nonTargetTupleDigest: digestJson(nonTargetTupleRows),
     };
     if (
         input.expectedIdentityDigest &&
@@ -1148,6 +1263,161 @@ async function readAndValidateDevelopmentSnapshot(input: {
         );
     }
     return { summary, rows };
+}
+
+function assertExpectedPostflightTransition(input: {
+    preRows: DevelopmentActivePropertyUnit[];
+    postRows: DevelopmentActivePropertyUnit[];
+    evidence: DevelopmentEvidenceManifest;
+    results: DevelopmentRunTargetResult[];
+}): void {
+    const preById = new Map(input.preRows.map((row) => [row.id, row]));
+    const evidenceByPropertyId = new Map<
+        string,
+        {
+            entry: DevelopmentEvidenceEntry;
+            expectedArea: string;
+        }
+    >();
+    for (const entry of input.evidence.entries) {
+        const expectedAreas = new Map(
+            entry.expectedProposedLandAreas.map((area) => [
+                area.propertyUnitId,
+                area.landArea,
+            ])
+        );
+        for (const propertyUnitId of entry.expectedPropertyUnitIds) {
+            evidenceByPropertyId.set(propertyUnitId, {
+                entry,
+                expectedArea: expectedAreas.get(propertyUnitId)!,
+            });
+        }
+    }
+    const resultByPnu = new Map(
+        input.results.map((result) => [result.pnu, result])
+    );
+
+    for (const post of input.postRows) {
+        const pre = preById.get(post.id);
+        if (!pre) {
+            throw new ControlledRunnerError(
+                'POSTFLIGHT_PROPERTY_IDENTITY_CHANGED'
+            );
+        }
+        const expected = evidenceByPropertyId.get(post.id);
+        if (!expected) {
+            if (
+                JSON.stringify(canonicalLandTuple(pre)) !==
+                JSON.stringify(canonicalLandTuple(post))
+            ) {
+                throw new ControlledRunnerError(
+                    'POSTFLIGHT_NON_TARGET_TUPLE_CHANGED'
+                );
+            }
+            continue;
+        }
+
+        const result = resultByPnu.get(expected.entry.anchorPnu);
+        if (!result) {
+            throw new ControlledRunnerError(
+                'POSTFLIGHT_TARGET_RESULT_MISSING'
+            );
+        }
+        if (result.admission === 'ALREADY_APPLIED') {
+            if (
+                JSON.stringify(canonicalLandTuple(pre)) !==
+                    JSON.stringify(canonicalLandTuple(post)) ||
+                post.landArea !== expected.expectedArea ||
+                post.landAreaSource !== expected.entry.expectedStrategy ||
+                post.landAreaSyncJobId !== result.writerJobId
+            ) {
+                throw new ControlledRunnerError(
+                    'POSTFLIGHT_ALREADY_APPLIED_TUPLE_CHANGED'
+                );
+            }
+            continue;
+        }
+        if (
+            post.landArea !== expected.expectedArea ||
+            post.landAreaSource !== expected.entry.expectedStrategy ||
+            post.landAreaSyncJobId !== result.writerJobId ||
+            post.landAreaSyncedAt === null ||
+            !Number.isFinite(Date.parse(post.landAreaSyncedAt))
+        ) {
+            throw new ControlledRunnerError(
+                'POSTFLIGHT_TARGET_TUPLE_MISMATCH'
+            );
+        }
+    }
+}
+
+async function readAndValidateWriteAttribution(input: {
+    reader: DevelopmentReadOnlyPreflightReader;
+    target: DevelopmentTargetManifest;
+    evidence: DevelopmentEvidenceManifest;
+    results: DevelopmentRunTargetResult[];
+}): Promise<DevelopmentWriteAttribution> {
+    const writerJobIds = [
+        ...new Set(input.results.map((result) => result.writerJobId)),
+    ].sort();
+    if (
+        writerJobIds.length === 0 ||
+        writerJobIds.some((jobId) => !UUID_RE.test(jobId))
+    ) {
+        throw new ControlledRunnerError(
+            'POSTFLIGHT_WRITE_ATTRIBUTION_INVALID'
+        );
+    }
+    const attributedRows = [
+        ...(await input.reader.readPropertyUnitsBySyncJobIds(writerJobIds)),
+    ].sort((left, right) => left.id.localeCompare(right.id));
+    const expectedWriterByPropertyId = new Map<string, string>();
+    const resultByPnu = new Map(
+        input.results.map((result) => [result.pnu, result])
+    );
+    for (const entry of input.evidence.entries) {
+        const result = resultByPnu.get(entry.anchorPnu);
+        if (!result) {
+            throw new ControlledRunnerError(
+                'POSTFLIGHT_WRITE_ATTRIBUTION_INVALID'
+            );
+        }
+        for (const propertyUnitId of entry.expectedPropertyUnitIds) {
+            expectedWriterByPropertyId.set(
+                propertyUnitId,
+                result.writerJobId
+            );
+        }
+    }
+    if (
+        attributedRows.length !== expectedWriterByPropertyId.size ||
+        new Set(attributedRows.map((row) => row.id)).size !==
+            attributedRows.length ||
+        attributedRows.some(
+            (row) =>
+                !UUID_RE.test(row.id) ||
+                !UUID_RE.test(row.unionId) ||
+                !UUID_RE.test(row.landAreaSyncJobId) ||
+                row.unionId !== input.target.unionId ||
+                expectedWriterByPropertyId.get(row.id) !==
+                    row.landAreaSyncJobId
+        )
+    ) {
+        throw new ControlledRunnerError(
+            'POSTFLIGHT_CROSS_UNION_OR_SCOPE_WRITE_DETECTED'
+        );
+    }
+    return {
+        writerJobCount: writerJobIds.length,
+        attributedPropertyUnitCount: attributedRows.length,
+        attributionDigest: digestJson(
+            attributedRows.map((row) => ({
+                id: row.id,
+                unionId: row.unionId,
+                writerJobId: row.landAreaSyncJobId,
+            }))
+        ),
+    };
 }
 
 export async function runDevelopmentLandAreaSync(input: {
@@ -1167,14 +1437,15 @@ export async function runDevelopmentLandAreaSync(input: {
         input.evidence
     );
     const pollIntervalMs = input.pollIntervalMs ?? 3_000;
-    const jobTimeoutMs = input.jobTimeoutMs ?? 8 * 60_000;
+    const jobTimeoutMs =
+        input.jobTimeoutMs ?? DEVELOPMENT_JOB_POLL_SOFT_TIMEOUT_MS;
     if (
         !Number.isSafeInteger(pollIntervalMs) ||
         pollIntervalMs < 100 ||
         pollIntervalMs > 30_000 ||
         !Number.isSafeInteger(jobTimeoutMs) ||
-        jobTimeoutMs < 1_000 ||
-        jobTimeoutMs > 15 * 60_000
+        jobTimeoutMs < DEVELOPMENT_JOB_POLL_SOFT_TIMEOUT_MS ||
+        jobTimeoutMs > 30 * 60_000
     ) {
         throw new ControlledRunnerError('POLL_CONFIGURATION_INVALID');
     }
@@ -1193,15 +1464,18 @@ export async function runDevelopmentLandAreaSync(input: {
     let stoppedBeforePnu: string | null = null;
     let preflight: DevelopmentReadOnlySnapshot | null = null;
     let postflight: DevelopmentReadOnlySnapshot | null = null;
+    let preflightRows: DevelopmentActivePropertyUnit[] = [];
+    let writeAttribution: DevelopmentWriteAttribution | null = null;
     try {
-        preflight = (
+        const observedPreflight =
             await readAndValidateDevelopmentSnapshot({
                 reader: input.preflightReader,
                 target: input.target,
                 evidence: input.evidence,
                 phase: 'PRE',
-            })
-        ).summary;
+            });
+        preflight = observedPreflight.summary;
+        preflightRows = observedPreflight.rows;
     } catch (error) {
         failureCode =
             error instanceof ControlledRunnerError
@@ -1223,24 +1497,45 @@ export async function runDevelopmentLandAreaSync(input: {
             let applyJobId: string | null = null;
             if (!latest) {
                 admission = 'NEW_DISCOVERY';
-                discoveryJobId = await input.client.admitDiscovery(
-                    input.target.unionId,
-                    pnu
-                );
-                latest = await input.client.getJob(
-                    input.target.unionId,
-                    discoveryJobId
-                );
+                try {
+                    discoveryJobId =
+                        await input.client.admitDiscovery(
+                            input.target.unionId,
+                            pnu
+                        );
+                } catch (error) {
+                    if (!isAmbiguousApiNetworkError(error)) {
+                        throw error;
+                    }
+                    latest = await reconcileAmbiguousAdmission({
+                        client: input.client,
+                        unionId: input.target.unionId,
+                        pnu,
+                        sourceDiscoveryJobId: null,
+                        pollIntervalMs,
+                        sleep,
+                    });
+                    discoveryJobId = latest.jobId;
+                }
             } else if (
                 latest.status === 'COMPLETED' &&
                 latest.landAreaSync?.outcome === 'APPLIED'
             ) {
                 admission = 'ALREADY_APPLIED';
+            } else if (
+                typeof latest.landAreaSync?.sourceDiscoveryJobId === 'string'
+            ) {
+                discoveryJobId =
+                    latest.landAreaSync.sourceDiscoveryJobId;
+                applyJobId = latest.jobId;
+            } else {
+                discoveryJobId = latest.jobId;
             }
 
-            let terminal = await pollTerminal(
+            let polled = await pollTerminal(
                 input.client,
                 input.target.unionId,
+                latest?.jobId ?? discoveryJobId!,
                 latest,
                 {
                     pollIntervalMs,
@@ -1249,6 +1544,12 @@ export async function runDevelopmentLandAreaSync(input: {
                     nowMs: () => now().getTime(),
                 }
             );
+            let terminal = polled.job;
+            if (polled.softDeadlineExceeded) {
+                throw new ControlledRunnerError(
+                    'JOB_POLL_SOFT_TIMEOUT_AFTER_TERMINAL'
+                );
+            }
 
             if (
                 terminal.status === 'FAILED' ||
@@ -1287,33 +1588,52 @@ export async function runDevelopmentLandAreaSync(input: {
                     evidence.expectedStrategy === 'LADFRL'
                         ? evidence.landOwnershipEvidence!
                         : null;
-                applyJobId = await input.client.confirmDiscovery(
-                    discoveryJobId,
-                    {
-                        unionId: input.target.unionId,
-                        expectedScopeHash: snapshot.scopeHash,
-                        propertyUnitIds: snapshot.candidatePropertyUnitIds,
-                        parcelScopeConfirmed: true,
-                        landOwnershipConfirmed:
-                            evidence.expectedStrategy === 'LADFRL'
-                                ? true
-                                : null,
-                        overwriteManualConfirmed: isManual,
-                        parcelScopeEvidenceKind:
-                            evidence.parcelScopeEvidence.kind,
-                        parcelScopeEvidenceRef:
-                            evidence.parcelScopeEvidence.ref,
-                        landOwnershipEvidenceKind: ownership?.kind ?? null,
-                        landOwnershipEvidenceRef: ownership?.ref ?? null,
+                let reconciledApply: LandAreaSyncApiJob | null = null;
+                try {
+                    applyJobId =
+                        await input.client.confirmDiscovery(
+                            discoveryJobId,
+                            {
+                                unionId: input.target.unionId,
+                                expectedScopeHash: snapshot.scopeHash,
+                                propertyUnitIds:
+                                    snapshot.candidatePropertyUnitIds,
+                                parcelScopeConfirmed: true,
+                                landOwnershipConfirmed:
+                                    evidence.expectedStrategy === 'LADFRL'
+                                        ? true
+                                        : null,
+                                overwriteManualConfirmed: isManual,
+                                parcelScopeEvidenceKind:
+                                    evidence.parcelScopeEvidence.kind,
+                                parcelScopeEvidenceRef:
+                                    evidence.parcelScopeEvidence.ref,
+                                landOwnershipEvidenceKind:
+                                    ownership?.kind ?? null,
+                                landOwnershipEvidenceRef:
+                                    ownership?.ref ?? null,
+                            }
+                        );
+                } catch (error) {
+                    if (!isAmbiguousApiNetworkError(error)) {
+                        throw error;
                     }
-                );
-                terminal = await pollTerminal(
+                    reconciledApply =
+                        await reconcileAmbiguousAdmission({
+                            client: input.client,
+                            unionId: input.target.unionId,
+                            pnu,
+                            sourceDiscoveryJobId: discoveryJobId,
+                            pollIntervalMs,
+                            sleep,
+                        });
+                    applyJobId = reconciledApply.jobId;
+                }
+                polled = await pollTerminal(
                     input.client,
                     input.target.unionId,
-                    await input.client.getJob(
-                        input.target.unionId,
-                        applyJobId
-                    ),
+                    applyJobId,
+                    reconciledApply,
                     {
                         pollIntervalMs,
                         jobTimeoutMs,
@@ -1321,6 +1641,12 @@ export async function runDevelopmentLandAreaSync(input: {
                         nowMs: () => now().getTime(),
                     }
                 );
+                terminal = polled.job;
+                if (polled.softDeadlineExceeded) {
+                    throw new ControlledRunnerError(
+                        'JOB_POLL_SOFT_TIMEOUT_AFTER_TERMINAL'
+                    );
+                }
             }
 
             assertAppliedTerminal(terminal);
@@ -1361,15 +1687,38 @@ export async function runDevelopmentLandAreaSync(input: {
     }
     if (preflight) {
         try {
-            postflight = (
+            const observedPostflight =
                 await readAndValidateDevelopmentSnapshot({
                     reader: input.preflightReader,
                     target: input.target,
                     evidence: input.evidence,
                     phase: 'POST',
                     expectedIdentityDigest: preflight.identityDigest,
-                })
-            ).summary;
+                });
+            postflight = observedPostflight.summary;
+            if (failureCode === null) {
+                assertExpectedPostflightTransition({
+                    preRows: preflightRows,
+                    postRows: observedPostflight.rows,
+                    evidence: input.evidence,
+                    results,
+                });
+                if (
+                    preflight.nonTargetTupleDigest !==
+                    postflight.nonTargetTupleDigest
+                ) {
+                    throw new ControlledRunnerError(
+                        'POSTFLIGHT_NON_TARGET_TUPLE_CHANGED'
+                    );
+                }
+                writeAttribution =
+                    await readAndValidateWriteAttribution({
+                        reader: input.preflightReader,
+                        target: input.target,
+                        evidence: input.evidence,
+                        results,
+                    });
+            }
         } catch (error) {
             if (failureCode === null) {
                 failureCode =
@@ -1392,6 +1741,7 @@ export async function runDevelopmentLandAreaSync(input: {
         completedAt: now().toISOString(),
         preflight,
         postflight,
+        writeAttribution,
         results,
         gate: {
             status: failureCode === null ? 'PASS' : 'FAIL',
@@ -1426,6 +1776,7 @@ export function validateDevelopmentRunArtifact(
             'completedAt',
             'preflight',
             'postflight',
+            'writeAttribution',
             'results',
             'gate',
         ]) ||
@@ -1480,6 +1831,7 @@ export function validateDevelopmentRunArtifact(
                 'positiveLandAreaCount',
                 'identityDigest',
                 'tupleDigest',
+                'nonTargetTupleDigest',
             ]) ||
             snapshot.activePropertyUnitCount !==
                 target.expectedUnionActivePropertyUnitCount ||
@@ -1491,7 +1843,9 @@ export function validateDevelopmentRunArtifact(
             typeof snapshot.identityDigest !== 'string' ||
             !HEX64_RE.test(snapshot.identityDigest) ||
             typeof snapshot.tupleDigest !== 'string' ||
-            !HEX64_RE.test(snapshot.tupleDigest)
+            !HEX64_RE.test(snapshot.tupleDigest) ||
+            typeof snapshot.nonTargetTupleDigest !== 'string' ||
+            !HEX64_RE.test(snapshot.nonTargetTupleDigest)
         ) {
             throw new ControlledRunnerError('RUN_ARTIFACT_SNAPSHOT_INVALID');
         }
@@ -1506,6 +1860,43 @@ export function validateDevelopmentRunArtifact(
     ) {
         throw new ControlledRunnerError('RUN_ARTIFACT_IDENTITY_CHANGED');
     }
+    if (
+        preflight &&
+        postflight &&
+        preflight.nonTargetTupleDigest !== postflight.nonTargetTupleDigest
+    ) {
+        throw new ControlledRunnerError(
+            'RUN_ARTIFACT_NON_TARGET_TUPLE_CHANGED'
+        );
+    }
+
+    let writeAttribution: DevelopmentWriteAttribution | null = null;
+    if (value.writeAttribution !== null) {
+        const attribution = asRecord(
+            value.writeAttribution,
+            'RUN_ARTIFACT_WRITE_ATTRIBUTION_INVALID'
+        );
+        if (
+            !hasExactKeys(attribution, [
+                'writerJobCount',
+                'attributedPropertyUnitCount',
+                'attributionDigest',
+            ]) ||
+            !Number.isSafeInteger(attribution.writerJobCount) ||
+            (attribution.writerJobCount as number) < 1 ||
+            (attribution.writerJobCount as number) > target.targetCount ||
+            attribution.attributedPropertyUnitCount !==
+                target.expectedPropertyUnitCount ||
+            typeof attribution.attributionDigest !== 'string' ||
+            !HEX64_RE.test(attribution.attributionDigest)
+        ) {
+            throw new ControlledRunnerError(
+                'RUN_ARTIFACT_WRITE_ATTRIBUTION_INVALID'
+            );
+        }
+        writeAttribution =
+            attribution as unknown as DevelopmentWriteAttribution;
+    }
 
     const results = value.results.map((item) => {
         const result = asRecord(item, 'RUN_ARTIFACT_INVALID');
@@ -1515,6 +1906,7 @@ export function validateDevelopmentRunArtifact(
                 'admission',
                 'discoveryJobId',
                 'applyJobId',
+                'writerJobId',
                 'status',
                 'strategy',
                 'scopeState',
@@ -1535,6 +1927,8 @@ export function validateDevelopmentRunArtifact(
             (result.applyJobId !== null &&
                 (typeof result.applyJobId !== 'string' ||
                     !UUID_RE.test(result.applyJobId))) ||
+            typeof result.writerJobId !== 'string' ||
+            !UUID_RE.test(result.writerJobId) ||
             (result.status !== 'COMPLETED' && result.status !== 'FAILED') ||
             (result.strategy !== null &&
                 result.strategy !== 'LADFRL' &&
@@ -1594,7 +1988,8 @@ export function validateDevelopmentRunArtifact(
                     result.outcome !== 'APPLIED'
             ) ||
             !preflight ||
-            !postflight
+            !postflight ||
+            !writeAttribution
         ) {
             throw new ControlledRunnerError('RUN_ARTIFACT_PASS_INVALID');
         }
@@ -1614,6 +2009,7 @@ export function validateDevelopmentRunArtifact(
         completedAt: value.completedAt,
         preflight,
         postflight,
+        writeAttribution,
         results,
         gate: {
             status: gate.status as 'PASS' | 'FAIL',
