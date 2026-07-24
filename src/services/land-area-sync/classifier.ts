@@ -18,10 +18,16 @@ import {
     type HousingCategory,
     type HousingStrategyFamily,
 } from './housing-purpose-allowlist.fixture';
+import { housingOtherPurposeSignals } from './housing-purpose-signals';
 
 /** 분류 입력. 분류에 필요한 표제부 필드와 root 관리번호 집합만 받는다. */
 export interface HousingClassifierInput {
-    titleRows: Array<{ regstrGbCd?: string; mainPurpsCd?: string; mainPurpsCdNm?: string }>;
+    titleRows: Array<{
+        regstrGbCd?: string;
+        mainPurpsCd?: string;
+        mainPurpsCdNm?: string;
+        etcPurps?: string;
+    }>;
     /** DB resolver·title seed가 확정한 root 관리번호 집합(복수면 REVIEW). */
     rootIdentities: string[];
 }
@@ -33,6 +39,8 @@ export type ClassificationReason =
     | 'MIXED_PURPOSE_PAIR'
     | 'EMPTY_PURPOSE_CODE_OR_NAME'
     | 'CODE_NAME_MISMATCH'
+    | 'REQUIRED_OTHER_PURPOSE_SIGNAL_MISSING'
+    | 'CONTRADICTORY_OTHER_PURPOSE_SIGNAL'
     | 'UNSUPPORTED_HOUSING_TYPE'
     | 'NON_RESIDENTIAL_OR_MIXED';
 
@@ -69,6 +77,7 @@ export function classifyHousingType(inputData: HousingClassifierInput): HousingC
         regstrGbCd: s(r.regstrGbCd),
         mainPurpsCd: s(r.mainPurpsCd),
         mainPurpsCdNm: s(r.mainPurpsCdNm),
+        otherPurposeSignals: housingOtherPurposeSignals(r.etcPurps),
     }));
     for (const r of norm) {
         if (!r.regstrGbCd || !r.mainPurpsCd || !r.mainPurpsCdNm) {
@@ -90,11 +99,56 @@ export function classifyHousingType(inputData: HousingClassifierInput): HousingC
     const one = norm[0];
 
     // allowlist exact (대장구분·코드·명칭) 조회
-    const matched = HOUSING_PURPOSE_ALLOWLIST.find(
+    const exactPairMatches = HOUSING_PURPOSE_ALLOWLIST.filter(
         (p) => p.regstrGbCd === one.regstrGbCd && p.mainPurpsCd === one.mainPurpsCd && p.mainPurpsCdNm === one.mainPurpsCdNm
+    );
+    const matched = exactPairMatches.find(
+        (pair) => {
+            const expectedSignal =
+                pair.category === 'DETACHED'
+                    ? 'DETACHED_HOUSE'
+                    : pair.category === 'MULTIFAMILY'
+                      ? 'MULTI_UNIT_HOUSE'
+                      : 'MULTIPLEX_HOUSE';
+            return norm.every(
+                (row) =>
+                    row.otherPurposeSignals.every(
+                        (signal) => signal === expectedSignal
+                    ) &&
+                    (!pair.requiredOtherPurposeSignal ||
+                        row.otherPurposeSignals.includes(
+                            pair.requiredOtherPurposeSignal
+                        ))
+            );
+        }
     );
     if (matched) {
         return { kind: 'CLASSIFIED', family: matched.family, category: matched.category, regstrGbCd: matched.regstrGbCd };
+    }
+    if (exactPairMatches.length > 0) {
+        const pair = exactPairMatches[0];
+        const expectedSignal =
+            pair.category === 'DETACHED'
+                ? 'DETACHED_HOUSE'
+                : pair.category === 'MULTIFAMILY'
+                  ? 'MULTI_UNIT_HOUSE'
+                  : 'MULTIPLEX_HOUSE';
+        if (
+            norm.some((row) =>
+                row.otherPurposeSignals.some(
+                    (signal) => signal !== expectedSignal
+                )
+            )
+        ) {
+            return review(
+                'CONTRADICTORY_OTHER_PURPOSE_SIGNAL',
+                'BUILDING_CLASSIFICATION_CONFLICT'
+            );
+        }
+        return review(
+            'REQUIRED_OTHER_PURPOSE_SIGNAL_MISSING',
+            'BUILDING_CLASSIFICATION_CONFLICT'
+        );
     }
 
     // 인지 가능하지만 미지원(아파트·연립·다중) — exact 명칭 일치로만 사유를 세분화(자동 승격 아님)

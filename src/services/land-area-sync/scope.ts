@@ -28,13 +28,14 @@ import type {
 import { assembleAttachedPnus, type AtchJibunRowInput } from '../gis-shared/pnu';
 import { resolveBylotCounts, BYLOT_SOURCE_POLICY, type BylotResolution } from './bylot';
 import { classifyHousingType, type HousingClassification } from './classifier';
+import { housingOtherPurposeSignals } from './housing-purpose-signals';
 import {
     isOptionalRegistryManagementPkValid,
     normalizeRegistryManagementPk,
 } from './registry-pk';
 
 export const SCOPE_HASH_VERSION = 'land-area-sync/scope-hash@2';
-export const EXTERNAL_SCOPE_DIGEST_VERSION = 'land-area-sync/external-scope-digest@2';
+export const EXTERNAL_SCOPE_DIGEST_VERSION = 'land-area-sync/external-scope-digest@3';
 
 // ── DB resolver 결과 (DESIGN §11 계약) ────────────────────────────
 
@@ -257,7 +258,13 @@ export function resolveParcelScopeCompleteness(input: ParcelScopeInput): ParcelS
     const attached = assembleAttachedPnus(normalizedAttachedRows as unknown as AtchJibunRowInput[]);
     const bylot = resolveBylotCounts({ policy, titleRows, basisRows, attachedPks, basisFallbackInvoked });
     const classification = classifyHousingType({
-        titleRows: titleRows.map((r) => ({ regstrGbCd: r.regstrGbCd, mainPurpsCd: r.mainPurpsCd, mainPurpsCdNm: r.mainPurpsCdNm })),
+        titleRows: titleRows.map((r) => ({
+            regstrGbCd: r.regstrGbCd,
+            mainPurpsCd: r.mainPurpsCd,
+            mainPurpsCdNm: r.mainPurpsCdNm,
+            etcPurps:
+                typeof r.etcPurps === 'string' ? r.etcPurps : undefined,
+        })),
         rootIdentities: dbScope.rootBuildingIdentities,
     });
     const externalScopeDigest = buildExternalScopeDigest(baseScans, bylot, policy);
@@ -499,6 +506,8 @@ function buildExternalScopeDigest(baseScans: BasePnuScan[], bylot: BylotResoluti
                     regstrGbCd: normStr(r.regstrGbCd),
                     mainPurpsCd: normStr(r.mainPurpsCd),
                     mainPurpsCdNm: normStr(r.mainPurpsCdNm),
+                    otherPurposeSignals:
+                        housingOtherPurposeSignals(r.etcPurps),
                     bylotCnt: normStr(r.bylotCnt),
                 }))
             );
