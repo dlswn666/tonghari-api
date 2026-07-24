@@ -10,6 +10,7 @@ on:
         default: mia-seven-first-observation-20260724
         options:
           - mia-seven-first-observation-20260724
+          - mia-seven-791-2315-first-observation-20260725
 
 permissions:
   contents: read
@@ -61,6 +62,9 @@ jobs:
           case "${MANIFEST_NAME}" in
             mia-seven-first-observation-20260724)
               manifest_path="phase0-manifests/mia-seven-first-observation-20260724.json"
+              ;;
+            mia-seven-791-2315-first-observation-20260725)
+              manifest_path="phase0-manifests/mia-seven-791-2315-first-observation-20260725.json"
               ;;
             *)
               echo "::error::Manifest is not repository-approved."
