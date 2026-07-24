@@ -142,9 +142,10 @@ EC2 적용 시에는 다음 보호 조건을 모두 확인한다.
 7. 컨테이너 재기동 전 production lock과 land-area operation lock을 고정 순서로 획득한다.
 8. 성공 보고 전 runtime rollback container와 secret-bearing `.env` backup의 삭제 및
    부재를 재검증하고, cleanup 명령이나 부재 검증이 실패하면 exit `71`로 green을 금지한다.
-9. 같은-run idempotent return 전에 최대 8개의 orphan `.env.land-area-sync.backup.*`만
-   소유자와 mode `600`을 검증해 삭제하고, glob 재검사에서 하나라도 남으면 exit `71`로
-   중단한다.
+9. 같은-run idempotent return 전에 orphan `.env.land-area-sync.backup.*`를 최대 8개까지
+   검출하고 소유자와 mode `600`을 확인한다. 현재는 성공 apply 뒤 cleanup만 실패했다는
+   durable marker가 없으므로 하나라도 있으면 자동 삭제하지 않고 복구 근거로 보존한 채
+   exit `71`로 중단한다.
 10. runner와 EC2에 staged한 raw allowlist는 모든 종료 경로에서 삭제 후 부재를 검증하고,
     삭제 실패를 `|| true`로 무시하지 않는다.
 

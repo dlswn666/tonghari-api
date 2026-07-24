@@ -1,7 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFileSync } from 'node:fs';
+import {
+    chmodSync,
+    existsSync,
+    mkdtempSync,
+    readFileSync,
+    rmSync,
+    writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 const workflow = readFileSync(
     join(
@@ -254,19 +263,89 @@ test('정상-success cleanup은 rollback container와 secret backup 부재를 �
     assert.match(successCleanupBody, /CLEANUP_FAILED:[\s\S]*exit 71/);
 });
 
-test('orphan env backup과 staged raw allowlist는 idempotent return 전에 bounded fail-closed cleanup한다', () => {
+test('rollback 실패 가능성이 있는 unique orphan env backup은 same-run return 전에 보존하고 fail closed한다', () => {
     const remoteRuntimeBody =
         workflow.split("<<'REMOTE_RUNTIME'")[1] ?? '';
-    const orphanCleanupBody =
-        workflow.split('          cleanup_orphan_env_backups() {')[1]?.split(
-            '          cleanup_orphan_env_backups'
-        )[0] ?? '';
+    const functionStart = remoteRuntimeBody.indexOf(
+        '          assert_no_orphan_env_backups() {'
+    );
+    const guardCall = '          assert_no_orphan_env_backups\n';
     const cleanupCallIndex = remoteRuntimeBody.indexOf(
-        '          cleanup_orphan_env_backups\n'
+        guardCall
     );
     const enableDecisionIndex = remoteRuntimeBody.indexOf(
         '          if [[ "${RUNTIME_ACTION}" == "enable" ]]; then'
     );
+    const orphanGuardScript = remoteRuntimeBody
+        .slice(functionStart, cleanupCallIndex + guardCall.length)
+        .replace(/^ {10}/gm, '');
+
+    assert.ok(functionStart >= 0);
+    assert.notEqual(orphanGuardScript, '');
+    assert.match(
+        orphanGuardScript,
+        /\.env\.land-area-sync\.backup\.\*/
+    );
+    assert.match(orphanGuardScript, /\$\{#orphan_backups\[@\]\} > 8/);
+    assert.equal(
+        (
+            orphanGuardScript.match(
+                /\.env\.land-area-sync\.backup\.\*/g
+            ) ?? []
+        ).length,
+        1
+    );
+    assert.doesNotMatch(orphanGuardScript, /\brm\b|\bunlink\b/);
+    assert.match(
+        orphanGuardScript,
+        /\$\{#orphan_backups\[@\]\} > 0[\s\S]*preserved for manual review[\s\S]*return 71/
+    );
+    assert.ok(cleanupCallIndex >= 0);
+    assert.ok(
+        cleanupCallIndex < enableDecisionIndex,
+        'orphan backup guard는 same-run enable early return보다 먼저 실행해야 한다'
+    );
+
+    const testRoot = mkdtempSync(
+        join(tmpdir(), 'land-area-sync-orphan-backup-')
+    );
+    const uniqueRecoveryBackup = join(
+        testRoot,
+        '.env.land-area-sync.backup.unique'
+    );
+    try {
+        writeFileSync(uniqueRecoveryBackup, 'recovery-secret', {
+            mode: 0o600,
+        });
+        chmodSync(uniqueRecoveryBackup, 0o600);
+        const result = spawnSync(
+            'bash',
+            [
+                '-c',
+                `set -Eeuo pipefail
+application_root="$1"
+stat() {
+    case "$2" in
+        "%u") id -u ;;
+        "%a") printf '600\\n' ;;
+        *) return 1 ;;
+    esac
+}
+${orphanGuardScript}`,
+                'workflow-orphan-guard',
+                testRoot,
+            ],
+            { encoding: 'utf8' }
+        );
+        assert.equal(result.status, 71);
+        assert.equal(existsSync(uniqueRecoveryBackup), true);
+        assert.match(result.stdout, /preserved for manual review/);
+    } finally {
+        rmSync(testRoot, { recursive: true, force: true });
+    }
+});
+
+test('staged raw allowlist는 모든 local/remote 종료 경로에서 fail-closed cleanup한다', () => {
     const remoteExitCleanupBody =
         workflow.split('          cleanup_run_files() {')[1]?.split(
             '          trap cleanup_run_files EXIT'
@@ -283,27 +362,6 @@ test('orphan env backup과 staged raw allowlist는 idempotent return 전에 boun
             workflow.split(`      - name: ${name}`)[1]?.split(
                 '\n  apply-runtime-gate:'
             )[0] ?? ''
-    );
-
-    assert.notEqual(orphanCleanupBody, '');
-    assert.match(
-        orphanCleanupBody,
-        /\.env\.land-area-sync\.backup\.\*/
-    );
-    assert.match(orphanCleanupBody, /\$\{#orphan_backups\[@\]\} > 8/);
-    assert.equal(
-        (
-            orphanCleanupBody.match(
-                /\.env\.land-area-sync\.backup\.\*/g
-            ) ?? []
-        ).length,
-        2
-    );
-    assert.match(orphanCleanupBody, /return 71/);
-    assert.ok(cleanupCallIndex >= 0);
-    assert.ok(
-        cleanupCallIndex < enableDecisionIndex,
-        'orphan backup cleanup은 same-run enable early return보다 먼저 실행해야 한다'
     );
 
     for (const cleanupBody of [

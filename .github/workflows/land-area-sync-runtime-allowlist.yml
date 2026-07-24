@@ -670,8 +670,7 @@ jobs:
             false
           fi
 
-          cleanup_orphan_env_backups() {
-            local cleanup_failed=0
+          assert_no_orphan_env_backups() {
             local orphan_backup=""
             local -a orphan_backups=()
 
@@ -687,25 +686,20 @@ jobs:
             for orphan_backup in "${orphan_backups[@]}"; do
               if [[ ! -f "${orphan_backup}" || -L "${orphan_backup}" ]] \
                 || [[ "$(stat -c '%u' "${orphan_backup}" 2>/dev/null)" != "$(id -u)" ]] \
-                || [[ "$(stat -c '%a' "${orphan_backup}" 2>/dev/null)" != "600" ]] \
-                || ! rm -f -- "${orphan_backup}"; then
-                cleanup_failed=1
+                || [[ "$(stat -c '%a' "${orphan_backup}" 2>/dev/null)" != "600" ]]; then
+                echo "CLEANUP_FAILED: invalid orphan runtime env backup requires manual review."
+                return 71
               fi
             done
-            shopt -s nullglob
-            orphan_backups=(
-              "${application_root}"/.env.land-area-sync.backup.*
-            )
-            shopt -u nullglob
             if (( ${#orphan_backups[@]} > 0 )); then
-              cleanup_failed=1
-            fi
-            if [[ "${cleanup_failed}" -ne 0 ]]; then
-              echo "CLEANUP_FAILED: orphan runtime env backup cleanup was not verified."
+              # recovery backup은 rollback 실패 또는 미확정 상태의 유일한 복구 근거일 수
+              # 있다. 성공 apply 뒤 cleanup만 실패했다는 별도 durable marker가 없으므로
+              # 자동 삭제하지 않고 operator review를 위해 보존한다.
+              echo "CLEANUP_FAILED: orphan runtime env backup was preserved for manual review."
               return 71
             fi
           }
-          cleanup_orphan_env_backups
+          assert_no_orphan_env_backups
 
           raw_allowed_targets=""
           IFS= read -r -d '' raw_allowed_targets < "${allowlist_path}" || true
