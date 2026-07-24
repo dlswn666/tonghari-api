@@ -57,6 +57,147 @@ test('외부ID 없음 → normalized tuple로 building_unit 1건 → property 1�
     assert.equal(d.kind === 'MATCHED' && d.via, 'PROPERTY_UNIT_BY_BU');
 });
 
+test('legacy building_unit의 층 누락은 EXPOS 입증 뒤 호 exact 1건으로 기존 링크를 해소한다', () => {
+    const d = matchLdaregUnit(
+        input({
+            source: {
+                targetPnu: PNU,
+                dong: null,
+                floor: '5',
+                ho: '501',
+                registryExternalId: null,
+                expectedPnuScope: [PNU],
+            },
+            exposUnits: [
+                expos({
+                    dong: null,
+                    floor: '5',
+                    ho: '501',
+                }),
+            ],
+            buildingUnits: [
+                bu({
+                    id: 'BU-501',
+                    dong: null,
+                    floor: null,
+                    ho: '501',
+                }),
+            ],
+            propertyUnits: [
+                pu({
+                    id: 'PU-501',
+                    buildingUnitId: 'BU-501',
+                    dong: null,
+                    ho: '501',
+                }),
+            ],
+        })
+    );
+
+    assert.equal(d.kind, 'MATCHED');
+    assert.equal(d.kind === 'MATCHED' && d.propertyUnitId, 'PU-501');
+    assert.equal(d.kind === 'MATCHED' && d.buildingUnitRef, 'BU-501');
+    assert.equal(d.kind === 'MATCHED' && d.via, 'PROPERTY_UNIT_BY_BU');
+});
+
+test('legacy building_unit known-field 후보가 같은 호로 2건이면 추정하지 않고 충돌 처리한다', () => {
+    const d = matchLdaregUnit(
+        input({
+            source: {
+                targetPnu: PNU,
+                dong: null,
+                floor: '5',
+                ho: '501',
+                registryExternalId: null,
+                expectedPnuScope: [PNU],
+            },
+            exposUnits: [
+                expos({
+                    dong: null,
+                    floor: '5',
+                    ho: '501',
+                }),
+            ],
+            buildingUnits: [
+                bu({
+                    id: 'BU-501-A',
+                    dong: null,
+                    floor: null,
+                    ho: '501',
+                }),
+                bu({
+                    id: 'BU-501-B',
+                    dong: null,
+                    floor: null,
+                    ho: '501',
+                }),
+            ],
+        })
+    );
+
+    assert.equal(d.kind, 'NO_CHANGE');
+    assert.equal(
+        d.kind === 'NO_CHANGE' && d.stage,
+        'NORMALIZED_KNOWN_FIELDS_BU'
+    );
+    assert.equal(
+        d.kind === 'NO_CHANGE' && d.issue,
+        'UNIT_NORMALIZATION_COLLISION'
+    );
+});
+
+test('known-field fallback은 building 범위가 하나로 입증되지 않으면 사용하지 않는다', () => {
+    const d = matchLdaregUnit(
+        input({
+            source: {
+                targetPnu: PNU,
+                dong: null,
+                floor: '5',
+                ho: '501',
+                registryExternalId: null,
+                expectedPnuScope: [PNU],
+            },
+            exposUnits: [
+                expos({
+                    dong: null,
+                    floor: '5',
+                    ho: '501',
+                }),
+            ],
+            buildingUnits: [
+                bu({
+                    id: 'BU-501',
+                    buildingId: 'B-1',
+                    dong: null,
+                    floor: null,
+                    ho: '501',
+                }),
+                bu({
+                    id: 'BU-OTHER',
+                    buildingId: 'B-2',
+                    dong: null,
+                    floor: null,
+                    ho: '999',
+                }),
+            ],
+            propertyUnits: [
+                pu({
+                    id: 'PU-501',
+                    buildingUnitId: 'BU-501',
+                    dong: null,
+                    ho: '501',
+                }),
+            ],
+        })
+    );
+
+    assert.equal(d.kind, 'NO_CHANGE');
+    assert.equal(
+        d.kind === 'NO_CHANGE' && d.stage,
+        'PROPERTY_UNIT_FALLBACK'
+    );
+});
+
 test('building_unit 연결 없음 → PNU scope+tuple+building_unit_id NULL fallback 1건 = MATCHED (§12.4 6)', () => {
     const d = matchLdaregUnit(
         input({

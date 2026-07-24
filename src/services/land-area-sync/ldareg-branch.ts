@@ -224,6 +224,33 @@ function str(v: unknown): string {
     return typeof v === 'string' ? v : v == null ? '' : String(v);
 }
 
+function normalizeLdaregDong(value: unknown): string | null {
+    const normalized = str(value).normalize('NFKC').trim();
+    if (normalized === '' || /^0+$/.test(normalized)) return null;
+    return normalized;
+}
+
+function isObservedNonApplicablePlaceholder(row: LdaregRow): boolean {
+    const raw = row as Record<string, unknown>;
+    const ratioMissing = str(raw.ldaQotaRate).trim() === '';
+    const allUnitSegmentsAreZero = [
+        raw.buldDongNm,
+        raw.buldFloorNm,
+        raw.buldHoNm,
+        raw.buldRoomNm,
+    ].every((value) => /^0+$/.test(str(value).normalize('NFKC').trim()));
+    const state = mapClsSeCodeToSourceState(
+        str(raw.clsSeCode),
+        str(raw.clsSeCodeNm)
+    );
+    return (
+        ratioMissing &&
+        allUnitSegmentsAreZero &&
+        state.state === 'CURRENT' &&
+        !state.ambiguous
+    );
+}
+
 /** §7.3 v1 allowlist 12필드만 typed string 으로 뽑는다(임의 필드 금지). */
 function extractSourceRecord(row: LdaregRow): Record<string, string | null> {
     const pick = (k: string): string | null => {
@@ -368,25 +395,49 @@ export function assembleLdaregApply(input: LdaregBranchInput): LdaregBranchResul
     // canonical base LDAREG를 한 번만 dedup/match한다. attached PNU의 expos COMPLETE_ZERO는
     // 정상일 수 있으므로 per-PNU expos match equality를 요구하지 않는다.
     const exposUnits = canonicalScan.exposRows.map(toExposCandidate);
-    const observations: LdaregObservationInput[] = canonicalScan.ldaregRows.map((row, idx) => {
-        const r = row as Record<string, unknown>;
-        const decision = mapClsSeCodeToSourceState(str(r.clsSeCode), str(r.clsSeCodeNm));
-        return {
+    const placeholderIndexes = new Set(
+        canonicalScan.ldaregRows
+            .map((row, index) =>
+                isObservedNonApplicablePlaceholder(row) ? index : -1
+            )
+            .filter((index) => index >= 0)
+    );
+    if (placeholderIndexes.size > 0) {
+        issues.push({
+            code: 'RATIO_PARSE_FAILED',
             targetPnu: canonicalScan.pnu,
-            identityRoot: rootIdentity,
-            agbldgSn: str(r.agbldgSn) || null,
-            buildingName: str(r.buldNm) || null,
-            dong: str(r.buldDongNm) || null,
-            floor: normalizeFloorLabel(str(r.buldFloorNm)) || null,
-            ho: str(r.buldHoNm) || null,
-            room: str(r.buldRoomNm) || null,
-            ldaQotaRate: str(r.ldaQotaRate) || null,
-            clsSeCode: str(r.clsSeCode) || null,
-            sourceState: decision.state,
-            sourceStateAmbiguous: decision.ambiguous,
-            sourceIndex: idx,
-        };
-    });
+        });
+    }
+    if (placeholderIndexes.size > 1) ratioParseFailed = true;
+
+    const observations: LdaregObservationInput[] =
+        canonicalScan.ldaregRows.flatMap((row, idx) => {
+            if (placeholderIndexes.has(idx)) return [];
+            const r = row as Record<string, unknown>;
+            const decision = mapClsSeCodeToSourceState(
+                str(r.clsSeCode),
+                str(r.clsSeCodeNm)
+            );
+            return [
+                {
+                    targetPnu: canonicalScan.pnu,
+                    identityRoot: rootIdentity,
+                    agbldgSn: str(r.agbldgSn) || null,
+                    buildingName: str(r.buldNm) || null,
+                    dong: normalizeLdaregDong(r.buldDongNm),
+                    floor:
+                        normalizeFloorLabel(str(r.buldFloorNm)) ||
+                        null,
+                    ho: str(r.buldHoNm) || null,
+                    room: str(r.buldRoomNm) || null,
+                    ldaQotaRate: str(r.ldaQotaRate) || null,
+                    clsSeCode: str(r.clsSeCode) || null,
+                    sourceState: decision.state,
+                    sourceStateAmbiguous: decision.ambiguous,
+                    sourceIndex: idx,
+                },
+            ];
+        });
     const dedup = dedupLdaregObservations(observations);
     const dedupConflict = dedup.issues.some(
         (issue) => issue.code === 'LDAREG_IDENTITY_CONFLICT'

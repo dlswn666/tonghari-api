@@ -6,6 +6,8 @@
  *  2. 전유부 root identity와 scope root identity 일치
  *  3. `registry_external_id`로 기존 building_unit exact match
  *  4. 외부 ID가 없을 때만 같은 root 범위에서 normalized tuple exact match
+ *  4a. DB 후보의 일부 컬럼이 비어 있으면, 값이 있는 컬럼이 source와 모두 exact 일치하고
+ *      `ho`가 존재하는 후보를 같은 root 안에서 정확히 1건만 허용
  *  5. `union_id + building_unit_id + is_deleted=false`인 property_unit 정확히 1건
  *  6. 연결이 없을 때만 expected PNU scope + normalized tuple + building_unit_id IS NULL fallback
  *  7. 각 단계 0건 또는 2건 이상은 변경하지 않음
@@ -84,6 +86,7 @@ export type MatchStage =
     | 'ROOT_IDENTITY'
     | 'REGISTRY_EXTERNAL_ID'
     | 'NORMALIZED_TUPLE_BU'
+    | 'NORMALIZED_KNOWN_FIELDS_BU'
     | 'PROPERTY_UNIT_BY_BU'
     | 'PROPERTY_UNIT_FALLBACK';
 
@@ -112,6 +115,39 @@ function dfhKey(u: { dong?: string | null; floor?: string | null; ho?: string | 
 /** 동·호 2필드 정규화 key(property fallback). */
 function dhKey(u: { dong?: string | null; ho?: string | null }): string {
     return unitTupleKey(normalizeUnitTuple(u), ['dong', 'ho']);
+}
+
+/**
+ * DB building_unit의 legacy 누락 컬럼을 위한 exact compatibility.
+ *
+ * source는 앞선 EXPOS exact 단계에서 층·호가 입증된 상태다. 후보는 호가 반드시 있어야 하고,
+ * 후보에 실제 값이 있는 동/층/호는 source와 모두 같아야 한다. 비어 있는 DB 값을 추정해
+ * 채우지는 않으며, 같은 root 후보가 정확히 1건일 때만 기존 링크를 읽어 사용한다.
+ */
+function matchesKnownBuildingUnitFields(
+    source: MatchSource,
+    candidate: BuildingUnitCandidate
+): boolean {
+    const normalizedSource = normalizeUnitTuple(source);
+    const normalizedCandidate = normalizeUnitTuple(candidate);
+    if (
+        normalizedSource.floor === '' ||
+        normalizedSource.ho === '' ||
+        normalizedCandidate.ho === '' ||
+        normalizedCandidate.ho !== normalizedSource.ho
+    ) {
+        return false;
+    }
+    for (const field of ['dong', 'floor'] as const) {
+        const candidateValue = normalizedCandidate[field];
+        if (
+            candidateValue !== '' &&
+            candidateValue !== normalizedSource[field]
+        ) {
+            return false;
+        }
+    }
+    return true;
 }
 
 /**
@@ -156,7 +192,34 @@ export function matchLdaregUnit(input: MatchInput): MatchDecision {
         if (byTuple.length === 1) {
             resolvedBuildingUnitId = byTuple[0].id;
         }
-        // 0건이면 resolvedBuildingUnitId = null → 6단계 fallback
+        if (byTuple.length === 0) {
+            const buildingIds = new Set(
+                buildingUnits
+                    .map((candidate) => nonEmpty(candidate.buildingId))
+                    .filter(Boolean)
+            );
+            const oneProvenBuildingScope =
+                buildingIds.size === 1 &&
+                buildingUnits.every(
+                    (candidate) => nonEmpty(candidate.buildingId) !== ''
+                );
+            const byKnownFields = oneProvenBuildingScope
+                ? buildingUnits.filter((candidate) =>
+                      matchesKnownBuildingUnitFields(source, candidate)
+                  )
+                : [];
+            if (byKnownFields.length > 1) {
+                return noChange(
+                    'NORMALIZED_KNOWN_FIELDS_BU',
+                    'COLLISION',
+                    'UNIT_NORMALIZATION_COLLISION'
+                );
+            }
+            if (byKnownFields.length === 1) {
+                resolvedBuildingUnitId = byKnownFields[0].id;
+            }
+        }
+        // exact 후보 0건이면 resolvedBuildingUnitId = null → 6단계 fallback
     }
 
     // 5) building_unit 링크가 있으면 property_unit 정확히 1건

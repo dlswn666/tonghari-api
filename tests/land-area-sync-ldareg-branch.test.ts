@@ -6,7 +6,10 @@ import {
     validateLdaregReplication,
     type LdaregBranchInput,
 } from '../src/services/land-area-sync/ldareg-branch';
-import type { PropertyUnitCandidate } from '../src/services/land-area-sync/matcher';
+import type {
+    BuildingUnitCandidate,
+    PropertyUnitCandidate,
+} from '../src/services/land-area-sync/matcher';
 
 const ANCHOR = '1168010100107360024';
 const PROP_ID = '11111111-1111-4111-8111-111111111111';
@@ -86,6 +89,154 @@ test('LDAREG 매칭 happy path: 문자열 numeratorText/denominatorText 로 comp
     assert.equal(c.matchedBuildingUnitId, null);
     assert.equal(result.counts.parsedRows, 1);
     assert.deepEqual(result.matchedPropertyUnitIds, [PROP_ID]);
+});
+
+test('미아7 실응답형: 0000 동 sentinel·숫자 층·ratio 없는 0000 placeholder를 분리해 7개 유효 호를 막지 않는다', () => {
+    const liveUnits = [
+        {
+            ho: '201',
+            floor: 2,
+            numerator: '17.6099',
+            propertyId: '11111111-1111-4111-8111-111111111201',
+            buildingUnitId:
+                '22222222-2222-4222-8222-222222222201',
+        },
+        {
+            ho: '202',
+            floor: 2,
+            numerator: '25.7503',
+            propertyId: '11111111-1111-4111-8111-111111111202',
+            buildingUnitId:
+                '22222222-2222-4222-8222-222222222202',
+        },
+        {
+            ho: '301',
+            floor: 3,
+            numerator: '17.6099',
+            propertyId: '11111111-1111-4111-8111-111111111301',
+            buildingUnitId:
+                '22222222-2222-4222-8222-222222222301',
+        },
+        {
+            ho: '302',
+            floor: 3,
+            numerator: '25.7503',
+            propertyId: '11111111-1111-4111-8111-111111111302',
+            buildingUnitId:
+                '22222222-2222-4222-8222-222222222302',
+        },
+        {
+            ho: '401',
+            floor: 4,
+            numerator: '17.6099',
+            propertyId: '11111111-1111-4111-8111-111111111401',
+            buildingUnitId:
+                '22222222-2222-4222-8222-222222222401',
+        },
+        {
+            ho: '402',
+            floor: 4,
+            numerator: '25.7503',
+            propertyId: '11111111-1111-4111-8111-111111111402',
+            buildingUnitId:
+                '22222222-2222-4222-8222-222222222402',
+        },
+        {
+            ho: '501',
+            floor: 5,
+            numerator: '40.9194',
+            propertyId: '11111111-1111-4111-8111-111111111501',
+            buildingUnitId:
+                '22222222-2222-4222-8222-222222222501',
+        },
+    ];
+    const buildingUnits: BuildingUnitCandidate[] = liveUnits.map(
+        (unit) => ({
+            id: unit.buildingUnitId,
+            buildingId: '33333333-3333-4333-8333-333333333333',
+            dong: null,
+            floor: null,
+            ho: unit.ho,
+            registryExternalId: null,
+        })
+    );
+    const propertyUnits: PropertyUnitCandidate[] = liveUnits.map(
+        (unit) => ({
+            id: unit.propertyId,
+            unionId: 'union-1',
+            buildingUnitId: unit.buildingUnitId,
+            pnu: ANCHOR,
+            isDeleted: false,
+            dong: null,
+            ho: unit.ho,
+        })
+    );
+    const result = assemble({
+        unionId: 'union-1',
+        scannedPnus: [ANCHOR],
+        rootIdentity: PK,
+        perPnu: [
+            {
+                pnu: ANCHOR,
+                ldaregRows: [
+                    ...liveUnits.map((unit) => ({
+                        pnu: ANCHOR,
+                        agbldgSn: '1',
+                        buldNm: '가나빌',
+                        buldDongNm: '0000',
+                        buldFloorNm: String(unit.floor),
+                        buldHoNm: unit.ho,
+                        buldRoomNm: unit.ho,
+                        ldaQotaRate: `${unit.numerator}/171`,
+                        clsSeCode: '0',
+                        clsSeCodeNm: '현재',
+                    })),
+                    {
+                        pnu: ANCHOR,
+                        agbldgSn: '1',
+                        buldNm: '가나빌',
+                        buldDongNm: '0000',
+                        buldFloorNm: '0000',
+                        buldHoNm: '0000',
+                        buldRoomNm: '0000',
+                        ldaQotaRate: '',
+                        clsSeCode: '0',
+                        clsSeCodeNm: '현재',
+                    },
+                ],
+                exposRows: liveUnits.map((unit) => ({
+                    mgmBldrgstPk: PK,
+                    dongNm: ' ',
+                    flrNo: unit.floor,
+                    hoNm: unit.ho,
+                })),
+            },
+        ],
+        buildingUnits,
+        propertyUnits,
+        scopeLadfrlTotal: '171',
+    });
+
+    assert.equal(result.blocking, false);
+    assert.equal(result.items.length, 7);
+    assert.equal(result.counts.landRegistryRows, 8);
+    assert.equal(result.counts.parsedRows, 7);
+    assert.deepEqual(
+        result.items.map((item) => item.propertyUnitId).sort(),
+        liveUnits.map((unit) => unit.propertyId).sort()
+    );
+    assert.ok(
+        result.items.every(
+            (item) =>
+                item.components[0].matchMethod === 'BUILDING_UNIT_ID'
+        )
+    );
+    assert.equal(
+        result.issues.filter(
+            (issue) => issue.code === 'RATIO_PARSE_FAILED'
+        ).length,
+        1
+    );
 });
 
 test('매칭 실패(후보 없음)는 component 를 만들지 않고 issue 로 남긴다(tuple 보존)', () => {
