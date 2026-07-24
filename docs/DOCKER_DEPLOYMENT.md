@@ -62,15 +62,92 @@ BUILDING_WRITE_OPERATION_TARGETS=development
 운영 DB에 W1을 적용하기 전에는 `production`을 추가하지 않는다. 이 값이 없으면 개발 GIS의
 building-family queue producer는 `BUILDING_OPERATION_CAPABILITY_DISABLED`로 fail-closed한다.
 
-대지권면적 동기화는 별도 canary allowlist가 구현·승인되기 전까지 전역 OFF를 유지한다.
+대지권면적 동기화는 기본적으로 전역 OFF와 빈 allowlist를 유지한다.
 
 ```text
 LAND_AREA_SYNC_ENABLED=false
+LAND_AREA_SYNC_ALLOWED_TARGETS=
 ```
 
-이 항목은 누락되어도 서버가 OFF로 해석한다. 항목을 넣는 경우 배포 workflow는 정확히 한 줄
-`LAND_AREA_SYNC_ENABLED=false`만 허용한다. `true`는 현재 배포 계약에서 거부하며, 후보·최종
-컨테이너의 `/health`도 `features.landAreaSyncEnabled=false`를 반환해야 한다.
+일반 `main` push 배포는 EC2에서 `LAND_AREA_SYNC_ENABLED=true`를 발견하면
+fail-closed한다. 수동 이미지 배포가 이미 승인된 allowlist를 유지해야 하는 경우에만
+`docker-build.yml`을 `workflow_dispatch`로 실행하면서 현재 canonical allowlist의 count와
+SHA-256을 함께 제출한다.
+
+개발 DB 대지권 backfill을 위해 runtime gate만 제한적으로 열거나 닫을 때는 별도
+`Land Area Sync Runtime Allowlist` workflow를 사용한다. 이 workflow는 새 이미지를
+빌드하거나 DB를 직접 호출하지 않으며, 현재 실행 중인 컨테이너와 동일한 immutable image
+ID로 후보·최종 컨테이너를 다시 만든다.
+
+Repository Environment `land-area-sync-development-backfill`에는 required reviewer와
+`main` deployment branch 제한을 설정한다. 승인자는 다음 입력을 독립적으로 검증해야 한다.
+
+- `action`: `enable` 또는 `disable`
+- `land_area_sync_allowed_targets`: 공백 없는 canonical
+  `development:unionUuid:19자리PNU` 항목을 쉼표로 연결한 원문
+- `expected_allowlist_count`: 승인 대상 exact count
+- `expected_allowlist_sha256`: canonical 원문의 SHA-256
+
+`enable`은 development exact target만 허용한다. production, wildcard, duplicate, 비정규
+순서·대문자 UUID·공백, count/digest 불일치는 EC2 변경 전에 거부한다. `disable`은 빈
+allowlist, count `0`, 빈 digest만 허용하며 이미 비활성인 상태에서도 반복 실행할 수 있다.
+
+GitHub의 concurrency group에는 running 1개와 pending 1개만 남기므로 enable과 disable을
+같은 group에 두지 않는다. runtime workflow는 action별 group을 사용해 pending disable이
+후속 enable에 의해 대체되지 않게 한다. EC2에서는 runtime 변경, 일반 Docker 배포, Phase 0
+읽기 전용 capture가 모두 deploy-user 소유 mode `600`의
+`.tonghari-api-production.lock`을 `flock`으로 독점 획득한다. runtime 요청은 GitHub
+workflow 내부에서 monotonic한 `github.run_number`와 `github.run_attempt`를 요청
+watermark로 사용한다. `run_attempt`는 같은 요청의 재시도 metadata이며 ordering을
+앞당기지 않는다. 같은 enable 재시도는 이미 health가 정확히 적용된 경우만 성공하며, 적용
+실패 뒤 enable은 새 dispatch/run_number가 필요하다. 같은 disable 재시도는 항상 다시
+실행한다. requested watermark는 `.env`와 컨테이너보다 먼저 mode `600` 파일에
+원자적으로 기록한다. stale enable은 fail-closed로 거부하고, disable은 stale
+run_number여도 실행하면서 watermark를 되감지 않는다. disable 적용이 실패해 env/container를
+이전 상태로 rollback하더라도 disable watermark tombstone은 rollback하지 않으므로 더 오래된
+enable이 다시 적용될 수 없다. production lock 대기는 최대 2,400초로 제한한다.
+
+컨테이너를 재기동하는 runtime 변경과 일반 Docker 배포는 production lock을 먼저 얻은 뒤
+deploy-user 소유 mode `600`의 `.land-area-sync-operation.lock`도 획득한다. 향후 dev
+batch runner는 같은 operation lock만 획득하고 전체 batch 동안 보유해야 한다. lock 순서는
+항상 `production -> operation`이며 runner는 production lock을 역순으로 추가 획득하지
+않는다. runner 실행은 `timeout 2400` 등으로 최대 2,400초를 강제하고, runtime/deploy의
+operation lock 대기는 최대 2,700초로 제한한다. 따라서 batch 실패나 runner 종료 시 커널이
+lock을 해제하며, disable이 영구 대기하지 않고 최대 대기시간 안에 재기동 절차를 시작하거나
+명시적으로 실패한다. 일반 Docker deploy job은 production lock 최대 40분, operation
+lock 최대 45분, 실제 배포와 rollback 예산 30분을 모두 포함하도록 SSH command timeout을
+120분, job timeout을 130분으로 두어 lock 획득 직후 timeout이 컨테이너 교체를 중단하지
+않게 한다.
+
+raw allowlist는 `${{ inputs.* }}` 표현식으로 step 환경변수에 직접 주입하지 않는다.
+각 job이 `GITHUB_EVENT_PATH`에서 값을 읽어 파일에 쓰고, GitHub workflow command escape를
+적용한 exact 값으로 `::add-mask::`를 먼저 등록한 뒤 validator와 SSH 전달에 사용한다.
+event payload나 raw allowlist 원문은 command echo와 실행 로그에 출력하지 않는다.
+
+이 runtime workflow는 API canary만 제어한다. Supabase의 DB owner-only approval manifest를
+생성·수정·활성화하지 않으며, production DB에는 어떤 변경도 수행하지 않는다. 실제 dev
+동기화 전에는 별도 승인 절차에서 dev DB approval manifest의 target/count/digest/만료를
+확인해야 한다.
+
+EC2 적용 시에는 다음 보호 조건을 모두 확인한다.
+
+1. `.env`가 deploy 사용자 소유의 regular non-symlink 파일이며 mode `600`이다.
+2. raw allowlist는 사용 전에 exact mask하고 로그에 출력하지 않으며 mode `600` 임시
+   파일로만 전달한다.
+3. `.env`의 두 gate key를 같은 디렉터리의 mode `600` 임시 파일에서 바꾼 뒤 atomic
+   rename한다.
+4. 현재 컨테이너의 image ID와 후보·최종 컨테이너의 image ID가 정확히 같다.
+5. 후보와 최종 `/health`의 enabled/count/digest가 승인 입력과 일치한다.
+6. 실패 시 원래 `.env`, 컨테이너 이름, 실행 상태와 이전 health attestation을 복구한다.
+7. 컨테이너 재기동 전 production lock과 land-area operation lock을 고정 순서로 획득한다.
+8. 성공 보고 전 runtime rollback container와 secret-bearing `.env` backup의 삭제 및
+   부재를 재검증하고, cleanup 명령이나 부재 검증이 실패하면 exit `71`로 green을 금지한다.
+9. 같은-run idempotent return 전에 orphan `.env.land-area-sync.backup.*`를 최대 8개까지
+   검출하고 소유자와 mode `600`을 확인한다. 현재는 성공 apply 뒤 cleanup만 실패했다는
+   durable marker가 없으므로 하나라도 있으면 자동 삭제하지 않고 복구 근거로 보존한 채
+   exit `71`로 중단한다.
+10. runner와 EC2에 staged한 raw allowlist는 모든 종료 경로에서 삭제 후 부재를 검증하고,
+    삭제 실패를 `|| true`로 무시하지 않는다.
 
 값을 출력하지 않고 항목 수만 확인한다.
 
@@ -92,7 +169,8 @@ done
 3. push 결과의 digest 형식을 검증한다.
 4. EC2 접속 비밀과 EC2 `.env` 소유자·권한·필수 항목을 검사한다.
 5. `repo@sha256:digest` 형식으로 정확한 이미지를 pull한다.
-6. 후보 컨테이너를 `127.0.0.1:13100`에 띄워 SHA, build time, image tag와 LAND_AREA_SYNC OFF를 검증한다.
+6. 후보 컨테이너를 `127.0.0.1:13100`에 띄워 SHA, build time, image tag와 승인된
+   LAND_AREA_SYNC enabled/count/digest를 검증한다.
 7. 후보가 통과한 경우에만 기존 `3100` 컨테이너를 rollback 이름으로 보존하고 새 컨테이너로 교체한다.
 8. 최종 `3100` health 검증에 실패하면 직전 컨테이너를 복구한다.
 

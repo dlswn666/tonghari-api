@@ -23,7 +23,7 @@ jobs:
     name: Capture sanitized provider evidence
     runs-on: ubuntu-latest
     environment: phase0-production-readonly
-    timeout-minutes: 20
+    timeout-minutes: 70
     steps:
       - name: Require approved main revision
         shell: bash
@@ -223,8 +223,10 @@ jobs:
             "RUN_KEY='${RUN_KEY}' EXPECTED_GIT_SHA='${EXPECTED_GIT_SHA}' EXPECTED_IMAGE_TAG='${EXPECTED_IMAGE_TAG}' bash -s" <<'REMOTE_SCRIPT'
           set -Eeuo pipefail
 
+          application_root="${HOME}/alimtalk-proxy"
+          production_lock_path="${application_root}/.tonghari-api-production.lock"
           container_name="alimtalk-proxy"
-          host_root="${HOME}/alimtalk-proxy/.phase0-workflow/${RUN_KEY}"
+          host_root="${application_root}/.phase0-workflow/${RUN_KEY}"
           host_manifest="${host_root}/manifest.json"
           host_artifact="${host_root}/artifact.json"
           host_status="${host_root}/status"
@@ -232,6 +234,25 @@ jobs:
           container_manifest="/app/.phase0-land-area/workflow-manifest-${RUN_KEY}.json"
           container_artifact="/app/.phase0-land-area/workflow-artifact-${RUN_KEY}.json"
           validation_sentinel="LAND_AREA_PHASE0_ARTIFACT_VALIDATED"
+
+          if [[ ! -e "${production_lock_path}" && ! -L "${production_lock_path}" ]]; then
+            (
+              umask 077
+              set -o noclobber
+              : > "${production_lock_path}"
+            ) 2>/dev/null || true
+          fi
+          if [[ ! -f "${production_lock_path}" || -L "${production_lock_path}" ]] \
+            || [[ "$(stat -c '%u' "${production_lock_path}")" != "$(id -u)" ]] \
+            || [[ "$(stat -c '%a' "${production_lock_path}")" != "600" ]]; then
+            echo "Shared production lock must be a deploy-user-owned regular mode 600 file."
+            exit 1
+          fi
+          exec 9>>"${production_lock_path}"
+          if ! flock -w 2400 9; then
+            echo "Timed out waiting for the shared production deployment lock."
+            exit 1
+          fi
 
           container_id_before="$(
             docker inspect --format '{{.Id}}' "${container_name}"
