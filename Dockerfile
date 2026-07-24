@@ -40,9 +40,9 @@ COPY --from=builder /app/data ./data
 # 비특권 사용자로 실행
 RUN addgroup -g 1001 -S nodejs
 RUN adduser -S nodejs -u 1001
-RUN mkdir -p logs .phase0-land-area \
-  && chown -R nodejs:nodejs logs .phase0-land-area \
-  && chmod 700 .phase0-land-area
+RUN mkdir -p logs .phase0-land-area .development-land-area-sync \
+  && chown -R nodejs:nodejs logs .phase0-land-area .development-land-area-sync \
+  && chmod 700 .phase0-land-area .development-land-area-sync
 USER nodejs
 
 # 환경 변수 설정

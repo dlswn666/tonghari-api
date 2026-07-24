@@ -1,0 +1,593 @@
+name: Development Land Area Sync Runner
+
+on:
+  workflow_dispatch:
+    inputs:
+      manifest:
+        description: Repository-approved development target/evidence bundle
+        required: true
+        type: choice
+        default: mia-seven-representative-20260725
+        options:
+          - mia-seven-representative-20260725
+      actor_auth_user_id:
+        description: Exact development SYSTEM_ADMIN auth.users UUID
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    name: Run repository-approved development targets
+    runs-on: ubuntu-latest
+    environment: land-area-sync-development-write
+    timeout-minutes: 65
+    steps:
+      - name: Require approved main revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "::error::Development land-area sync must run from refs/heads/main."
+            exit 1
+          fi
+
+      - name: Checkout exact revision
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Compile runner and validator
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+
+      - name: Validate exact actor UUID
+        shell: bash
+        env:
+          ACTOR_AUTH_USER_ID: ${{ inputs.actor_auth_user_id }}
+          EXPECTED_ACTOR_AUTH_USER_ID: ${{ secrets.DEV_GIS_SYSTEM_ADMIN_AUTH_UUID }}
+        run: |
+          set -euo pipefail
+          uuid_pattern='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          if [[
+            -z "${EXPECTED_ACTOR_AUTH_USER_ID:-}"
+            || ! "${ACTOR_AUTH_USER_ID}" =~ ${uuid_pattern}
+            || ! "${EXPECTED_ACTOR_AUTH_USER_ID}" =~ ${uuid_pattern}
+            || "${ACTOR_AUTH_USER_ID}" != "${EXPECTED_ACTOR_AUTH_USER_ID}"
+          ]]; then
+            echo "::error::Actor auth UUID does not match the protected development SYSTEM_ADMIN identity."
+            exit 1
+          fi
+
+      - name: Resolve repository-approved manifests
+        id: manifest
+        shell: bash
+        env:
+          MANIFEST_NAME: ${{ inputs.manifest }}
+        run: |
+          set -euo pipefail
+          case "${MANIFEST_NAME}" in
+            mia-seven-representative-20260725)
+              target_path="development-land-area-sync-manifests/mia-seven-representative-target-20260725.json"
+              db_approval_path="development-land-area-sync-manifests/mia-seven-representative-db-approval-20260725.json"
+              evidence_path="development-land-area-sync-manifests/mia-seven-representative-evidence-20260725.json"
+              ;;
+            *)
+              echo "::error::Manifest bundle is not repository-approved."
+              exit 1
+              ;;
+          esac
+
+          for candidate in \
+            "${target_path}" \
+            "${db_approval_path}" \
+            "${evidence_path}"
+          do
+            if [[ ! -f "${candidate}" || -L "${candidate}" ]]; then
+              echo "::error::Approved manifest must be a regular non-symlink file."
+              exit 1
+            fi
+            size="$(stat -c '%s' "${candidate}")"
+            if [[ "${size}" -lt 2 || "${size}" -gt 1048576 ]]; then
+              echo "::error::Approved manifest size is invalid."
+              exit 1
+            fi
+          done
+
+          node - "${target_path}" "${db_approval_path}" "${evidence_path}" <<'NODE'
+          const fs = require("node:fs");
+          const {
+            parseDevelopmentTargetManifest,
+            parseDevelopmentDbApprovalManifest,
+            parseDevelopmentEvidenceManifest,
+            validateDevelopmentRunnerManifests,
+          } = require("./dist/operations/development-land-area-sync-runner.js");
+          const read = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
+          const target = parseDevelopmentTargetManifest(read(process.argv[2]));
+          const approval = parseDevelopmentDbApprovalManifest(read(process.argv[3]));
+          const evidence = parseDevelopmentEvidenceManifest(read(process.argv[4]));
+          validateDevelopmentRunnerManifests(target, approval, evidence);
+          NODE
+
+          {
+            echo "target_path=${target_path}"
+            echo "db_approval_path=${db_approval_path}"
+            echo "evidence_path=${evidence_path}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Configure pinned EC2 SSH identity
+        shell: bash
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_SSH_FINGERPRINT: ${{ secrets.EC2_SSH_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          for variable_name in \
+            EC2_HOST \
+            EC2_USERNAME \
+            EC2_SSH_KEY \
+            EC2_SSH_FINGERPRINT
+          do
+            if [[ -z "${!variable_name:-}" ]]; then
+              echo "::error::Missing required EC2 connection secret."
+              exit 1
+            fi
+          done
+          if [[ ! "${EC2_USERNAME}" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+            echo "::error::EC2 username format is invalid."
+            exit 1
+          fi
+          if [[
+            ${#EC2_HOST} -gt 253
+            || ! "${EC2_HOST}" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$
+          ]]; then
+            echo "::error::EC2 host format is invalid."
+            exit 1
+          fi
+
+          install -d -m 700 "${HOME}/.ssh"
+          install -m 600 /dev/null "${HOME}/.ssh/id_ed25519"
+          printf '%s\n' "${EC2_SSH_KEY}" > "${HOME}/.ssh/id_ed25519"
+          host_keys="$(ssh-keyscan -T 10 -t ed25519,ecdsa,rsa "${EC2_HOST}" 2>/dev/null)"
+          if [[ -z "${host_keys}" ]]; then
+            echo "::error::EC2 host key scan returned no keys."
+            exit 1
+          fi
+          matched_host_key=""
+          while IFS= read -r host_key; do
+            fingerprint="$(
+              printf '%s\n' "${host_key}" \
+                | ssh-keygen -lf - -E sha256 \
+                | awk '{print $2}'
+            )"
+            if [[ "${fingerprint}" == "${EC2_SSH_FINGERPRINT}" ]]; then
+              matched_host_key="${host_key}"
+              break
+            fi
+          done <<< "${host_keys}"
+          if [[ -z "${matched_host_key}" ]]; then
+            echo "::error::EC2 SSH fingerprint mismatch."
+            exit 1
+          fi
+          printf '%s\n' "${matched_host_key}" > "${HOME}/.ssh/known_hosts"
+          chmod 600 "${HOME}/.ssh/known_hosts"
+
+      - name: Run serial development sync in current API container
+        id: remote
+        shell: bash
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
+          TARGET_PATH: ${{ steps.manifest.outputs.target_path }}
+          DB_APPROVAL_PATH: ${{ steps.manifest.outputs.db_approval_path }}
+          EVIDENCE_PATH: ${{ steps.manifest.outputs.evidence_path }}
+          ACTOR_AUTH_USER_ID: ${{ inputs.actor_auth_user_id }}
+          RUN_KEY: ${{ github.run_id }}-${{ github.run_attempt }}
+          EXPECTED_GIT_SHA: ${{ github.sha }}
+          EXPECTED_IMAGE_TAG: ghcr.io/dlswn666/alimtalk-proxy:${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${RUN_KEY}" =~ ^[0-9]+-[0-9]+$ ]]; then
+            echo "::error::Invalid workflow run key."
+            exit 1
+          fi
+          if [[ ! "${ACTOR_AUTH_USER_ID}" =~ ^[0-9a-f-]{36}$ ]]; then
+            echo "::error::Invalid actor UUID."
+            exit 1
+          fi
+
+          ssh_options=(
+            -i "${HOME}/.ssh/id_ed25519"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o "UserKnownHostsFile=${HOME}/.ssh/known_hosts"
+          )
+          remote_root="alimtalk-proxy/.development-land-area-sync-workflow/${RUN_KEY}"
+          cleanup_remote() {
+            ssh "${ssh_options[@]}" "${EC2_USERNAME}@${EC2_HOST}" \
+              "RUN_KEY='${RUN_KEY}' bash -s" \
+              >/dev/null 2>&1 <<'REMOTE_CLEANUP' || true
+          set -euo pipefail
+          run_root="${HOME}/alimtalk-proxy/.development-land-area-sync-workflow/${RUN_KEY}"
+          test -d "${run_root}"
+          test ! -L "${run_root}"
+          rm -f -- \
+            "${run_root}/target.json" \
+            "${run_root}/db-approval.json" \
+            "${run_root}/evidence.json" \
+            "${run_root}/artifact.json" \
+            "${run_root}/status" \
+            "${run_root}/validated"
+          rmdir -- "${run_root}"
+          REMOTE_CLEANUP
+          }
+          trap cleanup_remote EXIT
+
+          ssh "${ssh_options[@]}" "${EC2_USERNAME}@${EC2_HOST}" \
+            "RUN_KEY='${RUN_KEY}' bash -s" <<'REMOTE_PREPARE'
+          set -euo pipefail
+          application_root="${HOME}/alimtalk-proxy"
+          parent="${application_root}/.development-land-area-sync-workflow"
+          run_root="${parent}/${RUN_KEY}"
+          test -d "${application_root}"
+          test ! -L "${application_root}"
+          if [[ -e "${parent}" || -L "${parent}" ]]; then
+            test -d "${parent}"
+            test ! -L "${parent}"
+          else
+            mkdir -m 700 -- "${parent}"
+          fi
+          test "$(stat -c '%u' "${parent}")" = "$(id -u)"
+          chmod 700 "${parent}"
+          (umask 077; mkdir -m 700 -- "${run_root}")
+          REMOTE_PREPARE
+
+          scp "${ssh_options[@]}" "${TARGET_PATH}" \
+            "${EC2_USERNAME}@${EC2_HOST}:${remote_root}/target.json"
+          scp "${ssh_options[@]}" "${DB_APPROVAL_PATH}" \
+            "${EC2_USERNAME}@${EC2_HOST}:${remote_root}/db-approval.json"
+          scp "${ssh_options[@]}" "${EVIDENCE_PATH}" \
+            "${EC2_USERNAME}@${EC2_HOST}:${remote_root}/evidence.json"
+
+          ssh "${ssh_options[@]}" "${EC2_USERNAME}@${EC2_HOST}" \
+            "RUN_KEY='${RUN_KEY}' ACTOR_AUTH_USER_ID='${ACTOR_AUTH_USER_ID}' EXPECTED_GIT_SHA='${EXPECTED_GIT_SHA}' EXPECTED_IMAGE_TAG='${EXPECTED_IMAGE_TAG}' bash -s" <<'REMOTE_RUN'
+          set -Eeuo pipefail
+          container_name="alimtalk-proxy"
+          host_root="${HOME}/alimtalk-proxy/.development-land-area-sync-workflow/${RUN_KEY}"
+          host_target="${host_root}/target.json"
+          host_db_approval="${host_root}/db-approval.json"
+          host_evidence="${host_root}/evidence.json"
+          host_artifact="${host_root}/artifact.json"
+          host_status="${host_root}/status"
+          host_validated="${host_root}/validated"
+          operation_lock_path="${HOME}/alimtalk-proxy/.land-area-sync-operation.lock"
+          container_root="/app/.development-land-area-sync"
+          container_target="${container_root}/target-${RUN_KEY}.json"
+          container_db_approval="${container_root}/db-approval-${RUN_KEY}.json"
+          container_evidence="${container_root}/evidence-${RUN_KEY}.json"
+          container_artifact="${container_root}/artifact-${RUN_KEY}.json"
+          validation_sentinel="LAND_AREA_DEVELOPMENT_RUN_ARTIFACT_VALIDATED"
+
+          if [[ ! -e "${operation_lock_path}" && ! -L "${operation_lock_path}" ]]; then
+            (
+              umask 077
+              set -o noclobber
+              : > "${operation_lock_path}"
+            ) 2>/dev/null || true
+          fi
+          if [[ ! -f "${operation_lock_path}" || -L "${operation_lock_path}" ]] \
+            || [[ "$(stat -c '%u' "${operation_lock_path}")" != "$(id -u)" ]] \
+            || [[ "$(stat -c '%a' "${operation_lock_path}")" != "600" ]]; then
+            echo "Land-area operation lock must be a deploy-user-owned regular mode 600 file."
+            exit 1
+          fi
+          exec 8>>"${operation_lock_path}"
+          if ! flock -w 900 8; then
+            echo "Timed out waiting for the bounded land-area operation lock."
+            exit 1
+          fi
+
+          target_container="$(docker inspect --format '{{.Id}}' "${container_name}")"
+          target_image_id="$(docker inspect --format '{{.Image}}' "${container_name}")"
+          target_revision="$(
+            docker image inspect \
+              --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+              "${target_image_id}"
+          )"
+          if [[
+            ! "${target_container}" =~ ^[0-9a-f]{64}$
+            || ! "${target_image_id}" =~ ^sha256:[0-9a-f]{64}$
+            || "${target_revision}" != "${EXPECTED_GIT_SHA}"
+          ]]; then
+            echo "Development runner target container image identity mismatch."
+            exit 1
+          fi
+
+          cleanup_container() {
+            docker exec "${target_container}" rm -f -- \
+              "${container_target}" \
+              "${container_db_approval}" \
+              "${container_evidence}" \
+              "${container_artifact}" \
+              >/dev/null 2>&1 || true
+          }
+          trap cleanup_container EXIT
+
+          verify_health() {
+            docker exec \
+              -e "EXPECTED_GIT_SHA=${EXPECTED_GIT_SHA}" \
+              -e "EXPECTED_IMAGE_TAG=${EXPECTED_IMAGE_TAG}" \
+              "${target_container}" \
+              node -e '
+                const http = require("node:http");
+                const reject = () => process.exit(1);
+                const request = http.get(
+                  "http://127.0.0.1:3100/health",
+                  { timeout: 5000 },
+                  (response) => {
+                    if (response.statusCode !== 200) return reject();
+                    let body = "";
+                    response.setEncoding("utf8");
+                    response.on("data", (chunk) => {
+                      body += chunk;
+                      if (body.length > 65536) request.destroy();
+                    });
+                    response.on("end", () => {
+                      try {
+                        const health = JSON.parse(body);
+                        if (
+                          health?.status !== "ok"
+                          || health?.gitSha !== process.env.EXPECTED_GIT_SHA
+                          || health?.imageTag !== process.env.EXPECTED_IMAGE_TAG
+                        ) return reject();
+                        process.exit(0);
+                      } catch {
+                        reject();
+                      }
+                    });
+                  }
+                );
+                request.on("timeout", () => request.destroy());
+                request.on("error", reject);
+              '
+          }
+
+          for candidate in \
+            "${host_target}" \
+            "${host_db_approval}" \
+            "${host_evidence}"
+          do
+            test -f "${candidate}"
+            test ! -L "${candidate}"
+            test "$(stat -c '%u' "${candidate}")" = "$(id -u)"
+            chmod 600 "${candidate}"
+            size="$(stat -c '%s' "${candidate}")"
+            test "${size}" -ge 2
+            test "${size}" -le 1048576
+          done
+          verify_health
+
+          stream_file() {
+            local source="$1"
+            local target="$2"
+            docker exec -i \
+              -e "PRIVATE_INPUT_PATH=${target}" \
+              "${target_container}" \
+              node -e '
+                const fs = require("node:fs");
+                const target = process.env.PRIVATE_INPUT_PATH ?? "";
+                if (!/^\/app\/\.development-land-area-sync\/[a-z-]+-[0-9]+-[0-9]+\.json$/.test(target)) {
+                  process.exit(1);
+                }
+                const chunks = [];
+                let size = 0;
+                process.stdin.on("data", (chunk) => {
+                  size += chunk.length;
+                  if (size > 1048576) process.exit(1);
+                  chunks.push(chunk);
+                });
+                process.stdin.on("end", () => {
+                  if (size < 2) process.exit(1);
+                  fs.writeFileSync(target, Buffer.concat(chunks), {
+                    flag: "wx",
+                    mode: 0o600,
+                  });
+                });
+                process.stdin.on("error", () => process.exit(1));
+              ' < "${source}"
+          }
+          stream_file "${host_target}" "${container_target}"
+          stream_file "${host_db_approval}" "${container_db_approval}"
+          stream_file "${host_evidence}" "${container_evidence}"
+
+          set +e
+          timeout --foreground --kill-after=15s 2400s \
+            docker exec -w /app "${target_container}" \
+            node dist/cli/development-land-area-sync-runner.js \
+            --target ".development-land-area-sync/target-${RUN_KEY}.json" \
+            --db-approval ".development-land-area-sync/db-approval-${RUN_KEY}.json" \
+            --evidence ".development-land-area-sync/evidence-${RUN_KEY}.json" \
+            --actor-auth-user-id "${ACTOR_AUTH_USER_ID}" \
+            --out ".development-land-area-sync/artifact-${RUN_KEY}.json"
+          runner_status="$?"
+          set -e
+          printf '%s\n' "${runner_status}" > "${host_status}"
+          chmod 600 "${host_status}"
+
+          if [[ "${runner_status}" -ne 0 && "${runner_status}" -ne 1 ]]; then
+            exit 0
+          fi
+          validation_output="$(
+            docker exec -w /app "${target_container}" \
+              node dist/cli/development-land-area-sync-validate.js \
+              --target ".development-land-area-sync/target-${RUN_KEY}.json" \
+              --artifact ".development-land-area-sync/artifact-${RUN_KEY}.json"
+          )"
+          if [[ "${validation_output}" != "${validation_sentinel}" ]]; then
+            exit 0
+          fi
+          verify_health
+          container_after="$(docker inspect --format '{{.Id}}' "${container_name}")"
+          if [[ "${container_after}" != "${target_container}" ]]; then
+            echo "Development runner target container changed while operation lock was held."
+            exit 1
+          fi
+          docker cp "${target_container}:${container_artifact}" "${host_artifact}"
+          chmod 600 "${host_artifact}"
+          artifact_sha="$(sha256sum "${host_artifact}" | awk '{print $1}')"
+          printf '%s:%s\n' "${validation_sentinel}" "${artifact_sha}" > "${host_validated}"
+          chmod 600 "${host_validated}"
+          REMOTE_RUN
+
+          if [[ -e development-land-area-sync-output || -L development-land-area-sync-output ]]; then
+            echo "::error::Local output directory must not pre-exist."
+            exit 1
+          fi
+          mkdir -m 700 -- development-land-area-sync-output
+          scp "${ssh_options[@]}" \
+            "${EC2_USERNAME}@${EC2_HOST}:${remote_root}/artifact.json" \
+            development-land-area-sync-output/artifact.json || true
+          scp "${ssh_options[@]}" \
+            "${EC2_USERNAME}@${EC2_HOST}:${remote_root}/validated" \
+            development-land-area-sync-output/validated || true
+          scp "${ssh_options[@]}" \
+            "${EC2_USERNAME}@${EC2_HOST}:${remote_root}/status" \
+            development-land-area-sync-output/status
+          cleanup_remote
+          trap - EXIT
+
+      - name: Revalidate downloaded artifact
+        id: validate
+        if: always() && hashFiles('development-land-area-sync-output/artifact.json') != '' && hashFiles('development-land-area-sync-output/validated') != ''
+        shell: bash
+        env:
+          TARGET_PATH: ${{ steps.manifest.outputs.target_path }}
+        run: |
+          set -euo pipefail
+          artifact="development-land-area-sync-output/artifact.json"
+          validated="development-land-area-sync-output/validated"
+          status="development-land-area-sync-output/status"
+          for candidate in "${artifact}" "${validated}" "${status}"; do
+            if [[ ! -f "${candidate}" || -L "${candidate}" ]]; then
+              echo "::error::Downloaded output must be a regular non-symlink file."
+              exit 1
+            fi
+          done
+          artifact_sha="$(sha256sum "${artifact}" | awk '{print $1}')"
+          expected_attestation="LAND_AREA_DEVELOPMENT_RUN_ARTIFACT_VALIDATED:${artifact_sha}"
+          if [[ "$(tr -d '\r\n' < "${validated}")" != "${expected_attestation}" ]]; then
+            echo "::error::Remote artifact attestation mismatch."
+            exit 1
+          fi
+
+          validation_root="$(mktemp -d)"
+          cleanup_validation() {
+            rm -f -- \
+              "${validation_root}/.development-land-area-sync/target.json" \
+              "${validation_root}/.development-land-area-sync/artifact.json"
+            rmdir -- "${validation_root}/.development-land-area-sync" 2>/dev/null || true
+            rmdir -- "${validation_root}" 2>/dev/null || true
+          }
+          trap cleanup_validation EXIT
+          mkdir -m 700 -- "${validation_root}/.development-land-area-sync"
+          install -m 600 "${TARGET_PATH}" \
+            "${validation_root}/.development-land-area-sync/target.json"
+          install -m 600 "${artifact}" \
+            "${validation_root}/.development-land-area-sync/artifact.json"
+          validation_output="$(
+            cd "${validation_root}"
+            node "${GITHUB_WORKSPACE}/dist/cli/development-land-area-sync-validate.js" \
+              --target ".development-land-area-sync/target.json" \
+              --artifact ".development-land-area-sync/artifact.json"
+          )"
+          if [[ "${validation_output}" != "LAND_AREA_DEVELOPMENT_RUN_ARTIFACT_VALIDATED" ]]; then
+            echo "::error::Repository validator rejected the downloaded artifact."
+            exit 1
+          fi
+          printf '%s\n' "${expected_attestation}" \
+            > development-land-area-sync-output/validated-runner
+          chmod 600 development-land-area-sync-output/validated-runner
+          cleanup_validation
+          trap - EXIT
+
+      - name: Upload sanitized run artifact
+        if: always() && steps.validate.outcome == 'success' && hashFiles('development-land-area-sync-output/validated-runner') != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: development-land-area-sync-${{ inputs.manifest }}-${{ github.run_id }}
+          path: development-land-area-sync-output/artifact.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Enforce development run gate
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          status_file="development-land-area-sync-output/status"
+          artifact_file="development-land-area-sync-output/artifact.json"
+          validation_file="development-land-area-sync-output/validated-runner"
+          if [[ ! -f "${status_file}" || -L "${status_file}" ]]; then
+            echo "::error::Remote runner status is missing."
+            exit 1
+          fi
+          runner_status="$(tr -d '[:space:]' < "${status_file}")"
+          if [[ ! "${runner_status}" =~ ^[0-9]+$ ]]; then
+            echo "::error::Remote runner status is invalid."
+            exit 1
+          fi
+          if [[
+            ! -f "${artifact_file}"
+            || ! -f "${validation_file}"
+            || -L "${artifact_file}"
+            || -L "${validation_file}"
+          ]]; then
+            echo "::error::Validated sanitized artifact is missing."
+            exit 1
+          fi
+          gate_status="$(
+            node -e '
+              const fs = require("node:fs");
+              const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+              process.stdout.write(String(value?.gate?.status ?? ""));
+            ' "${artifact_file}"
+          )"
+          target_count="$(
+            node -e '
+              const fs = require("node:fs");
+              const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+              process.stdout.write(String(value?.targetCount ?? ""));
+            ' "${artifact_file}"
+          )"
+          observed_count="$(
+            node -e '
+              const fs = require("node:fs");
+              const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+              process.stdout.write(String(value?.observedPropertyUnitCount ?? ""));
+            ' "${artifact_file}"
+          )"
+          {
+            echo "### Development land-area sync"
+            echo
+            echo "- Manifest: \`${{ inputs.manifest }}\`"
+            echo "- Gate: \`${gate_status}\`"
+            echo "- PNU targets: \`${target_count}\`"
+            echo "- Verified property units: \`${observed_count}\`"
+            echo "- Artifact: sanitized JSON uploaded"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          if [[ "${runner_status}" != "0" || "${gate_status}" != "PASS" ]]; then
+            echo "::error::Development land-area sync gate did not pass."
+            exit 1
+          fi
