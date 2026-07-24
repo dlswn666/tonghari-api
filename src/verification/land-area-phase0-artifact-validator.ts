@@ -621,7 +621,7 @@ function validateInventory(value: unknown, endpoint: string, path: string): void
         if (value.kind === 'LDAREG') {
             assertEnum(
                 record.unitIdentityShape,
-                ['DONG_FLOOR_HO', 'INCOMPLETE'],
+                ['DONG_FLOOR_HO', 'FLOOR_HO', 'INCOMPLETE'],
                 `${recordPath}.unitIdentityShape`
             );
             assertEnum(
@@ -716,13 +716,13 @@ function validateInventory(value: unknown, endpoint: string, path: string): void
         } else if (value.kind === 'EXPOS') {
             assertEnum(
                 record.unitIdentityShape,
-                ['DONG_FLOOR_HO', 'INCOMPLETE'],
+                ['DONG_FLOOR_HO', 'FLOOR_HO', 'INCOMPLETE'],
                 `${recordPath}.unitIdentityShape`
             );
         }
         if (
             (value.kind === 'EXPOS' || value.kind === 'LDAREG') &&
-            (record.unitIdentityShape === 'DONG_FLOOR_HO') !==
+            (record.unitIdentityShape !== 'INCOMPLETE') !==
                 (record.unitIdentityHash !== undefined)
         ) {
             reject(`${recordPath}.unitIdentityShape conflicts with hash`);
@@ -891,7 +891,7 @@ function validateEvidence(value: unknown, path: string): void {
     );
     assertEnum(
         value.ldaregReplication.status,
-        ['PASS', 'FAIL'],
+        ['PASS', 'FAIL', 'NOT_APPLICABLE'],
         `${path}.ldaregReplication.status`
     );
     assertHash(
@@ -914,7 +914,9 @@ function validateEvidence(value: unknown, path: string): void {
         value.ldaregReplication.rowCount !== null &&
         value.ldaregReplication.rowMultisetDigest !== null;
     if (
-        (value.ldaregReplication.status === 'PASS') !== replicationHasResult
+        (value.ldaregReplication.status === 'PASS') !== replicationHasResult ||
+        (value.ldaregReplication.status === 'NOT_APPLICABLE' &&
+            replicationHasResult)
     ) {
         reject(`${path}.ldaregReplication status is inconsistent`);
     }
@@ -961,8 +963,8 @@ function validateChecks(value: unknown, path: string): void {
     );
 }
 
-function hasExactExpectedHousingClassification(
-    sample: JsonRecord,
+function hasExactHousingClassification(
+    expectedBylot: 'ZERO' | 'POSITIVE',
     titleRecords: JsonRecord[]
 ): boolean {
     if (titleRecords.length === 0) return false;
@@ -985,7 +987,7 @@ function hasExactExpectedHousingClassification(
                 (!requiredSignal ||
                     record.otherPurposeSignals.includes(expectedSignal))
         );
-    if (sample.expectedBylot === 'ZERO') {
+    if (expectedBylot === 'ZERO') {
         return sameExactPair(
             '1',
             '01000',
@@ -1016,9 +1018,23 @@ function requireSemanticFailureCodes(sample: JsonRecord, path: string): void {
     const required = new Set<string>();
     const requiredReview = new Set<string>();
     const endpoints = sample.endpoints as JsonRecord[];
+    const endpointByName = (name: string): JsonRecord =>
+        endpoints.find((endpoint) => endpoint.endpoint === name)!;
+    const titleInventory = endpointByName('getBrTitleInfo')
+        .inventory as JsonRecord;
+    const titleInventoryRecords = titleInventory.records as JsonRecord[];
+    const ldaregApplicable = hasExactHousingClassification(
+        'POSITIVE',
+        titleInventoryRecords
+    );
     for (const endpoint of endpoints) {
-        if (endpoint.state === 'FAILED') required.add('SCAN_FAILED');
-        if (endpoint.state === 'INCOMPLETE') required.add('SCAN_INCOMPLETE');
+        const isNonApplicableLdareg =
+            !ldaregApplicable &&
+            endpoint.endpoint === 'ldaregList';
+        if (!isNonApplicableLdareg && endpoint.state === 'FAILED')
+            required.add('SCAN_FAILED');
+        if (!isNonApplicableLdareg && endpoint.state === 'INCOMPLETE')
+            required.add('SCAN_INCOMPLETE');
         const inventory = endpoint.inventory as JsonRecord;
         if (
             inventory.truncated === true ||
@@ -1044,24 +1060,31 @@ function requireSemanticFailureCodes(sample: JsonRecord, path: string): void {
     const matchedHashes =
         bylotAttached.matchedManagementPkHashes as JsonRecord;
 
+    if (
+        (ldaregApplicable &&
+            ldaregReplication.status === 'NOT_APPLICABLE') ||
+        (!ldaregApplicable &&
+            ldaregReplication.status !== 'NOT_APPLICABLE')
+    ) {
+        reject(`${path}.ldaregReplication applicability is inconsistent`);
+    }
+
     if (bylotEvidence.truncated === true || matchedHashes.truncated === true) {
         required.add('CAPTURE_INVENTORY_TRUNCATED');
     }
     if (scopeLadfrl.status === 'FAIL') {
         required.add('LADFRL_SCOPE_AREA_INVALID');
     }
-    if (ldaregReplication.status === 'FAIL') {
+    if (
+        ldaregApplicable &&
+        ldaregReplication.status === 'FAIL'
+    ) {
         required.add('LDAREG_SCOPE_REPLICA_INVALID');
     }
 
-    const endpointByName = (name: string): JsonRecord =>
-        endpoints.find((endpoint) => endpoint.endpoint === name)!;
-    const titleInventory = endpointByName('getBrTitleInfo')
-        .inventory as JsonRecord;
-    const titleInventoryRecords = titleInventory.records as JsonRecord[];
     if (
-        !hasExactExpectedHousingClassification(
-            sample,
+        !hasExactHousingClassification(
+            sample.expectedBylot as 'ZERO' | 'POSITIVE',
             titleInventoryRecords
         )
     ) {
@@ -1133,7 +1156,7 @@ function requireSemanticFailureCodes(sample: JsonRecord, path: string): void {
                 ).length ||
             exposRecords.some(
                 (record) =>
-                    record.unitIdentityShape !== 'DONG_FLOOR_HO'
+                    record.unitIdentityShape === 'INCOMPLETE'
             ) ||
             ldaregRecords
                 .filter(
@@ -1143,7 +1166,7 @@ function requireSemanticFailureCodes(sample: JsonRecord, path: string): void {
                 )
                 .some(
                     (record) =>
-                        record.unitIdentityShape !== 'DONG_FLOOR_HO'
+                        record.unitIdentityShape === 'INCOMPLETE'
                 ) ||
             exposSet.size === 0 ||
             exposSet.size !== exposHashes.length ||
@@ -1341,7 +1364,12 @@ function requirePassWitnesses(sample: JsonRecord, path: string): void {
     ) {
         reject(`${path} PASS title endpoint lacks codebook evidence`);
     }
-    if (!hasExactExpectedHousingClassification(sample, titleRecords)) {
+    if (
+        !hasExactHousingClassification(
+            sample.expectedBylot as 'ZERO' | 'POSITIVE',
+            titleRecords
+        )
+    ) {
         reject(`${path} PASS lacks an exact approved housing classification`);
     }
 
@@ -1370,6 +1398,14 @@ function requirePassWitnesses(sample: JsonRecord, path: string): void {
         `${path}.evidence.bylotByManagementPk`
     );
     const expectedPositive = sample.expectedBylot === 'POSITIVE';
+    const passReplication = evidence.ldaregReplication as JsonRecord;
+    if (
+        (expectedPositive && passReplication.status !== 'PASS') ||
+        (!expectedPositive &&
+            passReplication.status !== 'NOT_APPLICABLE')
+    ) {
+        reject(`${path} PASS lacks the expected LDAREG applicability witness`);
+    }
     const evidenceByHash = new Map(
         titleEvidence.map((record) => [
             record.managementPkHash as string,
@@ -1402,10 +1438,7 @@ function requirePassWitnesses(sample: JsonRecord, path: string): void {
             : record.upManagementPkHash;
         if (
             typeof rootHash !== 'string' ||
-            !titleHashes.has(rootHash) ||
-            (isTitleRoot &&
-                record.upManagementPkHash !== undefined &&
-                record.upManagementPkHash !== managementHash)
+            !titleHashes.has(rootHash)
         ) {
             reject(
                 `${path}.basisInventory.records[${index}] is outside title PK closure`
@@ -1631,7 +1664,7 @@ function requirePassWitnesses(sample: JsonRecord, path: string): void {
         );
         const exposUnitHashes = exposRecords.map((record, index) => {
             if (
-                record.unitIdentityShape !== 'DONG_FLOOR_HO' ||
+                record.unitIdentityShape === 'INCOMPLETE' ||
                 typeof record.unitIdentityHash !== 'string'
             ) {
                 reject(
@@ -1643,7 +1676,7 @@ function requirePassWitnesses(sample: JsonRecord, path: string): void {
         const validLdaregUnitHashes = validLdaregRecords.map(
             (record, index) => {
                 if (
-                    record.unitIdentityShape !== 'DONG_FLOOR_HO' ||
+                    record.unitIdentityShape === 'INCOMPLETE' ||
                     typeof record.unitIdentityHash !== 'string' ||
                     !validQuotaRatio(
                         record.quotaRatio,
@@ -1669,7 +1702,7 @@ function requirePassWitnesses(sample: JsonRecord, path: string): void {
             ) ||
             missingLdaregRecords.some(
                 (record) =>
-                    record.unitIdentityShape !== 'DONG_FLOOR_HO' ||
+                    record.unitIdentityShape === 'INCOMPLETE' ||
                     typeof record.unitIdentityHash !== 'string' ||
                     exposUnitSet.has(record.unitIdentityHash)
             )

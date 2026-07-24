@@ -53,9 +53,9 @@ export const LAND_AREA_PHASE0_MANIFEST_VERSION =
 export const LAND_AREA_PHASE0_PLAN_VERSION =
     'land-area-phase0-capture-plan@1' as const;
 export const LAND_AREA_PHASE0_ARTIFACT_VERSION =
-    'land-area-phase0-capture-artifact@3' as const;
+    'land-area-phase0-capture-artifact@4' as const;
 export const LAND_AREA_PHASE0_ARTIFACT_SCHEMA_HASH =
-    '42defd540c3c3d81331aea1f6f74346e790e0c4093da50a23f300932fadbde7d' as const;
+    '6d08402b3800888513d9649531f4475c888c608f7dc014d978d5635ef0346540' as const;
 export const LAND_AREA_PHASE0_MAX_ARTIFACT_BYTES = 3 * 1024 * 1024;
 export const LAND_AREA_PHASE0_OUTPUT_DIRECTORY = '.phase0-land-area';
 
@@ -234,7 +234,10 @@ interface ExposInventory extends BoundedInventory {
     records: Array<{
         managementPkHash?: string;
         upManagementPkHash?: string;
-        unitIdentityShape: 'DONG_FLOOR_HO' | 'INCOMPLETE';
+        unitIdentityShape:
+            | 'DONG_FLOOR_HO'
+            | 'FLOOR_HO'
+            | 'INCOMPLETE';
         unitIdentityHash?: string;
         mainAttachedTypeCode?: string;
         floorTypeCode?: string;
@@ -257,7 +260,10 @@ interface LdaregInventory extends BoundedInventory {
     records: Array<{
         pnuHash?: string;
         aggregateBuildingSerialHash?: string;
-        unitIdentityShape: 'DONG_FLOOR_HO' | 'INCOMPLETE';
+        unitIdentityShape:
+            | 'DONG_FLOOR_HO'
+            | 'FLOOR_HO'
+            | 'INCOMPLETE';
         unitIdentityHash?: string;
         quotaRatioState: 'VALID' | 'MISSING' | 'INVALID';
         quotaRatioInput: {
@@ -308,7 +314,7 @@ export interface LandAreaPhase0SampleArtifact {
             totalArea: string | null;
         };
         ldaregReplication: {
-            status: 'PASS' | 'FAIL';
+            status: 'PASS' | 'FAIL' | 'NOT_APPLICABLE';
             canonicalSourcePnuHash: string;
             comparedPnuHashes: string[];
             rowCount: number | null;
@@ -752,10 +758,13 @@ function unitIdentity(
     kind: 'EXPOS_UNIT' | 'LDAREG_UNIT',
     row: Record<string, unknown>
 ): {
-    shape: 'DONG_FLOOR_HO' | 'INCOMPLETE';
+    shape: 'DONG_FLOOR_HO' | 'FLOOR_HO' | 'INCOMPLETE';
     hash?: string;
 } {
-    const exactStringAlias = (aliases: readonly string[]): string | null => {
+    const exactScalarAlias = (
+        aliases: readonly string[],
+        options: { zeroSentinel?: boolean } = {}
+    ): string | null => {
         const present = aliases
             .filter((alias) =>
                 Object.prototype.hasOwnProperty.call(row, alias)
@@ -763,44 +772,59 @@ function unitIdentity(
             .map((alias) => row[alias]);
         if (
             present.length === 0 ||
-            present.some((value) => typeof value !== 'string')
+            present.some(
+                (value) =>
+                    typeof value !== 'string' &&
+                    !(
+                        typeof value === 'number' &&
+                        Number.isSafeInteger(value)
+                    )
+            )
         ) {
             return null;
         }
         const normalized = [
             ...new Set(
-                (present as string[])
-                    .map((value) => normalizeUnitSegment(value))
+                present
+                    .map((value) =>
+                        normalizeUnitSegment(String(value))
+                    )
+                    .map((value) =>
+                        options.zeroSentinel && /^0+$/.test(value)
+                            ? ''
+                            : value
+                    )
                     .filter(Boolean)
             ),
         ];
         return normalized.length === 1 ? normalized[0] : null;
     };
     const tuple = normalizeUnitTuple({
-        dong: exactStringAlias(
+        dong: exactScalarAlias(
             kind === 'EXPOS_UNIT'
                 ? ['dongNm', 'buldDongNm']
-                : ['buldDongNm', 'buldNm', 'dongNm']
+                : ['buldDongNm', 'dongNm'],
+            { zeroSentinel: true }
         ),
-        floor: exactStringAlias(
+        floor: exactScalarAlias(
             kind === 'EXPOS_UNIT'
-                ? ['flrNoNm', 'buldFloorNm']
+                ? ['flrNoNm', 'buldFloorNm', 'flrNo']
                 : ['buldFloorNm', 'flrNoNm']
         ),
-        ho: exactStringAlias(
+        ho: exactScalarAlias(
             kind === 'EXPOS_UNIT'
                 ? ['hoNm', 'buldHoNm']
                 : ['buldHoNm', 'hoNm']
         ),
     });
-    if (!tuple.dong || !tuple.floor || !tuple.ho) {
+    if (!tuple.floor || !tuple.ho) {
         return { shape: 'INCOMPLETE' };
     }
     return {
-        shape: 'DONG_FLOOR_HO',
+        shape: tuple.dong ? 'DONG_FLOOR_HO' : 'FLOOR_HO',
         hash: sha256(
             `UNIT_TUPLE_JSON\u0000${stableStringify([
-                tuple.dong,
+                tuple.dong || null,
                 tuple.floor,
                 tuple.ho,
             ])}`
@@ -1393,9 +1417,6 @@ function buildSampleArtifact(
             continue;
         }
         if (titlePkSet.has(pk)) {
-            if (upPk && upPk !== pk) {
-                basisClosureValid = false;
-            }
             continue;
         }
         if (!upPk || !titlePkSet.has(upPk)) {
@@ -1590,6 +1611,21 @@ function buildSampleArtifact(
     const titleBasisPassed = policyCandidate !== null;
     const boundedMatchedPks = boundRecords(matchedPks);
 
+    const classification = classifyHousingType({
+        titleRows: titleRows.map((row) => ({
+            regstrGbCd: row.regstrGbCd,
+            mainPurpsCd: row.mainPurpsCd,
+            mainPurpsCdNm: row.mainPurpsCdNm,
+            etcPurps:
+                typeof row.etcPurps === 'string'
+                    ? row.etcPurps
+                    : undefined,
+        })),
+        rootIdentities: titlePks,
+    });
+    const ldaregRequired =
+        classification.kind === 'CLASSIFIED' &&
+        classification.family === 'LDAREG';
     const failureCodes = new Set<string>(
         scanFailureCodes([
             raw.title,
@@ -1597,14 +1633,17 @@ function buildSampleArtifact(
             raw.attached,
             raw.expos,
             raw.ladfrl,
-            raw.ldareg,
+            ...(ldaregRequired ? [raw.ldareg] : []),
         ])
     );
     for (const { scan } of raw.scopeLadfrl) {
         for (const code of scanFailureCodes([scan])) failureCodes.add(code);
     }
-    for (const { scan } of scopeLdareg) {
-        for (const code of scanFailureCodes([scan])) failureCodes.add(code);
+    if (ldaregRequired) {
+        for (const { scan } of scopeLdareg) {
+            for (const code of scanFailureCodes([scan]))
+                failureCodes.add(code);
+        }
     }
     for (const { scan } of scopeExpos) {
         for (const code of scanFailureCodes([scan])) failureCodes.add(code);
@@ -1621,18 +1660,6 @@ function buildSampleArtifact(
         }
     }
     const reviewCodes = new Set<string>();
-    const classification = classifyHousingType({
-        titleRows: titleRows.map((row) => ({
-            regstrGbCd: row.regstrGbCd,
-            mainPurpsCd: row.mainPurpsCd,
-            mainPurpsCdNm: row.mainPurpsCdNm,
-            etcPurps:
-                typeof row.etcPurps === 'string'
-                    ? row.etcPurps
-                    : undefined,
-        })),
-        rootIdentities: titlePks,
-    });
     const expectedFamily =
         raw.sample.expectedBylot === 'POSITIVE' ? 'LDAREG' : 'LADFRL';
     if (
@@ -1797,7 +1824,7 @@ function buildSampleArtifact(
     if (!scopeLadfrl || !scopeLadfrl.ok) {
         failureCodes.add('LADFRL_SCOPE_AREA_INVALID');
     }
-    if (!ldaregReplication?.ok) {
+    if (ldaregRequired && !ldaregReplication?.ok) {
         failureCodes.add('LDAREG_SCOPE_REPLICA_INVALID');
     }
     const scopeLdaregRows = scopeLdareg.flatMap(({ scan }) => rowsOf(scan));
@@ -1879,11 +1906,15 @@ function buildSampleArtifact(
             exposUnitHashes.length === exposResult.records.length &&
             validLdaregUnitHashes.length === validLdaregRecords.length &&
             missingLdaregUnitHashes.size === missingLdaregRecords.length &&
-            exposResult.records.every(
-                (record) => record.unitIdentityShape === 'DONG_FLOOR_HO'
+            exposResult.records.every((record) =>
+                ['DONG_FLOOR_HO', 'FLOOR_HO'].includes(
+                    record.unitIdentityShape
+                )
             ) &&
             [...validLdaregRecords, ...missingLdaregRecords].every(
-                (record) => record.unitIdentityShape === 'DONG_FLOOR_HO'
+                (record) =>
+                    record.unitIdentityShape === 'DONG_FLOOR_HO' ||
+                    record.unitIdentityShape === 'FLOOR_HO'
             ) &&
             exposUnitHashes.length === exposSet.size &&
             validLdaregUnitHashes.length === validLdaregSet.size &&
@@ -1917,16 +1948,23 @@ function buildSampleArtifact(
                 totalArea: scopeLadfrl?.ok === true ? scopeLadfrl.totalArea : null,
             },
             ldaregReplication: {
-                status: ldaregReplication?.ok === true ? 'PASS' : 'FAIL',
+                status:
+                    !ldaregRequired
+                        ? 'NOT_APPLICABLE'
+                        : ldaregReplication?.ok === true
+                          ? 'PASS'
+                          : 'FAIL',
                 canonicalSourcePnuHash: pnuHash(raw.sample.pnu),
                 comparedPnuHashes: scopeLdareg
                     .map(({ pnu }) => pnuHash(pnu))
                     .sort(),
                 rowCount:
+                    ldaregRequired &&
                     ldaregReplication?.ok === true
                         ? ldaregReplication.evidence.rowCount
                         : null,
                 rowMultisetDigest:
+                    ldaregRequired &&
                     ldaregReplication?.ok === true
                         ? ldaregReplication.evidence.rowMultisetDigest
                         : null,
