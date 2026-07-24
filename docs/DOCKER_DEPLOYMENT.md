@@ -114,7 +114,10 @@ batch runner는 같은 operation lock만 획득하고 전체 batch 동안 보유
 않는다. runner 실행은 `timeout 2400` 등으로 최대 2,400초를 강제하고, runtime/deploy의
 operation lock 대기는 최대 2,700초로 제한한다. 따라서 batch 실패나 runner 종료 시 커널이
 lock을 해제하며, disable이 영구 대기하지 않고 최대 대기시간 안에 재기동 절차를 시작하거나
-명시적으로 실패한다.
+명시적으로 실패한다. 일반 Docker deploy job은 production lock 최대 40분, operation
+lock 최대 45분, 실제 배포와 rollback 예산 30분을 모두 포함하도록 SSH command timeout을
+120분, job timeout을 130분으로 두어 lock 획득 직후 timeout이 컨테이너 교체를 중단하지
+않게 한다.
 
 raw allowlist는 `${{ inputs.* }}` 표현식으로 step 환경변수에 직접 주입하지 않는다.
 각 job이 `GITHUB_EVENT_PATH`에서 값을 읽어 파일에 쓰고, GitHub workflow command escape를
@@ -139,6 +142,11 @@ EC2 적용 시에는 다음 보호 조건을 모두 확인한다.
 7. 컨테이너 재기동 전 production lock과 land-area operation lock을 고정 순서로 획득한다.
 8. 성공 보고 전 runtime rollback container와 secret-bearing `.env` backup의 삭제 및
    부재를 재검증하고, cleanup 명령이나 부재 검증이 실패하면 exit `71`로 green을 금지한다.
+9. 같은-run idempotent return 전에 최대 8개의 orphan `.env.land-area-sync.backup.*`만
+   소유자와 mode `600`을 검증해 삭제하고, glob 재검사에서 하나라도 남으면 exit `71`로
+   중단한다.
+10. runner와 EC2에 staged한 raw allowlist는 모든 종료 경로에서 삭제 후 부재를 검증하고,
+    삭제 실패를 `|| true`로 무시하지 않는다.
 
 값을 출력하지 않고 항목 수만 확인한다.
 

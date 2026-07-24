@@ -58,6 +58,15 @@ test('runtime allowlist workflow는 event payload에서 raw를 읽고 exact mask
         workflow,
         /install -m 600 \/dev\/null "\$\{allowlist_path\}"/
     );
+    assert.equal(
+        (
+            workflow.match(
+                /install -m 600 \/dev\/null "\$\{allowlist_path\}"\n\s+echo "path=\$\{allowlist_path\}" >> "\$\{GITHUB_OUTPUT\}"\n\n\s+node -e/g
+            ) ?? []
+        ).length,
+        2,
+        'cleanup step이 실패한 staging step의 경로도 알 수 있도록 raw write 전에 output을 기록해야 한다'
+    );
     assert.doesNotMatch(
         workflow,
         /\$\{\{ inputs\.land_area_sync_allowed_targets \}\}/
@@ -243,6 +252,106 @@ test('정상-success cleanup은 rollback container와 secret backup 부재를 �
         /! rm -f -- "\$\{env_backup\}"[\s\S]*-e "\$\{env_backup\}"[\s\S]*-L "\$\{env_backup\}"/
     );
     assert.match(successCleanupBody, /CLEANUP_FAILED:[\s\S]*exit 71/);
+});
+
+test('orphan env backup과 staged raw allowlist는 idempotent return 전에 bounded fail-closed cleanup한다', () => {
+    const remoteRuntimeBody =
+        workflow.split("<<'REMOTE_RUNTIME'")[1] ?? '';
+    const orphanCleanupBody =
+        workflow.split('          cleanup_orphan_env_backups() {')[1]?.split(
+            '          cleanup_orphan_env_backups'
+        )[0] ?? '';
+    const cleanupCallIndex = remoteRuntimeBody.indexOf(
+        '          cleanup_orphan_env_backups\n'
+    );
+    const enableDecisionIndex = remoteRuntimeBody.indexOf(
+        '          if [[ "${RUNTIME_ACTION}" == "enable" ]]; then'
+    );
+    const remoteExitCleanupBody =
+        workflow.split('          cleanup_run_files() {')[1]?.split(
+            '          trap cleanup_run_files EXIT'
+        )[0] ?? '';
+    const sshExitCleanupBody =
+        workflow.split('          cleanup_remote() {')[1]?.split(
+            '          trap cleanup_remote EXIT'
+        )[0] ?? '';
+    const localCleanupSteps = [
+        'Remove staged validator input',
+        'Remove staged runner input',
+    ].map(
+        (name) =>
+            workflow.split(`      - name: ${name}`)[1]?.split(
+                '\n  apply-runtime-gate:'
+            )[0] ?? ''
+    );
+
+    assert.notEqual(orphanCleanupBody, '');
+    assert.match(
+        orphanCleanupBody,
+        /\.env\.land-area-sync\.backup\.\*/
+    );
+    assert.match(orphanCleanupBody, /\$\{#orphan_backups\[@\]\} > 8/);
+    assert.equal(
+        (
+            orphanCleanupBody.match(
+                /\.env\.land-area-sync\.backup\.\*/g
+            ) ?? []
+        ).length,
+        2
+    );
+    assert.match(orphanCleanupBody, /return 71/);
+    assert.ok(cleanupCallIndex >= 0);
+    assert.ok(
+        cleanupCallIndex < enableDecisionIndex,
+        'orphan backup cleanup은 same-run enable early return보다 먼저 실행해야 한다'
+    );
+
+    for (const cleanupBody of [
+        remoteExitCleanupBody,
+        sshExitCleanupBody,
+        ...localCleanupSteps,
+    ]) {
+        assert.notEqual(cleanupBody, '');
+        assert.doesNotMatch(cleanupBody, /\|\| true/);
+        assert.match(
+            cleanupBody,
+            /-e "\$\{(?:allowlist_path|cleanup_path)\}" \|\| -L/
+        );
+        assert.match(cleanupBody, /CLEANUP_FAILED:[\s\S]*exit 71/);
+    }
+    assert.equal(
+        (
+            workflow.match(
+                /cleanup_path="\$\{ALLOWLIST_PATH:-\$\{RUNNER_TEMP\}\/land-area-sync-(?:validate|runtime)-\$\{RUN_KEY\}\/allowlist\}"/g
+            ) ?? []
+        ).length,
+        2,
+        'staging step이 실패해 output이 비어도 exact RUN_KEY 경로를 정리해야 한다'
+    );
+});
+
+test('Docker deploy timeout은 두 lock 대기와 배포 rollback의 전체 worst-case 예산보다 크다', () => {
+    const deployJob =
+        dockerBuildWorkflow.split('\n  deploy:\n')[1] ?? '';
+    const jobTimeoutMatch = deployJob.match(/timeout-minutes: ([0-9]+)/);
+    const commandTimeoutMatch = deployJob.match(
+        /command_timeout: ([0-9]+)m/
+    );
+
+    assert.notEqual(deployJob, '');
+    assert.ok(jobTimeoutMatch);
+    assert.ok(commandTimeoutMatch);
+    const jobTimeoutSeconds = Number(jobTimeoutMatch[1]) * 60;
+    const commandTimeoutSeconds = Number(commandTimeoutMatch[1]) * 60;
+    const worstCaseSeconds = 2400 + 2700 + 1800;
+    assert.ok(
+        commandTimeoutSeconds > worstCaseSeconds,
+        'SSH command timeout은 lock 2개와 배포/rollback 예산 합보다 커야 한다'
+    );
+    assert.ok(
+        jobTimeoutSeconds > commandTimeoutSeconds,
+        'deploy job timeout은 SSH command timeout 뒤 후처리 여유를 남겨야 한다'
+    );
 });
 
 test('runtime allowlist workflow는 Supabase나 DB에 연결하거나 운영 target을 구성하지 않는다', () => {

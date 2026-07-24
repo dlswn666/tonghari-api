@@ -75,6 +75,7 @@ jobs:
           install -d -m 700 "${local_root}"
           allowlist_path="${local_root}/allowlist"
           install -m 600 /dev/null "${allowlist_path}"
+          echo "path=${allowlist_path}" >> "${GITHUB_OUTPUT}"
 
           node -e '
             const fs = require("node:fs");
@@ -92,8 +93,6 @@ jobs:
             }
             fs.writeFileSync(outputPath, raw, { mode: 0o600 });
           ' "${GITHUB_EVENT_PATH}" "${allowlist_path}"
-
-          echo "path=${allowlist_path}" >> "${GITHUB_OUTPUT}"
 
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
@@ -156,11 +155,24 @@ jobs:
         shell: bash
         env:
           ALLOWLIST_PATH: ${{ steps.validate-runtime-input.outputs.path }}
+          RUN_KEY: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
-          if [[ -n "${ALLOWLIST_PATH}" && -f "${ALLOWLIST_PATH}" ]] \
-            && [[ ! -L "${ALLOWLIST_PATH}" ]]; then
-            rm -f -- "${ALLOWLIST_PATH}"
+          [[ "${RUN_KEY}" =~ ^[0-9]+-[0-9]+$ ]]
+          cleanup_path="${ALLOWLIST_PATH:-${RUNNER_TEMP}/land-area-sync-validate-${RUN_KEY}/allowlist}"
+          cleanup_failed=0
+          if [[ -e "${cleanup_path}" || -L "${cleanup_path}" ]]; then
+            if [[ ! -f "${cleanup_path}" || -L "${cleanup_path}" ]] \
+              || ! rm -f -- "${cleanup_path}"; then
+              cleanup_failed=1
+            fi
+          fi
+          if [[ -e "${cleanup_path}" || -L "${cleanup_path}" ]]; then
+            cleanup_failed=1
+          fi
+          if [[ "${cleanup_failed}" -ne 0 ]]; then
+            echo "::error::CLEANUP_FAILED: staged validator allowlist still exists."
+            exit 71
           fi
 
   apply-runtime-gate:
@@ -186,6 +198,7 @@ jobs:
           install -d -m 700 "${local_root}"
           allowlist_path="${local_root}/allowlist"
           install -m 600 /dev/null "${allowlist_path}"
+          echo "path=${allowlist_path}" >> "${GITHUB_OUTPUT}"
 
           node -e '
             const fs = require("node:fs");
@@ -203,8 +216,6 @@ jobs:
             }
             fs.writeFileSync(outputPath, raw, { mode: 0o600 });
           ' "${GITHUB_EVENT_PATH}" "${allowlist_path}"
-
-          echo "path=${allowlist_path}" >> "${GITHUB_OUTPUT}"
 
       - name: Require EC2 connection secrets
         shell: bash
@@ -339,18 +350,48 @@ jobs:
           remote_root="alimtalk-proxy/.land-area-sync-runtime/${RUN_KEY}"
 
           cleanup_remote() {
+            original_status=$?
+            trap - EXIT
+            set +e
             ssh "${ssh_options[@]}" "${EC2_USERNAME}@${EC2_HOST}" \
               "RUN_KEY='${RUN_KEY}' bash -s" \
-              >/dev/null 2>&1 <<'REMOTE_CLEANUP' || true
-          set -euo pipefail
+              >/dev/null 2>&1 <<'REMOTE_CLEANUP'
+          set -Eeuo pipefail
           application_root="${HOME}/alimtalk-proxy"
           parent="${application_root}/.land-area-sync-runtime"
           run_root="${parent}/${RUN_KEY}"
-          if [[ -d "${run_root}" && ! -L "${run_root}" ]]; then
-            rm -f -- "${run_root}/allowlist"
-            rmdir -- "${run_root}" 2>/dev/null || true
+          allowlist_path="${run_root}/allowlist"
+          cleanup_failed=0
+          [[ "${RUN_KEY}" =~ ^[0-9]+-[0-9]+$ ]]
+          if [[ -e "${allowlist_path}" || -L "${allowlist_path}" ]]; then
+            if [[ ! -f "${allowlist_path}" || -L "${allowlist_path}" ]] \
+              || ! rm -f -- "${allowlist_path}"; then
+              cleanup_failed=1
+            fi
+          fi
+          if [[ -e "${allowlist_path}" || -L "${allowlist_path}" ]]; then
+            cleanup_failed=1
+          fi
+          if [[ -e "${run_root}" || -L "${run_root}" ]]; then
+            if [[ ! -d "${run_root}" || -L "${run_root}" ]] \
+              || ! rmdir -- "${run_root}"; then
+              cleanup_failed=1
+            fi
+          fi
+          if [[ -e "${run_root}" || -L "${run_root}" ]]; then
+            cleanup_failed=1
+          fi
+          if [[ "${cleanup_failed}" -ne 0 ]]; then
+            exit 71
           fi
           REMOTE_CLEANUP
+            remote_cleanup_status=$?
+            set -e
+            if [[ "${remote_cleanup_status}" -ne 0 ]]; then
+              echo "::error::CLEANUP_FAILED: remote staged allowlist still exists."
+              exit 71
+            fi
+            exit "${original_status}"
           }
           trap cleanup_remote EXIT
 
@@ -419,14 +460,33 @@ jobs:
           previous_health_attestation=""
 
           cleanup_run_files() {
+            original_status=$?
+            trap - EXIT
             set +e
-            if [[ -f "${allowlist_path}" && ! -L "${allowlist_path}" ]]; then
-              rm -f -- "${allowlist_path}"
+            cleanup_failed=0
+            if [[ -e "${allowlist_path}" || -L "${allowlist_path}" ]]; then
+              if [[ ! -f "${allowlist_path}" || -L "${allowlist_path}" ]] \
+                || ! rm -f -- "${allowlist_path}"; then
+                cleanup_failed=1
+              fi
             fi
-            if [[ -d "${run_root}" && ! -L "${run_root}" ]]; then
-              rmdir -- "${run_root}" 2>/dev/null || true
+            if [[ -e "${allowlist_path}" || -L "${allowlist_path}" ]]; then
+              cleanup_failed=1
             fi
-            return 0
+            if [[ -e "${run_root}" || -L "${run_root}" ]]; then
+              if [[ ! -d "${run_root}" || -L "${run_root}" ]] \
+                || ! rmdir -- "${run_root}"; then
+                cleanup_failed=1
+              fi
+            fi
+            if [[ -e "${run_root}" || -L "${run_root}" ]]; then
+              cleanup_failed=1
+            fi
+            if [[ "${cleanup_failed}" -ne 0 ]]; then
+              echo "CLEANUP_FAILED: remote staged allowlist still exists."
+              exit 71
+            fi
+            exit "${original_status}"
           }
           trap cleanup_run_files EXIT
 
@@ -609,6 +669,43 @@ jobs:
             echo "The current API health attestation is invalid."
             false
           fi
+
+          cleanup_orphan_env_backups() {
+            local cleanup_failed=0
+            local orphan_backup=""
+            local -a orphan_backups=()
+
+            shopt -s nullglob
+            orphan_backups=(
+              "${application_root}"/.env.land-area-sync.backup.*
+            )
+            shopt -u nullglob
+            if (( ${#orphan_backups[@]} > 8 )); then
+              echo "CLEANUP_FAILED: too many orphan runtime env backups require manual review."
+              return 71
+            fi
+            for orphan_backup in "${orphan_backups[@]}"; do
+              if [[ ! -f "${orphan_backup}" || -L "${orphan_backup}" ]] \
+                || [[ "$(stat -c '%u' "${orphan_backup}" 2>/dev/null)" != "$(id -u)" ]] \
+                || [[ "$(stat -c '%a' "${orphan_backup}" 2>/dev/null)" != "600" ]] \
+                || ! rm -f -- "${orphan_backup}"; then
+                cleanup_failed=1
+              fi
+            done
+            shopt -s nullglob
+            orphan_backups=(
+              "${application_root}"/.env.land-area-sync.backup.*
+            )
+            shopt -u nullglob
+            if (( ${#orphan_backups[@]} > 0 )); then
+              cleanup_failed=1
+            fi
+            if [[ "${cleanup_failed}" -ne 0 ]]; then
+              echo "CLEANUP_FAILED: orphan runtime env backup cleanup was not verified."
+              return 71
+            fi
+          }
+          cleanup_orphan_env_backups
 
           raw_allowed_targets=""
           IFS= read -r -d '' raw_allowed_targets < "${allowlist_path}" || true
@@ -954,9 +1051,22 @@ jobs:
         shell: bash
         env:
           ALLOWLIST_PATH: ${{ steps.runtime-input.outputs.path }}
+          RUN_KEY: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
-          if [[ -n "${ALLOWLIST_PATH}" && -f "${ALLOWLIST_PATH}" ]] \
-            && [[ ! -L "${ALLOWLIST_PATH}" ]]; then
-            rm -f -- "${ALLOWLIST_PATH}"
+          [[ "${RUN_KEY}" =~ ^[0-9]+-[0-9]+$ ]]
+          cleanup_path="${ALLOWLIST_PATH:-${RUNNER_TEMP}/land-area-sync-runtime-${RUN_KEY}/allowlist}"
+          cleanup_failed=0
+          if [[ -e "${cleanup_path}" || -L "${cleanup_path}" ]]; then
+            if [[ ! -f "${cleanup_path}" || -L "${cleanup_path}" ]] \
+              || ! rm -f -- "${cleanup_path}"; then
+              cleanup_failed=1
+            fi
+          fi
+          if [[ -e "${cleanup_path}" || -L "${cleanup_path}" ]]; then
+            cleanup_failed=1
+          fi
+          if [[ "${cleanup_failed}" -ne 0 ]]; then
+            echo "::error::CLEANUP_FAILED: staged runtime allowlist still exists."
+            exit 71
           fi
