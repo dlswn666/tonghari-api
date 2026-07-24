@@ -78,6 +78,7 @@ function makeDeps(opts: {
     onReadProperty?: () => void;
     /** getScopedJob 이 돌려줄 preview_data 오버라이드(apply job 시나리오용). */
     jobPreviewData?: Record<string, unknown>;
+    assertCanaryScopeAllowed?: LandAreaSyncDeps['assertCanaryScopeAllowed'];
     spy: Spy;
 }): LandAreaSyncDeps {
     const { spy } = opts;
@@ -91,6 +92,8 @@ function makeDeps(opts: {
     };
     return {
         now: () => new Date('2026-07-23T00:00:00.000Z'),
+        assertCanaryScopeAllowed:
+            opts.assertCanaryScopeAllowed ?? (() => undefined),
         scans: { ...defaultScans, ...opts.scans },
         db: {
             resolveScope: async (params) => {
@@ -226,6 +229,29 @@ test('LDAREG LINKED discovery 는 snapshot 을 1회 고정하고 apply RPC 를 �
     assert.equal(spy.applyCalls, 1, 'apply 는 정확히 1회');
     assert.deepEqual(spy.scopeStateCalls, ['LINKED_SCOPE_RESOLVED']);
     assert.equal(spy.failedCalls.length, 0);
+});
+
+test('LDAREG LINKED discovery는 resolved scope allowlist 거부 시 apply 0회 + FAILED로 수렴한다', async () => {
+    const spy = emptySpy();
+    const deps = makeDeps({
+        resolver: linked(MEMBER),
+        scans: { scanTitle: async () => titleComplete(MULTIPLEX) },
+        assertCanaryScopeAllowed: () => {
+            throw new Error('unallowed sibling PNU');
+        },
+        spy,
+    });
+
+    await runLandAreaSyncJob({
+        jobId: 'job-1',
+        unionId: 'union-1',
+        deps,
+    });
+
+    assert.equal(spy.freezeCalls, 1, 'LINKED snapshot은 apply 전에 고정된다');
+    assert.equal(spy.applyCalls, 0, 'allowlist 밖 scope에는 apply RPC를 호출하지 않는다');
+    assert.equal(spy.failedCalls.length, 1, 'PROCESSING orphan 없이 FAILED로 닫는다');
+    assert.match(spy.failedCalls[0], /허용 대상을 벗어났습니다/);
 });
 
 test('LDAREG 필수 scan(ldareg) FAILED 는 write barrier 로 apply 0회 + FAILED', async () => {

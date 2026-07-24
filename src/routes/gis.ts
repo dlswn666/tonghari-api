@@ -6,7 +6,10 @@ import { getSupabaseService } from '../services/supabase.service';
 import { databaseTargetAuthMiddleware as authMiddleware } from '../middleware/auth';
 import { gisSystemAdminMiddleware } from '../middleware/gis-system-admin';
 import { gisAddressReadRateLimitMiddleware } from '../middleware/gis-address-rate-limit';
-import { landAreaSyncEnabledMiddleware } from '../middleware/land-area-sync-enabled';
+import {
+    landAreaSyncDiscoveryCanaryMiddleware,
+    landAreaSyncEnabledMiddleware,
+} from '../middleware/land-area-sync-enabled';
 import { toSyncJobRouteFailure } from '../services/sync-job-admission';
 import { landAreaSyncQueueService } from '../services/land-area-sync/queue';
 import {
@@ -15,6 +18,12 @@ import {
     readLandAreaSync,
     type LandAreaSyncJobRow,
 } from '../services/land-area-sync/repository';
+import {
+    LandAreaSyncCanaryError,
+    assertLandAreaSyncCanaryAllowed,
+    assertLandAreaSyncScopeAllowed,
+} from '../security/land-area-sync-canary-policy';
+import { env } from '../config/env';
 import { createLogger } from '../utils/logger';
 
 const router = Router();
@@ -731,7 +740,7 @@ router.post('/inspect', authMiddleware, gisSystemAdminMiddleware, async (req, re
  * body: { unionId: uuid, anchorPnu: 19자리 }
  * SYSTEM_ADMIN 재검증(gis-system-admin) 후 durable INSERT 성공 시 202. admission 실패 시 503.
  */
-router.post('/land-area-sync', authMiddleware, gisSystemAdminMiddleware, landAreaSyncEnabledMiddleware, async (req, res) => {
+router.post('/land-area-sync', authMiddleware, gisSystemAdminMiddleware, landAreaSyncEnabledMiddleware, landAreaSyncDiscoveryCanaryMiddleware, async (req, res) => {
     const { unionId, anchorPnu } = req.body ?? {};
 
     if (!isUuid(unionId)) {
@@ -812,6 +821,59 @@ router.post('/land-area-sync/:discoveryJobId/confirm', authMiddleware, gisSystem
 
     try {
         const database = getSupabaseService(req.user!.databaseTarget);
+        const discoveryJob = await getScopedJob(
+            database.getClient(),
+            discoveryJobId,
+            unionId
+        );
+        if (!discoveryJob) {
+            return res.status(404).json({
+                success: false,
+                code: 'DISCOVERY_JOB_NOT_FOUND',
+                error: '확인할 discovery 작업을 찾을 수 없습니다.',
+            });
+        }
+        const discoveryLandAreaSync = readLandAreaSync(discoveryJob);
+        const discoveryAnchorPnu = discoveryLandAreaSync?.anchorPnu;
+        const discoveryScannedPnus =
+            discoveryLandAreaSync?.scopeSnapshot?.scannedPnus;
+        if (
+            !Array.isArray(discoveryScannedPnus) ||
+            discoveryScannedPnus.length === 0 ||
+            !discoveryScannedPnus.every(isPnu)
+        ) {
+            return res.status(409).json({
+                success: false,
+                code: 'DISCOVERY_SCOPE_NOT_FROZEN',
+                error: '확인할 discovery 작업의 필지 범위가 고정되지 않았습니다.',
+            });
+        }
+        try {
+            // body의 임의 anchor가 아니라 저장된 discovery union/anchor lineage를 검사한다.
+            assertLandAreaSyncCanaryAllowed(
+                env.LAND_AREA_SYNC_ALLOWED_TARGETS,
+                req.user!.databaseTarget,
+                discoveryJob.union_id,
+                discoveryAnchorPnu
+            );
+            // confirmation RPC가 apply job을 INSERT하기 전에 frozen scope 전체를 검사한다.
+            assertLandAreaSyncScopeAllowed(
+                env.LAND_AREA_SYNC_ALLOWED_TARGETS,
+                req.user!.databaseTarget,
+                discoveryJob.union_id,
+                discoveryScannedPnus
+            );
+        } catch (error) {
+            if (error instanceof LandAreaSyncCanaryError) {
+                return res.status(error.status).json({
+                    success: false,
+                    code: error.code,
+                    error: error.message,
+                });
+            }
+            throw error;
+        }
+
         const { data: newJobId, error } = await database.createLandAreaSyncConfirmationJob({
             p_union_id: unionId,
             p_discovery_job_id: discoveryJobId,
@@ -836,7 +898,12 @@ router.post('/land-area-sync/:discoveryJobId/confirm', authMiddleware, gisSystem
         }
 
         // admission RPC 가 durable INSERT 한 apply job 을 재실행 admission 한다.
-        landAreaSyncQueueService.admitApplyJob(newJobId, unionId, req.user!.databaseTarget);
+        landAreaSyncQueueService.admitApplyJob(
+            newJobId,
+            discoveryJob.union_id,
+            discoveryAnchorPnu as string,
+            req.user!.databaseTarget
+        );
         return res.status(202).json({ success: true, jobId: newJobId, unionId, sourceDiscoveryJobId: discoveryJobId, status: 'pending' });
     } catch (error) {
         logger.error(`LAND_AREA_SYNC confirmation failed (${discoveryJobId})`, error);

@@ -14,6 +14,10 @@ import { v4 as uuidv4 } from 'uuid';
 import { env } from '../../config/env';
 import type { DatabaseTarget } from '../../types/database.types';
 import { assertLandAreaSyncEnabled } from '../../security/land-area-sync-execution-policy';
+import {
+    assertLandAreaSyncCanaryAllowed,
+    assertLandAreaSyncScopeAllowed,
+} from '../../security/land-area-sync-canary-policy';
 import { getSupabaseService } from '../supabase.service';
 import { persistSyncJobOrThrow } from '../sync-job-admission';
 import { createLogger } from '../../utils/logger';
@@ -69,6 +73,12 @@ class LandAreaSyncQueueService {
      */
     async addDiscoveryJob(request: LandAreaSyncDiscoveryRequest): Promise<LandAreaSyncJobInfo> {
         assertLandAreaSyncEnabled(env.LAND_AREA_SYNC_ENABLED);
+        assertLandAreaSyncCanaryAllowed(
+            env.LAND_AREA_SYNC_ALLOWED_TARGETS,
+            request.databaseTarget,
+            request.unionId,
+            request.anchorPnu
+        );
 
         const jobId = uuidv4();
         const database = getSupabaseService(request.databaseTarget);
@@ -109,8 +119,19 @@ class LandAreaSyncQueueService {
     /**
      * confirmation admission RPC 가 이미 INSERT 한 apply job 을 재실행 admission 한다.
      */
-    admitApplyJob(jobId: string, unionId: string, databaseTarget: DatabaseTarget): void {
+    admitApplyJob(
+        jobId: string,
+        unionId: string,
+        anchorPnu: string,
+        databaseTarget: DatabaseTarget
+    ): void {
         assertLandAreaSyncEnabled(env.LAND_AREA_SYNC_ENABLED);
+        assertLandAreaSyncCanaryAllowed(
+            env.LAND_AREA_SYNC_ALLOWED_TARGETS,
+            databaseTarget,
+            unionId,
+            anchorPnu
+        );
 
         this.admit(jobId, unionId, databaseTarget);
         logger.info(`LAND_AREA_SYNC apply job admitted: ${jobId}`);
@@ -156,6 +177,13 @@ class LandAreaSyncQueueService {
 
         return {
             now: () => new Date(),
+            assertCanaryScopeAllowed: (unionId, scannedPnus) =>
+                assertLandAreaSyncScopeAllowed(
+                    env.LAND_AREA_SYNC_ALLOWED_TARGETS,
+                    databaseTarget,
+                    unionId,
+                    scannedPnus
+                ),
             scans: {
                 scanTitle: (pnu, signal) => this.adapter.scanTitle(pnu, hubAuth, { signal }),
                 scanAttached: (pnu, signal) => this.adapter.scanAttached(pnu, hubAuth, { signal }),

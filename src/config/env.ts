@@ -1,6 +1,7 @@
 import dotenv from 'dotenv';
 import type { DatabaseTarget } from '../types/database.types';
 import { parseExactTrueFeatureFlag } from './feature-flags';
+import { createLandAreaSyncAllowedTargetsManifest } from '../security/land-area-sync-canary-policy';
 
 // .env 파일 로드
 dotenv.config();
@@ -105,6 +106,10 @@ const hasDevelopmentDatabase = validateDevelopmentApiEnvironment({
 const buildingWriteOperationTargets = parseBuildingWriteOperationTargets(
     process.env.BUILDING_WRITE_OPERATION_TARGETS || ''
 );
+const landAreaSyncAllowedTargetsManifest =
+    createLandAreaSyncAllowedTargetsManifest(
+        process.env.LAND_AREA_SYNC_ALLOWED_TARGETS
+    );
 
 export const env = {
     // 서버 설정
@@ -147,6 +152,10 @@ export const env = {
     VWORLD_ATTR_REQUEST_INTERVAL_MS: getEnvNumber('VWORLD_ATTR_REQUEST_INTERVAL_MS', 300),
     DATA_PORTAL_API_KEY: process.env.DATA_PORTAL_API_KEY || '',
     LAND_AREA_SYNC_ENABLED: parseExactTrueFeatureFlag(process.env.LAND_AREA_SYNC_ENABLED),
+    LAND_AREA_SYNC_ALLOWED_TARGETS:
+        landAreaSyncAllowedTargetsManifest.allowedTargets,
+    LAND_AREA_SYNC_ALLOWED_TARGETS_MANIFEST:
+        landAreaSyncAllowedTargetsManifest,
 
     // 헬퍼
     isDevelopment: process.env.NODE_ENV === 'development',

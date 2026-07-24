@@ -359,9 +359,37 @@ test('배포 workflow는 GHCR digest와 EC2 env 단일 원본으로 안전하게
     ));
     assert.match(workflow, /"\$\{land_area_sync_flag_count\}" -gt 1/);
     assert.match(workflow, /"\$\{land_area_sync_flag_count\}" -eq 1/);
+    assert.match(workflow, /grep -qx 'LAND_AREA_SYNC_ENABLED=true' \.env/);
     assert.match(workflow, /grep -qx 'LAND_AREA_SYNC_ENABLED=false' \.env/);
-    assert.ok(workflow.includes('health.features?.landAreaSyncEnabled === false'));
+    assert.match(workflow, /allowed_targets_count="\$\(grep -c '\^LAND_AREA_SYNC_ALLOWED_TARGETS=' \.env \|\| true\)"/);
+    assert.match(workflow, /\^development:\[0-9a-fA-F\]\{8\}/);
+    assert.match(workflow, /DEPLOY_EVENT_NAME: \$\{\{ github\.event_name \}\}/);
+    assert.match(workflow, /"\$\{DEPLOY_EVENT_NAME\}" != "workflow_dispatch"/);
+    assert.match(workflow, /EXPECTED_ALLOWLIST_DIGEST: \$\{\{ inputs\.land_area_sync_allowlist_sha256 \|\| '' \}\}/);
+    assert.match(workflow, /EXPECTED_ALLOWLIST_COUNT: \$\{\{ inputs\.land_area_sync_allowlist_count \|\| '' \}\}/);
+    assert.match(workflow, /node dist\/cli\/land-area-sync-allowlist-manifest\.js/);
+    assert.match(workflow, /actual_allowlist_count.*EXPECTED_ALLOWLIST_COUNT/s);
+    assert.match(workflow, /actual_allowlist_digest.*EXPECTED_ALLOWLIST_DIGEST/s);
+    assert.ok(workflow.includes(
+        '-e EXPECTED_LAND_AREA_SYNC_ENABLED="${expected_land_area_sync_enabled}"'
+    ));
+    assert.ok(workflow.includes(
+        '-e EXPECTED_ALLOWLIST_COUNT="${actual_allowlist_count}"'
+    ));
+    assert.ok(workflow.includes(
+        '-e EXPECTED_ALLOWLIST_DIGEST="${actual_allowlist_digest}"'
+    ));
+    assert.ok(workflow.includes(
+        '=== process.env.EXPECTED_LAND_AREA_SYNC_ENABLED'
+    ));
+    assert.ok(workflow.includes(
+        '=== process.env.EXPECTED_ALLOWLIST_COUNT'
+    ));
+    assert.ok(workflow.includes(
+        '=== process.env.EXPECTED_ALLOWLIST_DIGEST'
+    ));
     assert.match(envExample, /^LAND_AREA_SYNC_ENABLED=false$/m);
+    assert.match(envExample, /^LAND_AREA_SYNC_ALLOWED_TARGETS=$/m);
     const operationTargetGuard = workflow.indexOf('operation_target_count="$(');
     const candidateStart = workflow.indexOf('docker run -d \\\n              --name "${CANDIDATE_CONTAINER}"');
     const productionReplacement = workflow.indexOf('docker stop "${CONTAINER_NAME}"');

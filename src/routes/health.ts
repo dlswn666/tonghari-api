@@ -5,6 +5,19 @@ import { createBuildInfo } from '../utils/build-info';
 
 const router = Router();
 
+function landAreaSyncHealthFeatures() {
+    const enabled = env.LAND_AREA_SYNC_ENABLED;
+    return {
+        landAreaSyncEnabled: enabled,
+        landAreaSyncAllowedTargetCount: enabled
+            ? env.LAND_AREA_SYNC_ALLOWED_TARGETS_MANIFEST.count
+            : 0,
+        landAreaSyncAllowedTargetsDigest: enabled
+            ? env.LAND_AREA_SYNC_ALLOWED_TARGETS_MANIFEST.digest
+            : '',
+    };
+}
+
 /**
  * 메모리 사용량을 바이트에서 MB로 변환
  */
@@ -26,7 +39,7 @@ router.get('/', (req: Request, res: Response) => {
         timestamp: new Date().toISOString(),
         ...buildInfo,
         features: {
-            landAreaSyncEnabled: env.LAND_AREA_SYNC_ENABLED,
+            ...landAreaSyncHealthFeatures(),
         },
         uptime: process.uptime(),
         memory: {
@@ -61,7 +74,7 @@ router.get('/detailed', async (req: Request, res: Response) => {
         timestamp: new Date().toISOString(),
         ...buildInfo,
         features: {
-            landAreaSyncEnabled: env.LAND_AREA_SYNC_ENABLED,
+            ...landAreaSyncHealthFeatures(),
         },
         node: {
             version: process.version,
