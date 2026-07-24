@@ -19,7 +19,16 @@ import {
 import { BYLOT_SOURCE_POLICY, bylotBasisFallbackPlan } from './bylot';
 import { assembleAttachedPnus, type AtchJibunRowInput } from '../gis-shared/pnu';
 import { buildScopeEvidence, buildScopeSnapshot, capIssues, sanitizeIssue, emptyCounts, type CappedIssues } from './preview';
-import { assembleLdaregApply, type LdaregPnuScan } from './ldareg-branch';
+import {
+    assembleLdaregApply,
+    selectCanonicalExposSourcePnu,
+    type LdaregPnuScan,
+} from './ldareg-branch';
+import { resolveScopeLadfrlAreas } from './ladfrl-scope';
+import {
+    isOptionalRegistryManagementPkValid,
+    normalizeRegistryManagementPk,
+} from './registry-pk';
 import { readLandAreaSync, type LandAreaSyncJobRow } from './repository';
 import type {
     BrTitleRow,
@@ -166,10 +175,10 @@ function collectRootPks(scans: StrictScan<BrTitleRow>[]): string[] {
     for (const scan of scans) {
         if (scan.state !== 'COMPLETE') continue;
         for (const r of scan.rows) {
-            const up = str(r.mgmUpBldrgstPk).trim();
-            const self = str(r.mgmBldrgstPk).trim();
-            const root = up.length > 0 ? up : self;
-            if (root.length > 0) set.add(root);
+            const root =
+                normalizeRegistryManagementPk(r.mgmUpBldrgstPk) ??
+                normalizeRegistryManagementPk(r.mgmBldrgstPk);
+            if (root) set.add(root);
         }
     }
     return [...set].sort();
@@ -225,7 +234,10 @@ export async function runLandAreaSyncJob(args: RunLandAreaSyncArgs): Promise<voi
     if (aborted(signal)) return;
 
     // ── Phase 3: gate 입력 scan 완료(LINKED: 전 base / no-cache: anchor) ──
-    const basePnus = dbScope.dbState === 'LINKED' && dbScope.linkedPnus.length > 0 ? [...new Set(dbScope.linkedPnus)].sort() : [anchorPnu];
+    const basePnus =
+        dbScope.dbState === 'LINKED' && dbScope.linkedBasePnus.length > 0
+            ? [...new Set(dbScope.linkedBasePnus)].sort()
+            : [anchorPnu];
     const policy = BYLOT_SOURCE_POLICY.policy;
     const baseScans: BasePnuScan[] = [];
     const titleByPnu: Array<{ pnu: string; titleRows: BrTitleRow[] }> = [];
@@ -249,7 +261,12 @@ export async function runLandAreaSyncJob(args: RunLandAreaSyncArgs): Promise<voi
     const gate = resolveParcelScopeCompleteness({ dbScope, baseScans, policy });
 
     const attachedAll: BrAtchJibunRow[] = baseScans.flatMap((b) => rows(b.attached));
-    const assembledAttached = assembleAttachedPnus(attachedAll as unknown as AtchJibunRowInput[]);
+    const assembledAttached = assembleAttachedPnus(
+        attachedAll.map((row) => ({
+            ...row,
+            mgmBldrgstPk: normalizeRegistryManagementPk(row.mgmBldrgstPk) ?? '',
+        })) as unknown as AtchJibunRowInput[]
+    );
     const scopeEvidence = buildScopeEvidence(dbScope, {
         attachedRows: attachedAll.length,
         distinctAttachedPnuCount: new Set(assembledAttached.pairs.map((p) => p.attachedPnu)).size,
@@ -384,7 +401,35 @@ async function runLadfrlBranch(ctx: BranchContext): Promise<void> {
         });
         return;
     }
-    const ladfrlArea = extractLadfrlArea(ladfrl, targetPnu);
+    if (ladfrl.state === 'COMPLETE_ZERO') {
+        await finalizeDiscoveryTerminal(deps, jobId, unionId, {
+            status: 'COMPLETED',
+            scopeState: ctx.gateState,
+            outcome: 'NO_DATA',
+            issues: [],
+            counts: {
+                ...gateCounts(ctx.baseScans),
+                landRegistryRows: 0,
+                matchedPropertyUnits: 0,
+            },
+        });
+        return;
+    }
+    const ladfrlScope = resolveScopeLadfrlAreas(
+        [{ pnu: targetPnu, rows: rows(ladfrl) }],
+        [targetPnu]
+    );
+    if (!ladfrlScope.ok) {
+        await finalizeDiscoveryTerminal(deps, jobId, unionId, {
+            status: 'FAILED',
+            scopeState: 'FAILED',
+            outcome: 'FAILED',
+            issues: [{ code: 'PROVIDER_PROTOCOL_ERROR', targetPnu }],
+            counts: gateCounts(ctx.baseScans),
+        });
+        return;
+    }
+    const ladfrlArea = ladfrlScope.totalArea;
 
     const currentLandTuples = await deps.db.readCurrentLandTuples(unionId, [propertyUnitId]);
     const proposedLandAreas: LandAreaSyncProposedArea[] = [{ propertyUnitId, landArea: ladfrlArea ?? '0' }];
@@ -402,6 +447,11 @@ async function runLadfrlBranch(ctx: BranchContext): Promise<void> {
         candidatePropertyUnitIds: [propertyUnitId],
         currentLandTuples,
         proposedLandAreas,
+        ladfrlAreaEvidence: {
+            parcels: ladfrlScope.areas,
+            totalArea: ladfrlScope.totalArea,
+        },
+        replicationEvidence: null,
         componentMatchDigest: [{ targetPnu, ladfrlArea }],
         projectionItems: items,
     });
@@ -418,14 +468,6 @@ async function runLadfrlBranch(ctx: BranchContext): Promise<void> {
     await freezeAndOfferConfirmation(ctx, 'LADFRL', 'SINGLE_SCOPE_CONFIRMATION_REQUIRED', snapshot, counts);
 }
 
-function extractLadfrlArea(scan: StrictScan<LadfrlRow>, targetPnu: string): string | null {
-    if (scan.state !== 'COMPLETE') return null;
-    const row = scan.rows.find((r) => str(r.pnu) === targetPnu) ?? scan.rows[0];
-    if (!row) return null;
-    const v = str(row.lndpclAr).trim();
-    return v.length > 0 ? v : null;
-}
-
 // ── LDAREG 분기 ───────────────────────────────────────────────────
 
 async function runLdaregBranch(ctx: BranchContext): Promise<void> {
@@ -434,6 +476,7 @@ async function runLdaregBranch(ctx: BranchContext): Promise<void> {
 
     // 대상 PNU별 필수 scan: ldareg + ladfrl + expos.
     const perPnu: LdaregPnuScan[] = [];
+    const ladfrlScopeScans: Array<{ pnu: string; rows: LadfrlRow[] }> = [];
     let ldaregRegistryRows = 0;
     for (const pnu of scannedPnus) {
         const ldareg = await deps.scans.scanLdareg(pnu, signal);
@@ -460,38 +503,115 @@ async function runLdaregBranch(ctx: BranchContext): Promise<void> {
                 return;
             }
         }
+        if (
+            rows(expos).some(
+                (row) =>
+                    normalizeRegistryManagementPk(row.mgmBldrgstPk) === null ||
+                    !isOptionalRegistryManagementPkValid(row.mgmUpBldrgstPk)
+            )
+        ) {
+            await finalizeDiscoveryTerminal(deps, jobId, unionId, {
+                status: 'FAILED',
+                scopeState: 'FAILED',
+                outcome: 'FAILED',
+                issues: [{ code: 'PROVIDER_PROTOCOL_ERROR', targetPnu: pnu }],
+                counts: gateCounts(ctx.baseScans),
+            });
+            return;
+        }
         ldaregRegistryRows += rows(ldareg).length;
-        // I2: 같은 실행의 LADFRL 필지면적을 추출해 component 분모 대조(§12.1·§7.5)에 연결한다.
-        const ladfrlAreaStr = extractLadfrlArea(ladfrl, pnu);
-        const ladfrlAreaNum = ladfrlAreaStr != null ? Number(ladfrlAreaStr) : null;
+        ladfrlScopeScans.push({ pnu, rows: rows(ladfrl) });
         perPnu.push({
             pnu,
             ldaregRows: rows(ldareg),
             exposRows: rows(expos),
-            ladfrlArea: ladfrlAreaNum != null && Number.isFinite(ladfrlAreaNum) ? ladfrlAreaNum : null,
         });
+    }
+
+    // 모든 resolved scope PNU가 exactly-one distinct positive finite LADFRL 면적을 가져야
+    // LDAREG 분모 기준 합계를 만든다. 누락·0·상충·PNU 혼입은 apply 0으로 닫는다.
+    const scopeLadfrl = resolveScopeLadfrlAreas(ladfrlScopeScans, scannedPnus);
+    if (!scopeLadfrl.ok) {
+        await finalizeDiscoveryTerminal(deps, jobId, unionId, {
+            status: 'FAILED',
+            scopeState: 'FAILED',
+            outcome: 'FAILED',
+            issues: [
+                {
+                    code: 'PROVIDER_PROTOCOL_ERROR',
+                    ...(scopeLadfrl.targetPnu ? { targetPnu: scopeLadfrl.targetPnu } : {}),
+                },
+            ],
+            counts: gateCounts(ctx.baseScans),
+        });
+        return;
     }
 
     const buildingUnits = await deps.db.readBuildingUnits(unionId, scannedPnus);
     const propertyUnits = await deps.db.readPropertyUnits(unionId, scannedPnus);
     if (aborted(signal)) return;
+    const canonicalBasePnus =
+        ctx.dbScope.dbState === 'LINKED'
+            ? [...new Set(ctx.dbScope.linkedBasePnus)].sort()
+            : [...new Set(ctx.baseScans.map((scan) => scan.pnu))].sort();
+    const expectedCanonicalSourcePnu = canonicalBasePnus[0];
+    const canonicalSourcePnu = selectCanonicalExposSourcePnu(canonicalBasePnus, perPnu);
+    if (
+        !expectedCanonicalSourcePnu ||
+        canonicalSourcePnu === null ||
+        canonicalSourcePnu !== expectedCanonicalSourcePnu
+    ) {
+        await finalizeDiscoveryTerminal(deps, jobId, unionId, {
+            status: 'COMPLETED',
+            scopeState: 'REVIEW_REQUIRED',
+            outcome: 'REVIEW_REQUIRED',
+            issues: [{ code: 'LDAREG_IDENTITY_CONFLICT' }],
+            counts: gateCounts(ctx.baseScans),
+        });
+        return;
+    }
 
     const assembled = assembleLdaregApply({
         unionId,
         scannedPnus,
         rootIdentity: ctx.rootPk,
         perPnu,
+        scopeLadfrlAreas: scopeLadfrl.areas,
+        scopeLadfrlTotal: scopeLadfrl.totalArea,
+        canonicalSourcePnu,
         buildingUnits,
         propertyUnits,
     });
 
+    const counts: LandAreaSyncCounts = {
+        ...gateCounts(ctx.baseScans),
+        landRegistryRows: ldaregRegistryRows,
+        exposureRows: assembled.counts.exposureRows,
+        parsedRows: assembled.counts.parsedRows,
+        matchedPropertyUnits: assembled.matchedPropertyUnitIds.length,
+    };
+    if (assembled.blocking || assembled.replicationEvidence === null) {
+        // 분모/ratio 또는 raw multiset·최종 property match replica 불일치는 일부 component만
+        // 골라 적용하지 않는다. job 전체를 REVIEW로 닫고 apply RPC는 0회다.
+        await finalizeDiscoveryTerminal(deps, jobId, unionId, {
+            status: 'COMPLETED',
+            scopeState: 'REVIEW_REQUIRED',
+            outcome: 'REVIEW_REQUIRED',
+            issues: assembled.issues,
+            counts,
+        });
+        return;
+    }
+
     const items: LandAreaSyncApplyLdaregItem[] = assembled.items;
     const candidateIds = assembled.matchedPropertyUnitIds;
     const currentLandTuples = await deps.db.readCurrentLandTuples(unionId, candidateIds);
-    const proposedLandAreas: LandAreaSyncProposedArea[] = items.map((item) => ({
-        propertyUnitId: item.propertyUnitId,
-        landArea: sumCurrentNumerators(item),
-    }));
+    const proposedLandAreas: LandAreaSyncProposedArea[] = items
+        .filter((item) => item.components.some((component) => component.sourceState === 'CURRENT'))
+        .map((item) => ({
+            propertyUnitId: item.propertyUnitId,
+            landArea: sumCurrentNumerators(item),
+        }));
 
     const snapshot = buildScopeSnapshot({
         strategy: 'LDAREG',
@@ -505,17 +625,14 @@ async function runLdaregBranch(ctx: BranchContext): Promise<void> {
         candidatePropertyUnitIds: candidateIds,
         currentLandTuples,
         proposedLandAreas,
+        ladfrlAreaEvidence: {
+            parcels: scopeLadfrl.areas,
+            totalArea: scopeLadfrl.totalArea,
+        },
+        replicationEvidence: assembled.replicationEvidence,
         componentMatchDigest: assembled.componentMatchDigest,
         projectionItems: items,
     });
-
-    const counts: LandAreaSyncCounts = {
-        ...gateCounts(ctx.baseScans),
-        landRegistryRows: ldaregRegistryRows,
-        exposureRows: assembled.counts.exposureRows,
-        parsedRows: assembled.counts.parsedRows,
-        matchedPropertyUnits: candidateIds.length,
-    };
 
     if (ctx.gateState === 'SINGLE_SCOPE_CONFIRMATION_REQUIRED') {
         // 확인된 apply job 을 confirmation 재제안보다 먼저 처리한다(LADFRL 패턴 미러).
@@ -552,13 +669,38 @@ async function runLdaregBranch(ctx: BranchContext): Promise<void> {
 }
 
 function sumCurrentNumerators(item: LandAreaSyncApplyLdaregItem): string {
-    let sum = 0;
+    const numeratorByIdentity = new Map<string, string>();
     for (const c of item.components) {
         if (c.sourceState !== 'CURRENT') continue;
-        const n = Number(c.ratioNumerator);
-        if (Number.isFinite(n)) sum += n;
+        if (!numeratorByIdentity.has(c.sourceIdentity)) {
+            numeratorByIdentity.set(c.sourceIdentity, c.ratioNumerator);
+        }
     }
-    return (Math.round(sum * 1e4) / 1e4).toString();
+    const values = [...numeratorByIdentity.values()].map((value) =>
+        canonicalUnsignedDecimal(value)
+    );
+    if (values.length === 0) return '0';
+    const scale = Math.max(...values.map((value) => value.split('.')[1]?.length ?? 0));
+    let total = 0n;
+    for (const value of values) {
+        const [whole, fraction = ''] = value.split('.');
+        total += BigInt(`${whole}${fraction.padEnd(scale, '0')}`);
+    }
+    if (scale === 0) return total.toString();
+    const digits = total.toString().padStart(scale + 1, '0');
+    const whole = digits.slice(0, -scale);
+    const fraction = digits.slice(-scale).replace(/0+$/, '');
+    return fraction ? `${whole}.${fraction}` : whole;
+}
+
+function canonicalUnsignedDecimal(value: string): string {
+    if (!/^\d+(?:\.\d+)?$/.test(value)) {
+        throw new Error('검증되지 않은 LDAREG 분자입니다.');
+    }
+    const [whole, fraction = ''] = value.split('.');
+    const canonicalWhole = whole.replace(/^0+(?=\d)/, '');
+    const canonicalFraction = fraction.replace(/0+$/, '');
+    return canonicalFraction ? `${canonicalWhole}.${canonicalFraction}` : canonicalWhole;
 }
 
 // ── 공통 terminal/apply ────────────────────────────────────────────

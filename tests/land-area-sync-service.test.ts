@@ -4,6 +4,7 @@ import { runLandAreaSyncJob, type LandAreaSyncDeps } from '../src/services/land-
 import type { LandAreaSyncJobRow } from '../src/services/land-area-sync/repository';
 import { HOUSING_PURPOSE_ALLOWLIST } from '../src/services/land-area-sync/housing-purpose-allowlist.fixture';
 import type {
+    BrExposRow,
     BrTitleRow,
     LadfrlRow,
     LdaregRow,
@@ -13,7 +14,7 @@ import type { LandAreaSyncIssue } from '../src/types/land-area-sync-job.types';
 
 const ANCHOR = '1168010100107360024';
 const PROP_ID = '11111111-1111-4111-8111-111111111111';
-const PK = 'PK-ROOT';
+const PK = '1002003004005';
 const DETACHED = HOUSING_PURPOSE_ALLOWLIST.find((p) => p.category === 'DETACHED')!;
 const MULTIPLEX = HOUSING_PURPOSE_ALLOWLIST.find((p) => p.category === 'MULTIPLEX')!;
 
@@ -34,11 +35,18 @@ function failed<T>(): StrictScan<T> {
 function ladfrlComplete(): StrictScan<LadfrlRow> {
     return { state: 'COMPLETE', rows: [{ pnu: ANCHOR, lndpclAr: '100.5' }], totalCount: 1, pagesFetched: 1 };
 }
+function exposComplete(
+    rows: BrExposRow[] = [
+        { mgmBldrgstPk: PK, dongNm: '101', flrNoNm: '3', hoNm: '301' },
+    ]
+): StrictScan<BrExposRow> {
+    return { state: 'COMPLETE', rows, totalCount: rows.length, pagesFetched: 1 };
+}
 /** CURRENT 대지권 1건. expos 를 zero 로 두면 matcher 가 NO_CHANGE(PROPERTY_UNIT_NOT_FOUND) 를 낸다. */
 function ldaregCurrent(): StrictScan<LdaregRow> {
     return {
         state: 'COMPLETE',
-        rows: [{ pnu: ANCHOR, agbldgSn: '1', ldaQotaRate: '100/1000', clsSeCode: '1', buldDongNm: '101', buldFloorNm: '3', buldHoNm: '301' }],
+        rows: [{ pnu: ANCHOR, agbldgSn: '1', ldaQotaRate: '10/100.5', clsSeCode: '1', buldDongNm: '101', buldFloorNm: '3', buldHoNm: '301' }],
         totalCount: 1,
         pagesFetched: 1,
     };
@@ -66,6 +74,7 @@ function makeDeps(opts: {
     scans?: Partial<LandAreaSyncDeps['scans']>;
     applyResult?: { data: unknown; error: { message: string; code?: string } | null };
     membership?: unknown;
+    propertyUnits?: unknown[];
     onReadProperty?: () => void;
     /** getScopedJob 이 돌려줄 preview_data 오버라이드(apply job 시나리오용). */
     jobPreviewData?: Record<string, unknown>;
@@ -76,7 +85,7 @@ function makeDeps(opts: {
         scanTitle: async () => titleComplete(DETACHED),
         scanAttached: async () => zero(),
         scanBasis: async () => zero(),
-        scanExpos: async () => zero(),
+        scanExpos: async () => exposComplete(),
         scanLadfrl: async () => ladfrlComplete(),
         scanLdareg: async () => zero<LdaregRow>(),
     };
@@ -127,7 +136,10 @@ function makeDeps(opts: {
             },
             markScopedFailed: async (_j, _u, m) => { spy.failedCalls.push(m); return true; },
             readBuildingUnits: async () => [],
-            readPropertyUnits: async () => { opts.onReadProperty?.(); return []; },
+            readPropertyUnits: async () => {
+                opts.onReadProperty?.();
+                return (opts.propertyUnits ?? []) as never;
+            },
             readCurrentLandTuples: async () => [],
         },
     };
@@ -166,14 +178,14 @@ function applyJobPreview(confirmation: {
 
 function noEvidence(membership: unknown): unknown {
     return {
-        dbState: 'NO_EVIDENCE', rootBuildingIdentities: [PK], componentPnus: [ANCHOR], linkedPnus: [],
+        dbState: 'NO_EVIDENCE', rootBuildingIdentities: [PK], componentPnus: [ANCHOR], linkedBasePnus: [], linkedPnus: [],
         linkedEvidenceKeys: [], pendingEvidenceKeys: [], blockingEvidence: [], openUnresolvedEvidenceKeys: [],
         componentTruncated: false, propertyMembership: membership, dbScopeHash: 'db-hash-noevidence',
     };
 }
 function linked(membership: unknown): unknown {
     return {
-        dbState: 'LINKED', rootBuildingIdentities: [PK], componentPnus: [ANCHOR], linkedPnus: [ANCHOR],
+        dbState: 'LINKED', rootBuildingIdentities: [PK], componentPnus: [ANCHOR], linkedBasePnus: [ANCHOR], linkedPnus: [ANCHOR],
         linkedEvidenceKeys: ['k1'], pendingEvidenceKeys: [], blockingEvidence: [], openUnresolvedEvidenceKeys: [],
         componentTruncated: false, propertyMembership: membership, dbScopeHash: 'db-hash-linked',
     };
@@ -357,15 +369,31 @@ test('LINKED LDAREG 즉시적용: discovery extraIssue 가 terminal issues 에 �
         resolver: linked(MEMBER),
         scans: {
             scanTitle: async () => titleComplete(MULTIPLEX),
-            scanLdareg: async () => ldaregCurrent(), // CURRENT 대지권 1건
-            scanExpos: async () => zero(), // 전유부 0 → matcher NO_CHANGE(PROPERTY_UNIT_NOT_FOUND) extraIssue
+            // 상태 코드 ambiguity가 CURRENT component + discovery extraIssue를 함께 만든다.
+            scanLdareg: async () => ({
+                state: 'COMPLETE',
+                rows: [{ pnu: ANCHOR, agbldgSn: '1', ldaQotaRate: '10/100.5', clsSeCode: 'X7', clsSeCodeNm: 'ZZZ', buldDongNm: '101', buldFloorNm: '3', buldHoNm: '301' }],
+                totalCount: 1,
+                pagesFetched: 1,
+            }),
         },
+        propertyUnits: [
+            {
+                id: PROP_ID,
+                unionId: 'union-1',
+                buildingUnitId: null,
+                pnu: ANCHOR,
+                isDeleted: false,
+                dong: '101',
+                ho: '301',
+            },
+        ],
         applyResult: {
             data: {
                 outcome: 'NO_DATA',
                 issues: [
-                    { code: 'LDAREG_IDENTITY_CONFLICT', targetPnu: ANCHOR }, // RPC 고유 issue
-                    { code: 'PROPERTY_UNIT_NOT_FOUND', targetPnu: ANCHOR }, // discovery extraIssue 와 동일(dedup 대상)
+                    { code: 'LDAREG_IDENTITY_CONFLICT', propertyUnitId: PROP_ID, targetPnu: ANCHOR }, // discovery extraIssue 와 동일
+                    { code: 'STALE_SCAN_REJECTED', targetPnu: ANCHOR }, // RPC 고유 issue
                 ],
             },
             error: null,
@@ -380,9 +408,9 @@ test('LINKED LDAREG 즉시적용: discovery extraIssue 가 terminal issues 에 �
     const merged = spy.appliedIssuesCalls[0];
     assert.equal(merged.scopeState, 'LINKED_SCOPE_RESOLVED');
     const codes = merged.issues.map((i) => i.code);
-    assert.ok(codes.includes('PROPERTY_UNIT_NOT_FOUND'), 'discovery extraIssue(유실되던 값) 보존');
-    assert.ok(codes.includes('LDAREG_IDENTITY_CONFLICT'), 'RPC 반환 issue 보존');
-    assert.equal(codes.filter((c) => c === 'PROPERTY_UNIT_NOT_FOUND').length, 1, 'RPC 반환 issue 와 중복 dedup');
+    assert.ok(codes.includes('LDAREG_IDENTITY_CONFLICT'), 'discovery extraIssue 보존');
+    assert.ok(codes.includes('STALE_SCAN_REJECTED'), 'RPC 반환 issue 보존');
+    assert.equal(codes.filter((c) => c === 'LDAREG_IDENTITY_CONFLICT').length, 1, 'RPC 반환 issue 와 중복 dedup');
 });
 
 // ── C1: resolverRootPks 계약(up-PK ≠ self-PK) ─────────────────────────
@@ -401,17 +429,17 @@ test('C1: mgmUpBldrgstPk ≠ mgmBldrgstPk 일 때 resolver 는 up-PK 로 호출�
     const spy = emptySpy();
     const deps = makeDeps({
         resolver: noEvidence(MEMBER),
-        scans: { scanTitle: async () => titleUpVsSelf(DETACHED, 'UP-ROOT', 'SELF-A') },
+        scans: { scanTitle: async () => titleUpVsSelf(DETACHED, '9001002003004', '9001002003005') },
         spy,
     });
     await runLandAreaSyncJob({ jobId: 'job-1', unionId: 'union-1', deps });
 
     // resolver 는 up-PK 우선으로 유도된 root 로 호출된다(self-PK 아님).
-    assert.deepEqual(spy.resolverParams[0].p_root_mgm_bldrgst_pks, ['UP-ROOT']);
+    assert.deepEqual(spy.resolverParams[0].p_root_mgm_bldrgst_pks, ['9001002003004']);
     // 고정 snapshot 의 resolverRootPks 는 resolver 호출 입력과 정확히 일치해야 한다(웹 [5.3] 재검증 계약).
     assert.equal(spy.freezeCalls, 1);
     assert.deepEqual(spy.frozenSnapshots[0].resolverRootPks, spy.resolverParams[0].p_root_mgm_bldrgst_pks);
-    assert.deepEqual(spy.frozenSnapshots[0].resolverRootPks, ['UP-ROOT']);
+    assert.deepEqual(spy.frozenSnapshots[0].resolverRootPks, ['9001002003004']);
 });
 
 // ── 원장 승격: LADFRL manual-overwrite apply → SINGLE_PNU_CONFIRMED ───

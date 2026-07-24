@@ -13,6 +13,12 @@ import type {
 } from '../services/land-area-sync/adapter';
 import { parseBylotCnt } from '../services/land-area-sync/bylot';
 import {
+    isOptionalRegistryManagementPkValid,
+    normalizeRegistryManagementPk,
+} from '../services/land-area-sync/registry-pk';
+import { resolveScopeLadfrlAreas } from '../services/land-area-sync/ladfrl-scope';
+import { validateLdaregReplication } from '../services/land-area-sync/ldareg-branch';
+import {
     isDenominatorWithinTolerance,
     parseLdaQotaRate,
 } from '../services/land-area-sync/ratio';
@@ -38,7 +44,7 @@ export const LAND_AREA_PHASE0_MANIFEST_VERSION =
 export const LAND_AREA_PHASE0_PLAN_VERSION =
     'land-area-phase0-capture-plan@1' as const;
 export const LAND_AREA_PHASE0_ARTIFACT_VERSION =
-    'land-area-phase0-capture-artifact@1' as const;
+    'land-area-phase0-capture-artifact@2' as const;
 export const LAND_AREA_PHASE0_OUTPUT_DIRECTORY = '.phase0-land-area';
 
 const MAX_SAMPLES = 20;
@@ -280,6 +286,18 @@ export interface LandAreaPhase0SampleArtifact {
             truncated: boolean;
             sanitizedDigest: string;
         };
+        scopeLadfrl: {
+            status: 'PASS' | 'FAIL';
+            records: Array<{ pnuHash: string; area: string }>;
+            totalArea: string | null;
+        };
+        ldaregReplication: {
+            status: 'PASS' | 'FAIL';
+            canonicalSourcePnuHash: string;
+            comparedPnuHashes: string[];
+            rowCount: number | null;
+            rowMultisetDigest: string | null;
+        };
     };
     policyCandidate:
         | 'TITLE_ONLY'
@@ -322,6 +340,12 @@ interface SampleRawCapture {
     expos: StrictScan<BrExposRow>;
     ladfrl: StrictScan<LadfrlRow>;
     ldareg: StrictScan<LdaregRow>;
+    /** sample PNU + same-run attached scope PNU별 LADFRL strict scan. */
+    scopeLadfrl: Array<{ pnu: string; scan: StrictScan<LadfrlRow> }>;
+    /** sample PNU + same-run attached scope PNU별 LDAREG strict scan. */
+    scopeLdareg: Array<{ pnu: string; scan: StrictScan<LdaregRow> }>;
+    /** sample PNU + same-run attached scope PNU별 expos strict scan. */
+    scopeExpos: Array<{ pnu: string; scan: StrictScan<BrExposRow> }>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -424,6 +448,11 @@ function identityHash(kind: string, value: unknown): string | undefined {
     const normalized = value.trim();
     if (!normalized) return undefined;
     return sha256(`${kind}\u0000${normalized}`);
+}
+
+function managementPkHash(kind: 'MGM_BLDRGST_PK' | 'MGM_UP_BLDRGST_PK', value: unknown): string | undefined {
+    const normalized = normalizeRegistryManagementPk(value);
+    return normalized === null ? undefined : sha256(`${kind}\u0000${normalized}`);
 }
 
 function pnuHash(value: string): string {
@@ -776,17 +805,17 @@ function titleInventory(
             isSensitive
         );
         return {
-            ...(identityHash('MGM_BLDRGST_PK', row.mgmBldrgstPk)
+            ...(managementPkHash('MGM_BLDRGST_PK', row.mgmBldrgstPk)
                 ? {
-                      managementPkHash: identityHash(
+                      managementPkHash: managementPkHash(
                           'MGM_BLDRGST_PK',
                           row.mgmBldrgstPk
                       ),
                   }
                 : {}),
-            ...(identityHash('MGM_UP_BLDRGST_PK', row.mgmUpBldrgstPk)
+            ...(managementPkHash('MGM_UP_BLDRGST_PK', row.mgmUpBldrgstPk)
                 ? {
-                      upManagementPkHash: identityHash(
+                      upManagementPkHash: managementPkHash(
                           'MGM_UP_BLDRGST_PK',
                           row.mgmUpBldrgstPk
                       ),
@@ -843,12 +872,12 @@ function titleInventory(
 
 function basisInventory(rows: BrBasisOulnRow[]): BasisInventory {
     const records = rows.map((row) => {
-        const managementPkHash = identityHash(
+        const managementPkHashValue = managementPkHash(
             'MGM_BLDRGST_PK',
             row.mgmBldrgstPk
         );
         return {
-            ...(managementPkHash ? { managementPkHash } : {}),
+            ...(managementPkHashValue ? { managementPkHash: managementPkHashValue } : {}),
             bylot: bylotFieldInventory(row as Record<string, unknown>),
         };
     });
@@ -859,7 +888,7 @@ function toAttachedInput(row: BrAtchJibunRow): AtchJibunRowInput {
     const string = (value: unknown): string =>
         typeof value === 'string' ? value : '';
     return {
-        mgmBldrgstPk: string(row.mgmBldrgstPk),
+        mgmBldrgstPk: normalizeRegistryManagementPk(row.mgmBldrgstPk) ?? '',
         sigunguCd: string(row.sigunguCd),
         bjdongCd: string(row.bjdongCd),
         platGbCd: string(row.platGbCd),
@@ -880,12 +909,12 @@ function assembledAttached(rows: BrAtchJibunRow[]) {
 function attachedInventory(rows: BrAtchJibunRow[]): AttachedInventory {
     const assembled = assembledAttached(rows);
     const pairs = assembled.pairs.map((pair) => {
-        const managementPkHash = identityHash(
+        const managementPkHashValue = managementPkHash(
             'MGM_BLDRGST_PK',
             pair.mgmBldrgstPk
         );
         return {
-            ...(managementPkHash ? { managementPkHash } : {}),
+            ...(managementPkHashValue ? { managementPkHash: managementPkHashValue } : {}),
             basePnuHash: pnuHash(pair.basePnu),
             attachedPnuHash: pnuHash(pair.attachedPnu),
         };
@@ -925,11 +954,11 @@ function exposInventory(
 ): ExposInventory {
     const records = rows.map((typedRow) => {
         const row = typedRow as Record<string, unknown>;
-        const managementPkHash = identityHash(
+        const managementPkHashValue = managementPkHash(
             'MGM_BLDRGST_PK',
             row.mgmBldrgstPk
         );
-        const upManagementPkHash = identityHash(
+        const upManagementPkHashValue = managementPkHash(
             'MGM_UP_BLDRGST_PK',
             row.mgmUpBldrgstPk
         );
@@ -949,8 +978,8 @@ function exposInventory(
             row.flrNoNm ?? row.buldFloorNm
         );
         return {
-            ...(managementPkHash ? { managementPkHash } : {}),
-            ...(upManagementPkHash ? { upManagementPkHash } : {}),
+            ...(managementPkHashValue ? { managementPkHash: managementPkHashValue } : {}),
+            ...(upManagementPkHashValue ? { upManagementPkHash: upManagementPkHashValue } : {}),
             ...(unitHash ? { unitIdentityHash: unitHash } : {}),
             ...(mainAttachedTypeCode ? { mainAttachedTypeCode } : {}),
             ...(floorTypeCode ? { floorTypeCode } : {}),
@@ -1027,12 +1056,6 @@ function ldaregInventory(
     return { kind: 'LDAREG', ...boundRecords(records) };
 }
 
-function normalizedPk(value: unknown): string | null {
-    if (typeof value !== 'string') return null;
-    const normalized = value.trim();
-    return normalized || null;
-}
-
 function buildingHubRowPnu(
     typedRow: Record<string, unknown>
 ): string | null {
@@ -1082,18 +1105,18 @@ interface ResolvedCount {
 }
 
 function countsByPk(
-    rows: Array<{ mgmBldrgstPk?: string; bylotCnt?: string }>
+    rows: Array<{ mgmBldrgstPk?: unknown; bylotCnt?: unknown }>
 ): {
     counts: Map<string, ResolvedCount>;
     hasInvalidPk: boolean;
 } {
     const raw = new Map<
         string,
-        Array<{ mgmBldrgstPk?: string; bylotCnt?: string }>
+        Array<{ mgmBldrgstPk?: unknown; bylotCnt?: unknown }>
     >();
     let hasInvalidPk = false;
     for (const row of rows) {
-        const pk = normalizedPk(row.mgmBldrgstPk);
+        const pk = normalizeRegistryManagementPk(row.mgmBldrgstPk);
         if (!pk) {
             hasInvalidPk = true;
             continue;
@@ -1155,6 +1178,47 @@ function scanFailureCodes(scans: StrictScan<unknown>[]): string[] {
     return [...codes].sort();
 }
 
+function resolveCaptureScopeLadfrl(raw: SampleRawCapture) {
+    if (
+        raw.scopeLadfrl.some(
+            ({ scan }) => scan.state !== 'COMPLETE'
+        )
+    ) {
+        return null;
+    }
+    return resolveScopeLadfrlAreas(
+        raw.scopeLadfrl.map(({ pnu, scan }) => ({
+            pnu,
+            rows: scan.state === 'COMPLETE' ? scan.rows : [],
+        }))
+    );
+}
+
+function resolveCaptureLdaregReplication(raw: SampleRawCapture) {
+    const scopeLdareg =
+        raw.scopeLdareg ?? [{ pnu: raw.sample.pnu, scan: raw.ldareg }];
+    const scopeExpos =
+        raw.scopeExpos ?? [{ pnu: raw.sample.pnu, scan: raw.expos }];
+    if (
+        scopeLdareg.some(({ scan }) => !successfulScan(scan)) ||
+        scopeExpos.some(({ scan }) => !successfulScan(scan))
+    ) {
+        return null;
+    }
+    const exposByPnu = new Map(
+        scopeExpos.map(({ pnu, scan }) => [pnu, rowsOf(scan)])
+    );
+    return validateLdaregReplication(
+        scopeLdareg.map(({ pnu }) => pnu),
+        scopeLdareg.map(({ pnu, scan }) => ({
+            pnu,
+            ldaregRows: rowsOf(scan),
+            exposRows: exposByPnu.get(pnu) ?? [],
+        })),
+        raw.sample.pnu
+    );
+}
+
 function buildSampleArtifact(
     raw: SampleRawCapture,
     isSensitive: SensitiveValueGuard
@@ -1165,6 +1229,12 @@ function buildSampleArtifact(
     const exposRows = rowsOf(raw.expos);
     const ladfrlRows = rowsOf(raw.ladfrl);
     const ldaregRows = rowsOf(raw.ldareg);
+    const scopeLdareg =
+        raw.scopeLdareg ?? [{ pnu: raw.sample.pnu, scan: raw.ldareg }];
+    const scopeExpos =
+        raw.scopeExpos ?? [{ pnu: raw.sample.pnu, scan: raw.expos }];
+    const scopeLadfrl = resolveCaptureScopeLadfrl(raw);
+    const ldaregReplication = resolveCaptureLdaregReplication(raw);
     const assembled = assembledAttached(attachedRows);
     const titlePnuExact = buildingHubRowsMatchPnu(
         titleRows as Array<Record<string, unknown>>,
@@ -1182,10 +1252,29 @@ function buildSampleArtifact(
     const titleCounts = countsByPk(titleRows);
     const basisCounts = countsByPk(basisRows);
     const attachedCounts = new Map<string, number>();
-    let attachedPkInvalid = false;
+    const titlePkInvalid = titleRows.some(
+        (row) =>
+            normalizeRegistryManagementPk(row.mgmBldrgstPk) === null ||
+            !isOptionalRegistryManagementPkValid(row.mgmUpBldrgstPk)
+    );
+    const basisPkInvalid = basisRows.some(
+        (row) =>
+            normalizeRegistryManagementPk(row.mgmBldrgstPk) === null ||
+            !isOptionalRegistryManagementPkValid(row.mgmUpBldrgstPk)
+    );
+    const exposPkInvalid = exposRows.some((row) => {
+        const record = row as Record<string, unknown>;
+        return (
+            normalizeRegistryManagementPk(record.mgmBldrgstPk) === null ||
+            !isOptionalRegistryManagementPkValid(record.mgmUpBldrgstPk)
+        );
+    });
+    let attachedPkInvalid = attachedRows.some(
+        (row) => normalizeRegistryManagementPk(row.mgmBldrgstPk) === null
+    );
     let attachedBaseMismatch = false;
     for (const pair of assembled.pairs) {
-        const pk = normalizedPk(pair.mgmBldrgstPk);
+        const pk = normalizeRegistryManagementPk(pair.mgmBldrgstPk);
         if (!pk) {
             attachedPkInvalid = true;
             continue;
@@ -1294,7 +1383,7 @@ function buildSampleArtifact(
         const title = titleCounts.counts.get(pk);
         const basis = basisCounts.counts.get(pk);
         return {
-            managementPkHash: identityHash('MGM_BLDRGST_PK', pk)!,
+            managementPkHash: managementPkHash('MGM_BLDRGST_PK', pk)!,
             titleState: title?.state ?? ('MISSING' as const),
             basisState: basis?.state ?? ('MISSING' as const),
             titleCount: title?.count ?? null,
@@ -1318,7 +1407,7 @@ function buildSampleArtifact(
                 count === (attachedCounts.get(pk) ?? 0)
             );
         })
-        .map((pk) => identityHash('MGM_BLDRGST_PK', pk)!)
+        .map((pk) => managementPkHash('MGM_BLDRGST_PK', pk)!)
         .sort();
     const hasAttachedPkOutsideTitle = [...attachedCounts.keys()].some(
         (pk) => !titleCounts.counts.has(pk)
@@ -1348,8 +1437,29 @@ function buildSampleArtifact(
             raw.ldareg,
         ])
     );
+    for (const { scan } of raw.scopeLadfrl) {
+        for (const code of scanFailureCodes([scan])) failureCodes.add(code);
+    }
+    for (const { scan } of scopeLdareg) {
+        for (const code of scanFailureCodes([scan])) failureCodes.add(code);
+    }
+    for (const { scan } of scopeExpos) {
+        for (const code of scanFailureCodes([scan])) failureCodes.add(code);
+        if (
+            rowsOf(scan).some((row) => {
+                const record = row as Record<string, unknown>;
+                return (
+                    normalizeRegistryManagementPk(record.mgmBldrgstPk) === null ||
+                    !isOptionalRegistryManagementPkValid(record.mgmUpBldrgstPk)
+                );
+            })
+        ) {
+            failureCodes.add('EXPOS_PK_INVALID');
+        }
+    }
     const reviewCodes = new Set<string>();
-    if (titleCounts.hasInvalidPk) failureCodes.add('TITLE_PK_INVALID');
+    if (titleCounts.hasInvalidPk || titlePkInvalid)
+        failureCodes.add('TITLE_PK_INVALID');
     if (!titlePnuExact) failureCodes.add('TITLE_PNU_EXACT_MISMATCH');
     if (
         [...titleCounts.counts.values()].some(
@@ -1360,7 +1470,8 @@ function buildSampleArtifact(
     ) {
         failureCodes.add('TITLE_BYLOT_INVALID_OR_CONFLICT');
     }
-    if (basisCounts.hasInvalidPk) failureCodes.add('BASIS_PK_INVALID');
+    if (basisCounts.hasInvalidPk || basisPkInvalid)
+        failureCodes.add('BASIS_PK_INVALID');
     if (!basisPnuExact) failureCodes.add('BASIS_PNU_EXACT_MISMATCH');
     if (
         [...basisCounts.counts.values()].some(
@@ -1377,6 +1488,7 @@ function buildSampleArtifact(
         reviewCodes.add('TITLE_WITH_BASIS_FALLBACK_CANDIDATE');
     }
     if (attachedPkInvalid) failureCodes.add('ATTACHED_PK_INVALID');
+    if (exposPkInvalid) failureCodes.add('EXPOS_PK_INVALID');
     if (!exposPnuExact) failureCodes.add('EXPOS_PNU_EXACT_MISMATCH');
     if (attachedBaseMismatch)
         failureCodes.add('ATTACHED_BASE_PNU_MISMATCH');
@@ -1499,16 +1611,22 @@ function buildSampleArtifact(
     if (distinctExactLadfrlAreas.length > 1) {
         failureCodes.add('LADFRL_AREA_CONFLICT');
     }
-    if (ldaregRows.length > 0) {
-        const ldaregDenominatorsValid = ldaregRows.every((row) => {
-            if (row.pnu !== raw.sample.pnu) return false;
+    if (!scopeLadfrl || !scopeLadfrl.ok) {
+        failureCodes.add('LADFRL_SCOPE_AREA_INVALID');
+    }
+    if (!ldaregReplication?.ok) {
+        failureCodes.add('LDAREG_SCOPE_REPLICA_INVALID');
+    }
+    const scopeLdaregRows = scopeLdareg.flatMap(({ scan }) => rowsOf(scan));
+    if (scopeLdaregRows.length > 0) {
+        const ldaregDenominatorsValid = scopeLdaregRows.every((row) => {
             const ratio = safeParsedRatio(row.ldaQotaRate, isSensitive);
             return (
                 ratio !== null &&
-                distinctExactLadfrlAreas.length === 1 &&
+                scopeLadfrl?.ok === true &&
                 isDenominatorWithinTolerance(
                     ratio.denominator,
-                    distinctExactLadfrlAreas[0]
+                    scopeLadfrl.totalAreaNumber
                 )
             );
         });
@@ -1522,7 +1640,35 @@ function buildSampleArtifact(
         expectedBylot: raw.sample.expectedBylot,
         pnuHash: pnuHash(raw.sample.pnu),
         endpoints,
-        evidence: { bylotByManagementPk },
+        evidence: {
+            bylotByManagementPk,
+            scopeLadfrl: {
+                status: scopeLadfrl?.ok === true ? 'PASS' : 'FAIL',
+                records:
+                    scopeLadfrl?.ok === true
+                        ? scopeLadfrl.areas.map((entry) => ({
+                              pnuHash: pnuHash(entry.pnu),
+                              area: entry.area,
+                          }))
+                        : [],
+                totalArea: scopeLadfrl?.ok === true ? scopeLadfrl.totalArea : null,
+            },
+            ldaregReplication: {
+                status: ldaregReplication?.ok === true ? 'PASS' : 'FAIL',
+                canonicalSourcePnuHash: pnuHash(raw.sample.pnu),
+                comparedPnuHashes: scopeLdareg
+                    .map(({ pnu }) => pnuHash(pnu))
+                    .sort(),
+                rowCount:
+                    ldaregReplication?.ok === true
+                        ? ldaregReplication.evidence.rowCount
+                        : null,
+                rowMultisetDigest:
+                    ldaregReplication?.ok === true
+                        ? ldaregReplication.evidence.rowMultisetDigest
+                        : null,
+            },
+        },
         policyCandidate,
         checks: {
             titleBasis: {
@@ -1569,19 +1715,10 @@ function hasPositiveLdaregEvidence(
     if (!successfulScan(raw.ladfrl) || !successfulScan(raw.ldareg)) {
         return false;
     }
-    const areas = raw.ladfrl.rows
-        .filter((row) => row.pnu === raw.sample.pnu)
-        .map((row) => positiveDecimal(row.lndpclAr, isSensitive))
-        .filter((value): value is string => value !== undefined)
-        .map(Number);
-    const distinctAreas = [...new Set(areas)];
-    if (
-        raw.ladfrl.rows.length === 0 ||
-        areas.length !== raw.ladfrl.rows.length ||
-        distinctAreas.length !== 1
-    ) {
-        return false;
-    }
+    const scopeLadfrl = resolveCaptureScopeLadfrl(raw);
+    if (!scopeLadfrl?.ok) return false;
+    const replication = resolveCaptureLdaregReplication(raw);
+    if (!replication?.ok || replication.evidence.rowCount === 0) return false;
     return (
         raw.ldareg.rows.some(
             (row) => {
@@ -1594,7 +1731,7 @@ function hasPositiveLdaregEvidence(
                     ratio !== null &&
                     isDenominatorWithinTolerance(
                         ratio.denominator,
-                        distinctAreas[0]
+                        scopeLadfrl.totalAreaNumber
                     )
                 );
             }
@@ -1675,6 +1812,49 @@ export async function captureLandAreaPhase0(input: {
         const ldareg = await safeScan('ldaregList', () =>
             input.adapter.scanLdareg(sample.pnu, input.vworldAuth)
         );
+        const linkedPnus =
+            successfulScan(attached)
+                ? [
+                      ...new Set(
+                          assembledAttached(rowsOf(attached))
+                              .pairs.filter((pair) => pair.basePnu === sample.pnu)
+                              .map((pair) => pair.attachedPnu)
+                      ),
+                  ].sort()
+                : [];
+        const scopeLadfrl: Array<{
+            pnu: string;
+            scan: StrictScan<LadfrlRow>;
+        }> = [{ pnu: sample.pnu, scan: ladfrl }];
+        const scopeLdareg: Array<{
+            pnu: string;
+            scan: StrictScan<LdaregRow>;
+        }> = [{ pnu: sample.pnu, scan: ldareg }];
+        const scopeExpos: Array<{
+            pnu: string;
+            scan: StrictScan<BrExposRow>;
+        }> = [{ pnu: sample.pnu, scan: expos }];
+        for (const pnu of linkedPnus) {
+            if (pnu === sample.pnu) continue;
+            scopeLadfrl.push({
+                pnu,
+                scan: await safeScan('ladfrlList', () =>
+                    input.adapter.scanLadfrl(pnu, input.vworldAuth)
+                ),
+            });
+            scopeLdareg.push({
+                pnu,
+                scan: await safeScan('ldaregList', () =>
+                    input.adapter.scanLdareg(pnu, input.vworldAuth)
+                ),
+            });
+            scopeExpos.push({
+                pnu,
+                scan: await safeScan('getBrExposInfo', () =>
+                    input.adapter.scanExpos(pnu, input.buildingHubAuth)
+                ),
+            });
+        }
         rawCaptures.push({
             sample,
             title,
@@ -1683,6 +1863,9 @@ export async function captureLandAreaPhase0(input: {
             expos,
             ladfrl,
             ldareg,
+            scopeLadfrl,
+            scopeLdareg,
+            scopeExpos,
         });
     }
 
@@ -1726,6 +1909,7 @@ export async function captureLandAreaPhase0(input: {
                     'ATTACHED_HASHED_RELATION',
                     'EXPOS_CODES_AREA_HASHED_IDENTITY',
                     'LADFRL_CODES_AREA_HASHED_PNU',
+                    'LADFRL_SCOPE_HASHED_PNU_AREA_SUM',
                     'LDAREG_CODES_RATIO_HASHED_IDENTITY',
                 ],
             })

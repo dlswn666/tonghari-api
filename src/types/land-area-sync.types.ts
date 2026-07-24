@@ -195,10 +195,10 @@ export interface BylotEvidence {
 
 /** 건축물대장 표제부 row (getBrTitleInfo) */
 export interface BrTitleRow {
-    mgmBldrgstPk?: string;
+    mgmBldrgstPk?: string | number;
     /** 상위 관리 PK(root 관리번호 계열 판정 참고용) */
-    mgmUpBldrgstPk?: string;
-    bylotCnt?: string;
+    mgmUpBldrgstPk?: string | number;
+    bylotCnt?: string | number;
     /** 대장 구분: 1=일반, 2=집합 (DESIGN §9) */
     regstrGbCd?: string;
     /** 주용도 코드 */
@@ -210,7 +210,7 @@ export interface BrTitleRow {
 
 /** 건축물대장 부속지번 row (getBrAtchJibunInfo) */
 export interface BrAtchJibunRow {
-    mgmBldrgstPk?: string;
+    mgmBldrgstPk?: string | number;
     sigunguCd?: string;
     bjdongCd?: string;
     platGbCd?: string;
@@ -226,14 +226,16 @@ export interface BrAtchJibunRow {
 
 /** 건축물대장 전유부 row (getBrExposInfo) */
 export interface BrExposRow {
-    mgmBldrgstPk?: string;
+    mgmBldrgstPk?: string | number;
+    mgmUpBldrgstPk?: string | number;
     [key: string]: unknown;
 }
 
 /** 건축물대장 기본개요 row (getBrBasisOulnInfo) */
 export interface BrBasisOulnRow {
-    mgmBldrgstPk?: string;
-    bylotCnt?: string;
+    mgmBldrgstPk?: string | number;
+    mgmUpBldrgstPk?: string | number;
+    bylotCnt?: string | number;
     [key: string]: unknown;
 }
 

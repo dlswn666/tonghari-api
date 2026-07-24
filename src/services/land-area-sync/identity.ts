@@ -2,8 +2,10 @@
  * LDAREG source identity + dedup (DESIGN §12.2).
  *
  * identity 규칙:
- *  1. `agbldgSn`이 비어 있지 않고 PNU 내 유일하면 PRIMARY identity(`targetPnu + agbldgSn`).
- *  2. 그 외에는 versioned immutable-field fallback hash(대상 PNU·건축물명·정규화 동층호실만).
+ *  1. `agbldgSn`이 비어 있지 않고 PNU 내 유일하면 PRIMARY identity
+ *     (`canonical root identity + agbldgSn`).
+ *  2. 그 외에는 versioned immutable-field fallback hash
+ *     (`canonical root identity + 건축물명 + 정규화 동층호실`).
  *     비율·clsSeCode·데이터 기준일·관측시각처럼 변하는 필드는 identity hash에 넣지 않는다.
  *
  * dedup 규칙:
@@ -23,7 +25,7 @@ import { normalizeUnitTuple, type NormalizedUnitTuple } from './normalizer';
  * fallback identity hash 버전. immutable field 구성/직렬화가 바뀌면 이 값을 올려
  * 과거 identity와 명시적으로 구분한다(versioned immutable identity, §12.2).
  */
-export const LDAREG_IDENTITY_HASH_VERSION = 1;
+export const LDAREG_IDENTITY_HASH_VERSION = 2;
 
 /** LDAREG 관측 1건의 상태(값이 변할 수 있는 필드). */
 export type LdaregSourceState = 'CURRENT' | 'CLOSED';
@@ -31,6 +33,11 @@ export type LdaregSourceState = 'CURRENT' | 'CLOSED';
 /** 파싱된 LDAREG 관측 입력. 정규화·hash는 이 모듈 내부에서 수행한다. */
 export interface LdaregObservationInput {
     targetPnu: string;
+    /**
+     * target PNU에 독립적인 건축물 계열 root identity. multi-PNU replica는 같은 root를
+     * 사용해 논리 source identity를 공유한다. 미지정 시 단일-PNU 호환을 위해 targetPnu를 쓴다.
+     */
+    identityRoot?: string | null;
     /** 공식 응답 `agbldgSn`(집합건물 일련번호). 비어있으면 fallback hash 사용. */
     agbldgSn?: string | null;
     /** 건축물명(buldNm) — immutable identity 필드. */
@@ -65,7 +72,7 @@ export interface LdaregObservationInput {
 export interface LdaregSourceIdentity {
     kind: 'PRIMARY' | 'FALLBACK';
     value: string;
-    /** FALLBACK identity의 hash 버전. PRIMARY는 null. */
+    /** canonical identity hash 버전. */
     version: number | null;
 }
 
@@ -171,9 +178,10 @@ export function dedupLdaregObservations(
         const normalized = normalizeUnitTuple(o);
         const buildingName = nfkcTrim(o.buildingName);
         const sn = nfkcTrim(o.agbldgSn);
+        const rootIdentity = nfkcTrim(o.identityRoot) || nfkcTrim(o.targetPnu);
         const immutableSource = canonicalStableStringify({
             v: LDAREG_IDENTITY_HASH_VERSION,
-            targetPnu: o.targetPnu,
+            rootIdentity,
             buildingName,
             dong: normalized.dong,
             floor: normalized.floor,
@@ -184,7 +192,16 @@ export function dedupLdaregObservations(
         let identity: LdaregSourceIdentity;
         const snUnique = sn !== '' && snCountByPnu.get(`${o.targetPnu}${KEY_DELIMITER}${sn}`) === 1;
         if (snUnique) {
-            identity = { kind: 'PRIMARY', value: `primary:${o.targetPnu}#${sn}`, version: null };
+            const primarySource = canonicalStableStringify({
+                v: LDAREG_IDENTITY_HASH_VERSION,
+                rootIdentity,
+                agbldgSn: sn,
+            });
+            identity = {
+                kind: 'PRIMARY',
+                value: `primary:v${LDAREG_IDENTITY_HASH_VERSION}:${hashFn(primarySource)}`,
+                version: LDAREG_IDENTITY_HASH_VERSION,
+            };
         } else {
             identity = {
                 kind: 'FALLBACK',

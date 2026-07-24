@@ -26,7 +26,7 @@ export const ANCHOR = '1168010100107360024';
 export const SIBLING = '1168010100107360025';
 export const THIRD = '1168010100107360026';
 export const PROP_ID = '11111111-1111-4111-8111-111111111111';
-export const PK = 'PK-ROOT';
+export const PK = '1002003004005';
 
 export const DETACHED = HOUSING_PURPOSE_ALLOWLIST.find((p) => p.category === 'DETACHED')!;
 export const MULTIPLEX = HOUSING_PURPOSE_ALLOWLIST.find((p) => p.category === 'MULTIPLEX')!;
@@ -156,7 +156,7 @@ export function exposRow(pk = PK, floor = '3층', ho = '301'): Record<string, un
 }
 
 /** 토지대장 raw row */
-export function ladfrlRow(pnu: string, lndpclAr = '100.5', extra: Record<string, unknown> = {}): Record<string, unknown> {
+export function ladfrlRow(pnu: string, lndpclAr = '15622.1', extra: Record<string, unknown> = {}): Record<string, unknown> {
     return { pnu, lndpclAr, ...extra };
 }
 
@@ -260,14 +260,14 @@ export const MEMBER = [{ propertyUnitId: PROP_ID, pnu: ANCHOR, buildingUnitId: n
 /** DB resolver jsonb 결과 빌더. */
 export function noEvidence(membership: unknown = MEMBER, over: Record<string, unknown> = {}): unknown {
     return {
-        dbState: 'NO_EVIDENCE', rootBuildingIdentities: [PK], componentPnus: [ANCHOR], linkedPnus: [],
+        dbState: 'NO_EVIDENCE', rootBuildingIdentities: [PK], componentPnus: [ANCHOR], linkedBasePnus: [], linkedPnus: [],
         linkedEvidenceKeys: [], pendingEvidenceKeys: [], blockingEvidence: [], openUnresolvedEvidenceKeys: [],
         componentTruncated: false, propertyMembership: membership, dbScopeHash: 'db-hash-noevidence', ...over,
     };
 }
 export function linked(linkedPnus: string[], membership: unknown = MEMBER, over: Record<string, unknown> = {}): unknown {
     return {
-        dbState: 'LINKED', rootBuildingIdentities: [PK], componentPnus: [...linkedPnus], linkedPnus: [...linkedPnus],
+        dbState: 'LINKED', rootBuildingIdentities: [PK], componentPnus: [...linkedPnus], linkedBasePnus: [linkedPnus[0]], linkedPnus: [...linkedPnus],
         linkedEvidenceKeys: ['k1'], pendingEvidenceKeys: [], blockingEvidence: [], openUnresolvedEvidenceKeys: [],
         componentTruncated: false, propertyMembership: membership, dbScopeHash: 'db-hash-linked', ...over,
     };

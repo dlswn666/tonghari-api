@@ -21,6 +21,7 @@ import type {
     BylotEvidence,
     LandAreaSyncIssueCode,
 } from '../../types/land-area-sync.types';
+import { normalizeRegistryManagementPk } from './registry-pk';
 
 /**
  * Phase 0에서 확정한 production `bylotCnt` 원천 정책 (DESIGN §10.4).
@@ -83,13 +84,6 @@ export type TitlePkReduce =
     /** row는 있으나 전부 invalid (fallback 후보) */
     | { kind: 'NO_VALID' };
 
-/** 비어있지 않은 정규화 PK를 추출한다(공백 trim). 없으면 null. */
-function normalizedPk(pk: unknown): string | null {
-    if (typeof pk !== 'string') return null;
-    const t = pk.trim();
-    return t.length > 0 ? t : null;
-}
-
 /**
  * title row들을 exact `mgmBldrgstPk`별로 reduce한다 (DESIGN §10.4).
  * PK가 없는 row는 어느 PK 그룹에도 기여하지 않는다(expected PK도 정의하지 않음).
@@ -97,7 +91,7 @@ function normalizedPk(pk: unknown): string | null {
 export function reduceTitleBylotByPk(titleRows: BrTitleRow[]): Map<string, TitlePkReduce> {
     const byPk = new Map<string, BrTitleRow[]>();
     for (const row of titleRows) {
-        const pk = normalizedPk(row.mgmBldrgstPk);
+        const pk = normalizeRegistryManagementPk(row.mgmBldrgstPk);
         if (!pk) continue;
         const list = byPk.get(pk) ?? [];
         list.push(row);
@@ -192,7 +186,7 @@ function pickExactBasis(basisRows: BrBasisOulnRow[], pk: string): BasisPick {
     let firstRaw: string | null = null;
     let firstCount = 0;
     for (const row of basisRows) {
-        if (normalizedPk(row.mgmBldrgstPk) !== pk) continue;
+        if (normalizeRegistryManagementPk(row.mgmBldrgstPk) !== pk) continue;
         const p = parseBylotCnt(row.bylotCnt);
         if (p.valid) {
             if (validCounts.size === 0) {
@@ -219,7 +213,7 @@ export function resolveBylotCounts(input: BylotResolverInput): BylotResolution {
     const titleReduce = reduceTitleBylotByPk(titleRows);
     const attachedPkSet = new Set<string>();
     for (const pk of attachedPks) {
-        const n = normalizedPk(pk);
+        const n = normalizeRegistryManagementPk(pk);
         if (n) attachedPkSet.add(n);
     }
 

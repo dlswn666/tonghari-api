@@ -10,15 +10,15 @@ import {
 } from '../src/services/land-area-sync/bylot';
 import type { BrTitleRow, BrBasisOulnRow } from '../src/types/land-area-sync.types';
 
-const PK_A = 'A-1111';
-const PK_B = 'B-2222';
-const PK_C = 'C-3333';
+const PK_A = '1111';
+const PK_B = '2222';
+const PK_C = '3333';
 
-function titleRow(mgmBldrgstPk: string, bylotCnt: unknown): BrTitleRow {
-    return { mgmBldrgstPk, bylotCnt: bylotCnt as string };
+function titleRow(mgmBldrgstPk: string | number, bylotCnt: unknown): BrTitleRow {
+    return { mgmBldrgstPk, bylotCnt: bylotCnt as string | number };
 }
-function basisRow(mgmBldrgstPk: string, bylotCnt: unknown): BrBasisOulnRow {
-    return { mgmBldrgstPk, bylotCnt: bylotCnt as string };
+function basisRow(mgmBldrgstPk: string | number, bylotCnt: unknown): BrBasisOulnRow {
+    return { mgmBldrgstPk, bylotCnt: bylotCnt as string | number };
 }
 
 function baseInput(over: Partial<BylotResolverInput> = {}): BylotResolverInput {
@@ -81,7 +81,7 @@ test('parseBylotCnt: 숫자 타입 방어 — 정수는 허용, 소수·음수�
 // ── 관리 PK별 title reduce (DESIGN §10.4) ─────────────────────────
 
 test('reduceTitleBylotByPk: 같은 PK 동일 valid 반복은 RESOLVED', () => {
-    const m = reduceTitleBylotByPk([titleRow(PK_A, '2'), titleRow(PK_A, '2'), titleRow(PK_A, ' 2 ')]);
+    const m = reduceTitleBylotByPk([titleRow(1111, '2'), titleRow('001111', '2'), titleRow(PK_A, ' 2 ')]);
     assert.deepEqual(m.get(PK_A), { kind: 'RESOLVED', count: 2, raw: '2' });
 });
 
@@ -289,8 +289,8 @@ test('resolveBylotCounts: attached에만 있는 orphan PK는 UNAVAILABLE, expect
 
 test('resolveBylotCounts: 결과는 결정론적으로 정렬된 expectedPks/evidence', () => {
     const res = resolveBylotCounts(
-        baseInput({ titleRows: [titleRow('Z', '1'), titleRow('A', '1')], attachedPks: ['M'] })
+        baseInput({ titleRows: [titleRow('3', '1'), titleRow('1', '1')], attachedPks: ['2'] })
     );
-    assert.deepEqual(res.expectedPks, ['A', 'M', 'Z']);
-    assert.deepEqual(res.evidence.map((e) => e.mgmBldrgstPk), ['A', 'M', 'Z']);
+    assert.deepEqual(res.expectedPks, ['1', '2', '3']);
+    assert.deepEqual(res.evidence.map((e) => e.mgmBldrgstPk), ['1', '2', '3']);
 });

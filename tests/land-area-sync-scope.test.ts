@@ -19,7 +19,7 @@ const MULTIPLEX = HOUSING_PURPOSE_ALLOWLIST.find((p) => p.category === 'MULTIPLE
 
 const ANCHOR = '1168010100107360024';
 const OTHER_PNU = '1168010100107360025';
-const PK = 'PK-ROOT-1';
+const PK = '1002003004005';
 
 // ── scan 빌더 ─────────────────────────────────────────────────────
 
@@ -82,6 +82,7 @@ function db(over: Partial<DbScopeResolution> = {}): DbScopeResolution {
         dbState: 'NO_EVIDENCE',
         rootBuildingIdentities: [PK],
         componentPnus: [ANCHOR],
+        linkedBasePnus: [],
         linkedPnus: [],
         linkedEvidenceKeys: [],
         pendingEvidenceKeys: [],
@@ -159,15 +160,20 @@ test('bylot0 + attached row → REVIEW / BYLOT_ATTACHED_COUNT_MISMATCH', () => {
 
 test('orphan attached PK(coverage 누락)는 REVIEW / BYLOT_COUNT_UNAVAILABLE', () => {
     // title은 PK만, attached는 PK+ORPHAN. 부속 row가 있으니 no-cache면 cache-scan conflict도 뜬다.
+    const orphanPk = '9001002003006';
     const r = resolveParcelScopeCompleteness(
         gate({
-            dbScope: db({ dbState: 'LINKED', linkedPnus: [ANCHOR, OTHER_PNU] }),
-            baseScans: [base({ title: titleComplete([titleRow(PK, '1')]), attached: attachedComplete([attachedRow(ANCHOR, OTHER_PNU, 'ORPHAN-PK')]) })],
+            dbScope: db({
+                dbState: 'LINKED',
+                linkedBasePnus: [ANCHOR],
+                linkedPnus: [ANCHOR, OTHER_PNU],
+            }),
+            baseScans: [base({ title: titleComplete([titleRow(PK, '1')]), attached: attachedComplete([attachedRow(ANCHOR, OTHER_PNU, orphanPk)]) })],
         })
     );
     assert.equal(r.state, 'REVIEW_REQUIRED');
     assert.ok(r.issues.includes('BYLOT_COUNT_UNAVAILABLE'));
-    assert.ok(r.expectedPks.includes('ORPHAN-PK'));
+    assert.ok(r.expectedPks.includes(orphanPk));
 });
 
 // ── component too large ───────────────────────────────────────────
@@ -198,10 +204,9 @@ test('blocking evidence → REVIEW / SCOPE_BLOCKING_EVIDENCE', () => {
 
 test('LINKED PNU와 complete attached scan이 exact 일치 → LINKED_SCOPE_RESOLVED (다세대)', () => {
     const r = resolveParcelScopeCompleteness({
-        dbScope: db({ dbState: 'LINKED', linkedPnus: [ANCHOR, OTHER_PNU], componentPnus: [ANCHOR, OTHER_PNU] }),
+        dbScope: db({ dbState: 'LINKED', linkedBasePnus: [ANCHOR], linkedPnus: [ANCHOR, OTHER_PNU], componentPnus: [ANCHOR, OTHER_PNU] }),
         baseScans: [
             base({ pnu: ANCHOR, title: titleComplete([titleRow(PK, '1', MULTIPLEX)]), attached: attachedComplete([attachedRow(ANCHOR, OTHER_PNU, PK)]) }),
-            base({ pnu: OTHER_PNU, title: titleComplete([titleRow(PK, '1', MULTIPLEX)]), attached: zero<BrAtchJibunRow>() }),
         ],
         policy: 'TITLE_ONLY',
     });
@@ -211,7 +216,7 @@ test('LINKED PNU와 complete attached scan이 exact 일치 → LINKED_SCOPE_RESO
 
 test('LINKED PNU와 attached 불일치 → REVIEW / SCOPE_NOT_LINKED', () => {
     const r = resolveParcelScopeCompleteness({
-        dbScope: db({ dbState: 'LINKED', linkedPnus: [ANCHOR, OTHER_PNU], componentPnus: [ANCHOR, OTHER_PNU] }),
+        dbScope: db({ dbState: 'LINKED', linkedBasePnus: [ANCHOR], linkedPnus: [ANCHOR, OTHER_PNU], componentPnus: [ANCHOR, OTHER_PNU] }),
         baseScans: [base({ pnu: ANCHOR, title: titleComplete([titleRow(PK, '0', MULTIPLEX)]), attached: zero<BrAtchJibunRow>() })],
         policy: 'TITLE_ONLY',
     });
@@ -223,10 +228,9 @@ test('LINKED PNU와 attached 불일치 → REVIEW / SCOPE_NOT_LINKED', () => {
 
 test('일반건축물(단독/다가구) LINKED 다중 PNU → REVIEW / MULTI_PNU_GENERAL_BUILDING', () => {
     const r = resolveParcelScopeCompleteness({
-        dbScope: db({ dbState: 'LINKED', linkedPnus: [ANCHOR, OTHER_PNU], componentPnus: [ANCHOR, OTHER_PNU] }),
+        dbScope: db({ dbState: 'LINKED', linkedBasePnus: [ANCHOR], linkedPnus: [ANCHOR, OTHER_PNU], componentPnus: [ANCHOR, OTHER_PNU] }),
         baseScans: [
             base({ pnu: ANCHOR, title: titleComplete([titleRow(PK, '1', DETACHED)]), attached: attachedComplete([attachedRow(ANCHOR, OTHER_PNU, PK)]) }),
-            base({ pnu: OTHER_PNU, title: titleComplete([titleRow(PK, '1', DETACHED)]), attached: zero<BrAtchJibunRow>() }),
         ],
         policy: 'TITLE_ONLY',
     });

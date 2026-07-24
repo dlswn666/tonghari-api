@@ -38,6 +38,17 @@ test('buildScopeSnapshot: 3층 hash·정렬 candidate·정렬 bylotEvidence 를 
         candidatePropertyUnitIds: [UUID_A, UUID_A],
         currentLandTuples: [{ propertyUnitId: UUID_A, landArea: '10', source: 'MANUAL' }],
         proposedLandAreas: [{ propertyUnitId: UUID_A, landArea: '21.3' }],
+        ladfrlAreaEvidence: {
+            parcels: [{ pnu: PNU, area: '100.5' }],
+            totalArea: '100.5',
+        },
+        replicationEvidence: {
+            canonicalSourcePnu: PNU,
+            comparedPnus: [PNU],
+            exactReplica: true,
+            rowCount: 1,
+            rowMultisetDigest: 'a'.repeat(64),
+        },
         componentMatchDigest: [],
         projectionItems: [{ propertyUnitId: UUID_A }],
     });
@@ -50,7 +61,20 @@ test('buildScopeSnapshot: 3층 hash·정렬 candidate·정렬 bylotEvidence 를 
     assert.deepEqual(snapshot.bylotEvidence.map((e) => e.mgmBldrgstPk), ['PKA', 'PKB']); // sorted
     // C1: resolverRootPks 는 정렬·dedup 되어 고정된다(웹 [5.3] 재검증 계약 입력).
     assert.deepEqual(snapshot.resolverRootPks, ['PK-A', 'PK-UP']);
-    assert.equal(snapshot.canonicalVersion, 1);
+    assert.equal(snapshot.canonicalVersion, 2);
+    assert.deepEqual(snapshot.ladfrlAreaEvidence, {
+        version: 'land-area-sync.ladfrl-scope.v1',
+        parcels: [{ pnu: PNU, area: '100.5' }],
+        totalArea: '100.5',
+    });
+    assert.deepEqual(snapshot.replicationEvidence, {
+        version: 'land-area-sync.ldareg-replication.v2',
+        canonicalSourcePnu: PNU,
+        comparedPnus: [PNU],
+        exactReplica: true,
+        rowCount: 1,
+        rowMultisetDigest: 'a'.repeat(64),
+    });
 });
 
 test('sanitizeIssue: allowlist 밖 필드(소유자명 등)는 제거하고 code·PNU·UUID·동/호만 남긴다', () => {

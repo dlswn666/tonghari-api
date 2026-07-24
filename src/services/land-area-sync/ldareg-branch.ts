@@ -13,6 +13,7 @@
  */
 
 import type { LdaregRow, BrExposRow, LandAreaSyncIssueCode } from '../../types/land-area-sync.types';
+import { createHash } from 'node:crypto';
 import type {
     LandAreaSyncApplyLdaregItem,
     LandAreaSyncApplyLdaregComponent,
@@ -28,18 +29,15 @@ import {
     type MatchSource,
 } from './matcher';
 import { mapClsSeCodeToSourceState, normalizeFloorLabel } from './preview';
+import { normalizeRegistryManagementPk } from './registry-pk';
+import type { ScopeLadfrlArea } from './ladfrl-scope';
+import { normalizeUnitTuple } from './normalizer';
 
 /** 한 대상 PNU 의 LDAREG·전유부 raw scan 묶음. */
 export interface LdaregPnuScan {
     pnu: string;
     ldaregRows: LdaregRow[];
     exposRows: BrExposRow[];
-    /**
-     * 같은 실행(same-run)에서 조회한 이 PNU 의 LADFRL 필지면적(㎡). 있으면 각 CURRENT component 의
-     * 비율 분모와 §7.5 허용오차로 대조한다(I2). null 이면 same-run 대조를 건너뛰고 apply RPC 의
-     * land_lots.area 검증(이중 검증)에 위임한다.
-     */
-    ladfrlArea?: number | null;
 }
 
 export interface LdaregBranchInput {
@@ -49,8 +47,160 @@ export interface LdaregBranchInput {
     /** 단일 root 관리번호(전유부 root identity 비교 기준). */
     rootIdentity: string;
     perPnu: LdaregPnuScan[];
+    /** 정렬된 distinct scope PNU별 same-run LADFRL 양수면적. */
+    scopeLadfrlAreas: ScopeLadfrlArea[];
+    /** 위 면적의 정확한 decimal 합계. 모든 CURRENT component 분모의 유일한 비교 기준. */
+    scopeLadfrlTotal: string;
+    /** scanned set에 포함된 base PNU 중 정렬 첫 값. */
+    canonicalSourcePnu: string;
     buildingUnits: BuildingUnitCandidate[];
     propertyUnits: PropertyUnitCandidate[];
+}
+
+const LDAREG_REPEAT_FIELDS = [
+    'agbldgSn',
+    'buldNm',
+    'buldDongNm',
+    'buldFloorNm',
+    'buldHoNm',
+    'buldRoomNm',
+    'ldaQotaRate',
+    'clsSeCode',
+    'clsSeCodeNm',
+    'relateLdEmdLiCode',
+    'lastUpdtDt',
+] as const;
+
+export interface LdaregReplicationEvidence {
+    canonicalSourcePnu: string;
+    comparedPnus: string[];
+    exactReplica: true;
+    /** canonical logical row multiset 수(중복 포함). */
+    rowCount: number;
+    rowMultisetDigest: string;
+}
+
+export type LdaregReplicationResult =
+    | {
+          ok: true;
+          evidence: LdaregReplicationEvidence;
+      }
+    | { ok: false };
+
+function canonicalLdaregScalar(value: unknown): string | null | undefined {
+    if (value === undefined || value === null || value === '') return null;
+    if (typeof value === 'string') return value.normalize('NFKC').trim();
+    if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+    return undefined;
+}
+
+function canonicalDecimalToken(value: string): string {
+    const [whole, fraction = ''] = value.split('.');
+    const canonicalWhole = whole.replace(/^0+(?=\d)/, '');
+    const canonicalFraction = fraction.replace(/0+$/, '');
+    return canonicalFraction ? `${canonicalWhole}.${canonicalFraction}` : canonicalWhole;
+}
+
+/**
+ * query-dependent pnu를 제외한 LDAREG logical row v2. 고정 allowlist의 상태·기준일을
+ * 보존하되 ratio와 unit tuple은 비교 의미에 맞게 canonicalize한다.
+ */
+function canonicalLdaregRowKey(row: LdaregRow): string | null {
+    const record = row as Record<string, unknown>;
+    const raw: Record<string, string | null> = {};
+    for (const field of LDAREG_REPEAT_FIELDS.filter((field) => field !== 'ldaQotaRate')) {
+        const value = canonicalLdaregScalar(record[field]);
+        if (value === undefined) return null;
+        raw[field] = value;
+    }
+    const ratio = parseLdaQotaRate(record.ldaQotaRate);
+    const state = mapClsSeCodeToSourceState(raw.clsSeCode ?? '', raw.clsSeCodeNm ?? '');
+    const normalized = normalizeUnitTuple({
+        dong: raw.buldDongNm,
+        floor: raw.buldFloorNm,
+        ho: raw.buldHoNm,
+        room: raw.buldRoomNm,
+    });
+    return JSON.stringify({
+        v: 2,
+        agbldgSn: raw.agbldgSn,
+        buildingName: raw.buldNm,
+        normalized,
+        ratio: ratio.ok
+            ? {
+                  numerator: canonicalDecimalToken(ratio.numeratorText),
+                  denominator: canonicalDecimalToken(ratio.denominatorText),
+              }
+            : { invalid: canonicalLdaregScalar(record.ldaQotaRate) ?? null },
+        sourceState: state.state,
+        sourceStateAmbiguous: state.ambiguous,
+        clsSeCode: raw.clsSeCode,
+        clsSeCodeNm: raw.clsSeCodeNm,
+        relateLdEmdLiCode: raw.relateLdEmdLiCode,
+        lastUpdtDt: raw.lastUpdtDt,
+    });
+}
+
+/**
+ * Phase 0 실측 계약: 동일 building의 LDAREG 전체 호/비율 집합이 scope의 각 PNU에서 반복된다.
+ * 각 query 응답의 row.pnu만 query target에 맞게 달라진다. pnu를 제외한 canonical source
+ * multiset(중복 개수 포함)이 모든 PNU에서 exact equal일 때만 replica로 인정한다.
+ */
+export function validateLdaregReplication(
+    scannedPnus: string[],
+    perPnu: LdaregPnuScan[],
+    canonicalSourcePnu: string
+): LdaregReplicationResult {
+    const expected = [...new Set(scannedPnus)].sort();
+    const actual = [...new Set(perPnu.map((scan) => scan.pnu))].sort();
+    if (
+        expected.length !== scannedPnus.length ||
+        actual.length !== perPnu.length ||
+        expected.length !== actual.length ||
+        expected.some((pnu, index) => pnu !== actual[index]) ||
+        !expected.includes(canonicalSourcePnu)
+    ) {
+        return { ok: false };
+    }
+
+    const keysByPnu = new Map<string, string[]>();
+    for (const scan of perPnu) {
+        const keys: string[] = [];
+        for (const row of scan.ldaregRows) {
+            if (typeof row.pnu !== 'string' || row.pnu.trim() !== scan.pnu) {
+                return { ok: false };
+            }
+            const key = canonicalLdaregRowKey(row);
+            if (key === null) return { ok: false };
+            keys.push(key);
+        }
+        keysByPnu.set(scan.pnu, keys.sort());
+    }
+
+    const canonical = keysByPnu.get(canonicalSourcePnu);
+    if (!canonical) return { ok: false };
+    for (const pnu of expected) {
+        const candidate = keysByPnu.get(pnu);
+        if (
+            !candidate ||
+            candidate.length !== canonical.length ||
+            candidate.some((key, index) => key !== canonical[index])
+        ) {
+            return { ok: false };
+        }
+    }
+
+    const rowMultisetDigest = createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+    return {
+        ok: true,
+        evidence: {
+            canonicalSourcePnu,
+            comparedPnus: expected,
+            exactReplica: true,
+            rowCount: canonical.length,
+            rowMultisetDigest,
+        },
+    };
 }
 
 export interface LdaregBranchResult {
@@ -64,6 +214,10 @@ export interface LdaregBranchResult {
     };
     /** scopeHash 의 정렬 component/match digest 입력. */
     componentMatchDigest: unknown[];
+    /** immutable scope snapshot에 고정할 replica 근거. validation 실패면 null. */
+    replicationEvidence: LdaregReplicationEvidence | null;
+    /** 분모/ratio/replica/match 불일치로 apply RPC가 0회여야 하는 전역 gate. */
+    blocking: boolean;
 }
 
 function str(v: unknown): string {
@@ -106,14 +260,46 @@ function toExposCandidate(row: BrExposRow): ExposUnitCandidate {
         // self-PK 로 비교하면 ROOT_MISMATCH 로 전량 NO_CHANGE 된다. deriveRootPks 와 동일하게
         // up 우선(빈 문자열이면 self)으로 뽑는다.
         // ⚠️ expos row 의 root 식별 필드(up vs self)는 Phase 0 실측 확정 항목이다.
-        rootIdentity: pickRootIdentity(str(r.mgmUpBldrgstPk), str(r.mgmBldrgstPk)),
+        rootIdentity: pickRootIdentity(r.mgmUpBldrgstPk, r.mgmBldrgstPk),
     };
 }
 
-/** up-PK 우선(trim 후 비면 self) root 식별자 선택 — deriveRootPks(service)와 동일 규칙. */
-function pickRootIdentity(up: string, self: string): string {
-    const u = up.trim();
-    return u.length > 0 ? u : self.trim();
+/** up-PK 우선 root 식별자 선택 — deriveRootPks(service)와 동일 canonical 규칙. */
+function pickRootIdentity(up: unknown, self: unknown): string {
+    return normalizeRegistryManagementPk(up) ?? normalizeRegistryManagementPk(self) ?? '';
+}
+
+/**
+ * match에 사용할 canonical Building HUB 전유부 dataset을 고른다. scanned base 중 strict
+ * COMPLETE nonzero expos를 가진 PNU만 후보이며, 후보가 여러 개면 match에 쓰이는 canonical
+ * expos multiset이 exact 같아야 한다.
+ */
+export function selectCanonicalExposSourcePnu(
+    basePnus: string[],
+    perPnu: LdaregPnuScan[]
+): string | null {
+    const scansByPnu = new Map(perPnu.map((scan) => [scan.pnu, scan]));
+    const candidates = [...new Set(basePnus)].sort();
+    if (
+        candidates.length === 0 ||
+        candidates.some((pnu) => (scansByPnu.get(pnu)?.exposRows.length ?? 0) === 0)
+    ) {
+        return null;
+    }
+
+    const digestFor = (pnu: string): string =>
+        JSON.stringify(
+            (scansByPnu.get(pnu)?.exposRows ?? [])
+                .map((row) => toExposCandidate(row))
+                .map((row) => ({
+                    rootIdentity: row.rootIdentity,
+                    normalized: normalizeUnitTuple(row),
+                }))
+                .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))
+        );
+    const reference = digestFor(candidates[0]);
+    if (candidates.slice(1).some((pnu) => digestFor(pnu) !== reference)) return null;
+    return candidates[0];
 }
 
 /** building_unit 후보 floor 표기를 matcher 주입 전 정규화한다(integer ↔ '3층'). */
@@ -127,148 +313,230 @@ function normalizeBuildingUnitFloor(candidate: BuildingUnitCandidate): BuildingU
 export function assembleLdaregApply(input: LdaregBranchInput): LdaregBranchResult {
     const { unionId, scannedPnus, rootIdentity, perPnu, propertyUnits } = input;
     const expectedTargetPnus = [...new Set(scannedPnus)].sort();
+    const scopeLadfrlAreas = [...input.scopeLadfrlAreas].sort((a, b) => a.pnu.localeCompare(b.pnu));
+    const scopeLadfrlTotal = Number(input.scopeLadfrlTotal);
     const buildingUnits = input.buildingUnits.map(normalizeBuildingUnitFloor);
+    const rawLandRegistryRows = perPnu.reduce((sum, scan) => sum + scan.ldaregRows.length, 0);
+    const rawExposureRows = perPnu.reduce((sum, scan) => sum + scan.exposRows.length, 0);
+    const replication = validateLdaregReplication(
+        scannedPnus,
+        perPnu,
+        input.canonicalSourcePnu
+    );
+    const canonicalScan = perPnu.find((scan) => scan.pnu === input.canonicalSourcePnu);
+    if (!replication.ok || !canonicalScan || canonicalScan.exposRows.length === 0) {
+        return {
+            items: [],
+            issues: [{ code: 'LDAREG_IDENTITY_CONFLICT' }],
+            matchedPropertyUnitIds: [],
+            counts: {
+                landRegistryRows: rawLandRegistryRows,
+                exposureRows: rawExposureRows,
+                parsedRows: 0,
+            },
+            componentMatchDigest: [
+                {
+                    kind: 'SCOPE_LADFRL',
+                    areas: scopeLadfrlAreas,
+                    totalArea: input.scopeLadfrlTotal,
+                },
+            ],
+            replicationEvidence: null,
+            blocking: true,
+        };
+    }
 
     const issues: LandAreaSyncIssue[] = [];
-    let landRegistryRows = 0;
-    let exposureRows = 0;
     let parsedRows = 0;
+    let denominatorMismatch = false;
+    let ratioParseFailed = false;
 
     // property_unit_id → component 목록.
     const byProperty = new Map<string, LandAreaSyncApplyLdaregComponent[]>();
-    const componentMatchDigest: Array<Record<string, unknown>> = [];
+    const componentMatchDigest: Array<Record<string, unknown>> = [
+        {
+            kind: 'SCOPE_LADFRL',
+            areas: scopeLadfrlAreas,
+            totalArea: input.scopeLadfrlTotal,
+        },
+        {
+            kind: 'LDAREG_REPLICATION',
+            ...replication.evidence,
+        },
+    ];
 
+    // canonical base LDAREG를 한 번만 dedup/match한다. attached PNU의 expos COMPLETE_ZERO는
+    // 정상일 수 있으므로 per-PNU expos match equality를 요구하지 않는다.
+    const exposUnits = canonicalScan.exposRows.map(toExposCandidate);
+    const observations: LdaregObservationInput[] = canonicalScan.ldaregRows.map((row, idx) => {
+        const r = row as Record<string, unknown>;
+        const decision = mapClsSeCodeToSourceState(str(r.clsSeCode), str(r.clsSeCodeNm));
+        return {
+            targetPnu: canonicalScan.pnu,
+            identityRoot: rootIdentity,
+            agbldgSn: str(r.agbldgSn) || null,
+            buildingName: str(r.buldNm) || null,
+            dong: str(r.buldDongNm) || null,
+            floor: normalizeFloorLabel(str(r.buldFloorNm)) || null,
+            ho: str(r.buldHoNm) || null,
+            room: str(r.buldRoomNm) || null,
+            ldaQotaRate: str(r.ldaQotaRate) || null,
+            clsSeCode: str(r.clsSeCode) || null,
+            sourceState: decision.state,
+            sourceStateAmbiguous: decision.ambiguous,
+            sourceIndex: idx,
+        };
+    });
+    const dedup = dedupLdaregObservations(observations);
+    const dedupConflict = dedup.issues.some(
+        (issue) => issue.code === 'LDAREG_IDENTITY_CONFLICT'
+    );
+    for (const issue of dedup.issues) {
+        issues.push({ code: issue.code, targetPnu: canonicalScan.pnu });
+    }
+
+    // exact multiset 검증을 통과했으므로 canonical logical key별 raw row가 모든 PNU에 존재한다.
+    // sourceRecord.pnu provenance를 보존하기 위해 target별 대응 raw row를 별도로 꺼낸다.
+    const rowsByPnuAndKey = new Map<string, Map<string, LdaregRow[]>>();
     for (const scan of perPnu) {
-        landRegistryRows += scan.ldaregRows.length;
-        exposureRows += scan.exposRows.length;
-        const exposUnits = scan.exposRows.map(toExposCandidate);
+        const byKey = new Map<string, LdaregRow[]>();
+        for (const row of scan.ldaregRows) {
+            const key = canonicalLdaregRowKey(row);
+            if (key === null) continue; // replication validation에서 이미 차단됨
+            const list = byKey.get(key) ?? [];
+            list.push(row);
+            byKey.set(key, list);
+        }
+        rowsByPnuAndKey.set(scan.pnu, byKey);
+    }
 
-        // ldareg raw → observation(정규화·sourceState 매핑). idx 를 함께 운반해 dedup 대표 record 가
-        // 정확한 원본 row 를 가리키게 한다(I1). ambiguous flag 도 운반해 component review issue 로 쓴다.
-        const observations: LdaregObservationInput[] = scan.ldaregRows.map((row, idx) => {
-            const r = row as Record<string, unknown>;
-            const decision = mapClsSeCodeToSourceState(str(r.clsSeCode), str(r.clsSeCodeNm));
-            return {
-                targetPnu: scan.pnu,
-                agbldgSn: str(r.agbldgSn) || null,
-                buildingName: str(r.buldNm) || null,
-                dong: str(r.buldDongNm) || null,
-                floor: normalizeFloorLabel(str(r.buldFloorNm)) || null,
-                ho: str(r.buldHoNm) || null,
-                room: str(r.buldRoomNm) || null,
-                ldaQotaRate: str(r.ldaQotaRate) || null,
-                clsSeCode: str(r.clsSeCode) || null,
-                sourceState: decision.state,
-                sourceStateAmbiguous: decision.ambiguous,
-                sourceIndex: idx,
-            };
-        });
-
-        const dedup = dedupLdaregObservations(observations);
-        for (const iss of dedup.issues) {
-            issues.push({ code: iss.code, targetPnu: scan.pnu });
+    for (const record of dedup.records) {
+        const canonicalRaw =
+            record.sourceRowIndex >= 0
+                ? canonicalScan.ldaregRows[record.sourceRowIndex]
+                : undefined;
+        const canonicalKey = canonicalRaw ? canonicalLdaregRowKey(canonicalRaw) : null;
+        if (canonicalKey === null) {
+            issues.push({ code: 'LDAREG_IDENTITY_CONFLICT', targetPnu: canonicalScan.pnu });
+            ratioParseFailed = true;
+            continue;
         }
 
-        for (const record of dedup.records) {
-            // I1/M5: dedup 이 운반한 원본 row 인덱스로 정확한 raw row 에서 §7.3 source_record 를 뽑는다.
-            // (기존의 agbldgSn find 술어는 FALLBACK 에서 항상-true 가 돼 첫 row 로 오염됐다.)
-            const rawRow =
-                record.sourceRowIndex >= 0 ? scan.ldaregRows[record.sourceRowIndex] : undefined;
-            const sourceRecord = rawRow ? extractSourceRecord(rawRow) : extractSourceRecord({} as LdaregRow);
+        const source: MatchSource = {
+            targetPnu: canonicalScan.pnu,
+            dong: record.normalized.dong || null,
+            floor: record.normalized.floor || null,
+            ho: record.normalized.ho || null,
+            room: record.normalized.room || null,
+            registryExternalId: null,
+            expectedPnuScope: expectedTargetPnus,
+        };
+        const decision = matchLdaregUnit({
+            source,
+            scopeRootIdentity: rootIdentity,
+            exposUnits,
+            buildingUnits,
+            propertyUnits,
+            unionId,
+        });
+        if (decision.kind === 'NO_CHANGE') {
+            issues.push({ code: decision.issue, targetPnu: canonicalScan.pnu });
+            continue;
+        }
 
-            const source: MatchSource = {
-                targetPnu: scan.pnu,
-                dong: record.normalized.dong || null,
-                floor: record.normalized.floor || null,
-                ho: record.normalized.ho || null,
-                room: record.normalized.room || null,
-                registryExternalId: null,
-                expectedPnuScope: expectedTargetPnus,
-            };
-
-            const decision = matchLdaregUnit({
-                source,
-                scopeRootIdentity: rootIdentity,
-                exposUnits,
-                buildingUnits,
-                propertyUnits,
-                unionId,
+        if (record.sourceStateAmbiguous) {
+            issues.push({
+                code: 'LDAREG_IDENTITY_CONFLICT',
+                propertyUnitId: decision.propertyUnitId,
+                targetPnu: canonicalScan.pnu,
             });
+        }
 
-            if (decision.kind === 'NO_CHANGE') {
-                issues.push({ code: decision.issue, targetPnu: scan.pnu });
-                continue;
-            }
-
-            // 원장 승격: clsSeCode 매핑이 불명확하면 자동 말소/유효 판정 불가 → CURRENT 유지(§13.4)하되
-            // 해당 component 에 review issue 1건을 남긴다. §14.3 신규 코드 발명 금지 제약 하에,
-            // clsSeCode 불명확은 "이 LDAREG source row 의 상태 해석이 확정 불가"인 source-record 수준
-            // 이상이므로 identity.ts 가 여러 source 이상(중복·hash 충돌·property key 모호)에 공용으로 쓰는
-            // LDAREG_IDENTITY_CONFLICT 를 재사용한다. PROVIDER_PROTOCOL_ERROR 는 전송/프로토콜 실패
-            // 전용이라 상태 모호성에 부적절하다.
-            if (record.sourceStateAmbiguous) {
+        let ratio:
+            | {
+                  raw: string;
+                  numeratorText: string;
+                  denominatorText: string;
+              }
+            | null = null;
+        if (record.state === 'CURRENT') {
+            const parsed = parseLdaQotaRate(record.ldaQotaRateRaw);
+            if (!parsed.ok) {
+                ratioParseFailed = true;
                 issues.push({
-                    code: 'LDAREG_IDENTITY_CONFLICT',
+                    code: parsed.issue,
                     propertyUnitId: decision.propertyUnitId,
-                    targetPnu: scan.pnu,
+                    targetPnu: canonicalScan.pnu,
                 });
-            }
-
-            // CLOSED 는 동일 source identity 의 기존 행에만 적용(retiredReason 필수).
-            if (record.state === 'CLOSED') {
-                const component: LandAreaSyncApplyLdaregComponent = {
-                    targetPnu: scan.pnu,
-                    sourceState: 'CLOSED',
-                    matchMethod: decision.buildingUnitRef ? 'BUILDING_UNIT_ID' : 'PNU_DONG_HO',
-                    matchedBuildingUnitId: decision.buildingUnitRef,
-                    sourceIdentity: record.identity.value,
-                    // M5: identity 문자열 파싱 복원 대신 dedup 이 운반한 agbldgSn 사용(PRIMARY 만 보존).
-                    sourceAgbldgSn: record.identity.kind === 'PRIMARY' ? record.agbldgSn : null,
-                    ratioRaw: str(record.ldaQotaRateRaw) || '0/1',
-                    ratioNumerator: '0',
-                    ratioDenominator: '1',
-                    retiredReason: 'CLS_SE_CODE_CLOSED',
-                    sourceRecord,
-                };
-                pushComponent(byProperty, decision.propertyUnitId, component);
-                componentMatchDigest.push(digestOf(decision.propertyUnitId, component));
                 continue;
             }
-
-            // CURRENT 비율 parse(numeratorText/denominatorText 문자열 소비 — JS float 금지).
-            const ratio = parseLdaQotaRate(record.ldaQotaRateRaw);
-            if (!ratio.ok) {
-                issues.push({ code: ratio.issue, propertyUnitId: decision.propertyUnitId, targetPnu: scan.pnu });
+            const denomCheck = checkDenominatorAgainstArea(parsed.denominator, scopeLadfrlTotal);
+            if (!denomCheck.ok) {
+                denominatorMismatch = true;
+                issues.push({
+                    code: denomCheck.issue,
+                    propertyUnitId: decision.propertyUnitId,
+                    targetPnu: canonicalScan.pnu,
+                });
                 continue;
             }
-            // I2(§12.1·§7.5): 분모를 같은 실행의 LADFRL 필지면적과 대조한다. 면적이 있고(>0) 허용오차를
-            // 벗어나면 RATIO_DENOMINATOR_MISMATCH 로 해당 component 를 제외한다(자동 보정 아님, 검토 사유).
-            // 면적이 없으면(null·0) same-run 대조를 건너뛰고 apply RPC 의 land_lots.area 검증에 위임한다.
-            const sameRunArea = scan.ladfrlArea;
-            if (sameRunArea != null && sameRunArea > 0) {
-                const denomCheck = checkDenominatorAgainstArea(ratio.denominator, sameRunArea);
-                if (!denomCheck.ok) {
-                    issues.push({ code: denomCheck.issue, propertyUnitId: decision.propertyUnitId, targetPnu: scan.pnu });
-                    continue;
-                }
+            ratio = parsed;
+            parsedRows += expectedTargetPnus.length;
+        }
+
+        for (const targetPnu of expectedTargetPnus) {
+            const targetRaw = rowsByPnuAndKey.get(targetPnu)?.get(canonicalKey)?.[0];
+            if (!targetRaw) {
+                ratioParseFailed = true;
+                issues.push({ code: 'LDAREG_IDENTITY_CONFLICT', targetPnu });
+                continue;
             }
-            parsedRows += 1;
-            const component: LandAreaSyncApplyLdaregComponent = {
-                targetPnu: scan.pnu,
-                sourceState: 'CURRENT',
-                matchMethod: decision.buildingUnitRef ? 'BUILDING_UNIT_ID' : 'PNU_DONG_HO',
-                matchedBuildingUnitId: decision.buildingUnitRef,
-                sourceIdentity: record.identity.value,
-                // M5: dedup 이 운반한 대표 agbldgSn(별도 필드) 사용.
-                sourceAgbldgSn: record.agbldgSn,
-                ratioRaw: ratio.raw,
-                ratioNumerator: ratio.numeratorText,
-                ratioDenominator: ratio.denominatorText,
-                retiredReason: null,
-                sourceRecord,
-            };
+            const component: LandAreaSyncApplyLdaregComponent =
+                record.state === 'CLOSED'
+                    ? {
+                          targetPnu,
+                          sourceState: 'CLOSED',
+                          matchMethod: decision.buildingUnitRef
+                              ? 'BUILDING_UNIT_ID'
+                              : 'PNU_DONG_HO',
+                          matchedBuildingUnitId: decision.buildingUnitRef,
+                          sourceIdentity: record.identity.value,
+                          sourceAgbldgSn:
+                              record.identity.kind === 'PRIMARY' ? record.agbldgSn : null,
+                          ratioRaw: str(record.ldaQotaRateRaw) || '0/1',
+                          ratioNumerator: '0',
+                          ratioDenominator: '1',
+                          retiredReason: 'CLS_SE_CODE_CLOSED',
+                          sourceRecord: extractSourceRecord(targetRaw),
+                      }
+                    : {
+                          targetPnu,
+                          sourceState: 'CURRENT',
+                          matchMethod: decision.buildingUnitRef
+                              ? 'BUILDING_UNIT_ID'
+                              : 'PNU_DONG_HO',
+                          matchedBuildingUnitId: decision.buildingUnitRef,
+                          sourceIdentity: record.identity.value,
+                          sourceAgbldgSn: record.agbldgSn,
+                          ratioRaw: ratio!.raw,
+                          ratioNumerator: ratio!.numeratorText,
+                          ratioDenominator: ratio!.denominatorText,
+                          retiredReason: null,
+                          sourceRecord: extractSourceRecord(targetRaw),
+                      };
             pushComponent(byProperty, decision.propertyUnitId, component);
-            componentMatchDigest.push(digestOf(decision.propertyUnitId, component));
+            componentMatchDigest.push(
+                digestOf(decision.propertyUnitId, component, input.scopeLadfrlTotal)
+            );
+        }
+    }
+
+    // 모든 PNU가 strict COMPLETE_ZERO인 경우에만 scope property를 empty component item으로
+    // 전달한다. 기존 rights의 STALE lifecycle 평가는 가능하지만 신규 0 면적을 만들지는 않는다.
+    if (replication.evidence.rowCount === 0) {
+        for (const property of propertyUnits) {
+            if (property.unionId !== unionId || property.isDeleted) continue;
+            if (!byProperty.has(property.id)) byProperty.set(property.id, []);
         }
     }
 
@@ -277,18 +545,114 @@ export function assembleLdaregApply(input: LdaregBranchInput): LdaregBranchResul
         .map(([propertyUnitId, components]) => ({
             propertyUnitId,
             expectedTargetPnus,
-            components: components.sort((x, y) => (x.targetPnu < y.targetPnu ? -1 : x.targetPnu > y.targetPnu ? 1 : 0)),
+            components: components.sort((x, y) => {
+                const pnuOrder = x.targetPnu.localeCompare(y.targetPnu);
+                if (pnuOrder !== 0) return pnuOrder;
+                const identityOrder = x.sourceIdentity.localeCompare(y.sourceIdentity);
+                if (identityOrder !== 0) return identityOrder;
+                return x.sourceState.localeCompare(y.sourceState);
+            }),
         }));
+
+    let ambiguousPropertyIdentity = false;
+    for (const item of items) {
+        const identities = new Set(
+            item.components.map((component) => component.sourceIdentity)
+        );
+        const countByTarget = new Map<string, number>();
+        for (const component of item.components) {
+            countByTarget.set(
+                component.targetPnu,
+                (countByTarget.get(component.targetPnu) ?? 0) + 1
+            );
+        }
+        if (
+            identities.size < 2 &&
+            ![...countByTarget.values()].some((count) => count > 1)
+        ) {
+            continue;
+        }
+        ambiguousPropertyIdentity = true;
+        issues.push({
+            code: 'LDAREG_IDENTITY_CONFLICT',
+            propertyUnitId: item.propertyUnitId,
+        });
+    }
+
+    // exact replica의 각 logical identity는 property별 모든 target PNU에 정확히 1개씩
+    // 존재하고, query-specific targetPnu/sourceRecord.pnu를 제외한 payload가 같아야 한다.
+    let componentReplicaMismatch = false;
+    for (const item of items) {
+        const byIdentity = new Map<string, LandAreaSyncApplyLdaregComponent[]>();
+        for (const component of item.components) {
+            const list = byIdentity.get(component.sourceIdentity) ?? [];
+            list.push(component);
+            byIdentity.set(component.sourceIdentity, list);
+        }
+        for (const components of byIdentity.values()) {
+            const targets = components.map((component) => component.targetPnu).sort();
+            const payloads = components.map(componentReplicaPayload);
+            if (
+                components.length !== expectedTargetPnus.length ||
+                targets.some((pnu, index) => pnu !== expectedTargetPnus[index]) ||
+                new Set(payloads).size !== 1
+            ) {
+                componentReplicaMismatch = true;
+                break;
+            }
+        }
+        if (componentReplicaMismatch) break;
+    }
+
+    if (componentReplicaMismatch) {
+        issues.push({
+            code: 'LDAREG_IDENTITY_CONFLICT',
+        });
+    }
+    const nonzeroWithoutMatchedItem =
+        replication.evidence.rowCount > 0 && items.length === 0;
+    if (nonzeroWithoutMatchedItem && issues.length === 0) {
+        issues.push({ code: 'PROPERTY_UNIT_NOT_FOUND' });
+    }
 
     return {
         items,
         issues,
         matchedPropertyUnitIds: items.map((i) => i.propertyUnitId),
-        counts: { landRegistryRows, exposureRows, parsedRows },
+        counts: {
+            landRegistryRows: rawLandRegistryRows,
+            exposureRows: rawExposureRows,
+            parsedRows,
+        },
         componentMatchDigest: componentMatchDigest.sort((a, b) =>
             JSON.stringify(a) < JSON.stringify(b) ? -1 : JSON.stringify(a) > JSON.stringify(b) ? 1 : 0
         ),
+        replicationEvidence: replication.evidence,
+        blocking:
+            denominatorMismatch ||
+            ratioParseFailed ||
+            componentReplicaMismatch ||
+            ambiguousPropertyIdentity ||
+            nonzeroWithoutMatchedItem ||
+            dedupConflict,
     };
+}
+
+function componentReplicaPayload(component: LandAreaSyncApplyLdaregComponent): string {
+    const sourceRecord = { ...component.sourceRecord };
+    delete sourceRecord.pnu;
+    return JSON.stringify({
+        sourceState: component.sourceState,
+        matchMethod: component.matchMethod,
+        matchedBuildingUnitId: component.matchedBuildingUnitId,
+        sourceIdentity: component.sourceIdentity,
+        sourceAgbldgSn: component.sourceAgbldgSn,
+        ratioRaw: component.ratioRaw,
+        ratioNumerator: component.ratioNumerator,
+        ratioDenominator: component.ratioDenominator,
+        retiredReason: component.retiredReason,
+        sourceRecord,
+    });
 }
 
 function pushComponent(
@@ -301,7 +665,11 @@ function pushComponent(
     map.set(propertyUnitId, list);
 }
 
-function digestOf(propertyUnitId: string, c: LandAreaSyncApplyLdaregComponent): Record<string, unknown> {
+function digestOf(
+    propertyUnitId: string,
+    c: LandAreaSyncApplyLdaregComponent,
+    scopeLadfrlTotal: string
+): Record<string, unknown> {
     return {
         propertyUnitId,
         targetPnu: c.targetPnu,
@@ -309,6 +677,7 @@ function digestOf(propertyUnitId: string, c: LandAreaSyncApplyLdaregComponent): 
         sourceIdentity: c.sourceIdentity,
         ratioNumerator: c.ratioNumerator,
         ratioDenominator: c.ratioDenominator,
+        scopeLadfrlTotal,
     };
 }
 

@@ -33,7 +33,11 @@ import { LAND_AREA_SYNC_MAX_ISSUES } from '../../types/land-area-sync-job.types'
 import type { LdaregSourceState } from './identity';
 
 /** snapshot canonical 버전. 직렬화가 바뀌면 올린다. */
-export const LAND_AREA_SYNC_CANONICAL_VERSION = 1;
+export const LAND_AREA_SYNC_CANONICAL_VERSION = 2;
+export const LADFRL_SCOPE_EVIDENCE_VERSION =
+    'land-area-sync.ladfrl-scope.v1' as const;
+export const LDAREG_REPLICATION_EVIDENCE_VERSION =
+    'land-area-sync.ldareg-replication.v2' as const;
 
 // ── scopeEvidence ─────────────────────────────────────────────────
 
@@ -74,6 +78,19 @@ export interface ScopeSnapshotInput {
     candidatePropertyUnitIds: string[];
     currentLandTuples: LandAreaSyncLandTuple[];
     proposedLandAreas: LandAreaSyncProposedArea[];
+    /** same-run LADFRL scope 면적. PNU 정렬·exact coverage는 호출 전 gate가 보장한다. */
+    ladfrlAreaEvidence: {
+        parcels: Array<{ pnu: string; area: string }>;
+        totalArea: string;
+    } | null;
+    /** LDAREG exact cross-PNU replica 근거. LADFRL branch는 null. */
+    replicationEvidence: {
+        canonicalSourcePnu: string;
+        comparedPnus: string[];
+        exactReplica: true;
+        rowCount: number;
+        rowMultisetDigest: string;
+    } | null;
     /** scopeHash 의 정렬 component/match digest 입력. */
     componentMatchDigest: unknown[];
     /** apply p_items(projectionInputDigest 원문). */
@@ -131,6 +148,27 @@ export function buildScopeSnapshot(input: ScopeSnapshotInput): LandAreaSyncScope
         propertyMembershipHash,
         currentLandTuples: input.currentLandTuples,
         proposedLandAreas: input.proposedLandAreas,
+        ladfrlAreaEvidence:
+            input.ladfrlAreaEvidence === null
+                ? null
+                : {
+                      version: LADFRL_SCOPE_EVIDENCE_VERSION,
+                      parcels: [...input.ladfrlAreaEvidence.parcels].sort((a, b) =>
+                          a.pnu.localeCompare(b.pnu)
+                      ),
+                      totalArea: input.ladfrlAreaEvidence.totalArea,
+                  },
+        replicationEvidence:
+            input.replicationEvidence === null
+                ? null
+                : {
+                      version: LDAREG_REPLICATION_EVIDENCE_VERSION,
+                      canonicalSourcePnu: input.replicationEvidence.canonicalSourcePnu,
+                      comparedPnus: [...input.replicationEvidence.comparedPnus].sort(),
+                      exactReplica: true,
+                      rowCount: input.replicationEvidence.rowCount,
+                      rowMultisetDigest: input.replicationEvidence.rowMultisetDigest,
+                  },
         projectionInputDigest,
         canonicalVersion: LAND_AREA_SYNC_CANONICAL_VERSION,
     };

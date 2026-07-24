@@ -28,9 +28,13 @@ import type {
 import { assembleAttachedPnus, type AtchJibunRowInput } from '../gis-shared/pnu';
 import { resolveBylotCounts, BYLOT_SOURCE_POLICY, type BylotResolution } from './bylot';
 import { classifyHousingType, type HousingClassification } from './classifier';
+import {
+    isOptionalRegistryManagementPkValid,
+    normalizeRegistryManagementPk,
+} from './registry-pk';
 
-export const SCOPE_HASH_VERSION = 'land-area-sync/scope-hash@1';
-export const EXTERNAL_SCOPE_DIGEST_VERSION = 'land-area-sync/external-scope-digest@1';
+export const SCOPE_HASH_VERSION = 'land-area-sync/scope-hash@2';
+export const EXTERNAL_SCOPE_DIGEST_VERSION = 'land-area-sync/external-scope-digest@2';
 
 // ── DB resolver 결과 (DESIGN §11 계약) ────────────────────────────
 
@@ -47,6 +51,9 @@ export interface DbScopeResolution {
     dbState: DbScopeState;
     rootBuildingIdentities: string[];
     componentPnus: string[];
+    /** LINKED positive-cache relation의 distinct base_pnu만 정렬한 집합. */
+    linkedBasePnus: string[];
+    /** LINKED component 전체 base∪attached PNU 집합. */
     linkedPnus: string[];
     linkedEvidenceKeys: string[];
     pendingEvidenceKeys: string[];
@@ -87,6 +94,7 @@ export function parseDbScopeResolution(data: unknown): DbScopeResolution {
         dbState,
         rootBuildingIdentities: asStringArray(o.rootBuildingIdentities),
         componentPnus: asStringArray(o.componentPnus),
+        linkedBasePnus: asStringArray(o.linkedBasePnus),
         linkedPnus: asStringArray(o.linkedPnus),
         linkedEvidenceKeys: asStringArray(o.linkedEvidenceKeys),
         pendingEvidenceKeys: asStringArray(o.pendingEvidenceKeys),
@@ -177,7 +185,17 @@ function scanRows<T>(scan: StrictScan<T>): T[] {
 }
 
 function normStr(v: unknown): string {
-    return typeof v === 'string' ? v.trim() : '';
+    if (typeof v === 'string') return v.trim();
+    if (typeof v === 'number' && Number.isSafeInteger(v)) return String(v);
+    return '';
+}
+
+function hasInvalidRequiredPk(rows: Array<{ mgmBldrgstPk?: unknown }>): boolean {
+    return rows.some((row) => normalizeRegistryManagementPk(row.mgmBldrgstPk) === null);
+}
+
+function hasInvalidOptionalUpPk(rows: Array<{ mgmUpBldrgstPk?: unknown }>): boolean {
+    return rows.some((row) => !isOptionalRegistryManagementPkValid(row.mgmUpBldrgstPk));
 }
 
 /**
@@ -189,7 +207,11 @@ function normStr(v: unknown): string {
  */
 export function resolveParcelScopeCompleteness(input: ParcelScopeInput): ParcelScopeResult {
     const { dbScope, baseScans, policy } = input;
-    const scannedPnus = [...new Set(baseScans.map((b) => b.pnu))].sort();
+    const scannedBasePnus = [...new Set(baseScans.map((b) => b.pnu))].sort();
+    const scannedPnus =
+        dbScope.dbState === 'LINKED'
+            ? [...new Set(dbScope.linkedPnus)].sort()
+            : scannedBasePnus;
 
     // ── row 수집 + 필수 provider scan 상태 검사 ──
     const titleRows: BrTitleRow[] = [];
@@ -216,8 +238,23 @@ export function resolveParcelScopeCompleteness(input: ParcelScopeInput): ParcelS
     }
 
     // ── 파생 계산(FAILED여도 digest는 방어적으로 계산) ──
-    const attachedPks = attachedRows.map((r) => normStr(r.mgmBldrgstPk)).filter((p) => p.length > 0);
-    const attached = assembleAttachedPnus(attachedRows as unknown as AtchJibunRowInput[]);
+    if (
+        hasInvalidRequiredPk(titleRows) ||
+        hasInvalidOptionalUpPk(titleRows) ||
+        hasInvalidRequiredPk(attachedRows) ||
+        hasInvalidRequiredPk(basisRows) ||
+        hasInvalidOptionalUpPk(basisRows)
+    ) {
+        scanFailure ??= 'PROVIDER_PROTOCOL_ERROR';
+    }
+    const attachedPks = attachedRows
+        .map((r) => normalizeRegistryManagementPk(r.mgmBldrgstPk))
+        .filter((p): p is string => p !== null);
+    const normalizedAttachedRows = attachedRows.map((row) => ({
+        ...row,
+        mgmBldrgstPk: normalizeRegistryManagementPk(row.mgmBldrgstPk) ?? '',
+    }));
+    const attached = assembleAttachedPnus(normalizedAttachedRows as unknown as AtchJibunRowInput[]);
     const bylot = resolveBylotCounts({ policy, titleRows, basisRows, attachedPks, basisFallbackInvoked });
     const classification = classifyHousingType({
         titleRows: titleRows.map((r) => ({ regstrGbCd: r.regstrGbCd, mainPurpsCd: r.mainPurpsCd, mainPurpsCdNm: r.mainPurpsCdNm })),
@@ -255,6 +292,18 @@ export function resolveParcelScopeCompleteness(input: ParcelScopeInput): ParcelS
     if (dbScope.dbState === 'BLOCKING_EVIDENCE' || dbScope.blockingEvidence.length > 0 || dbScope.openUnresolvedEvidenceKeys.length > 0) {
         review.push('SCOPE_BLOCKING_EVIDENCE');
     }
+    if (dbScope.dbState === 'LINKED') {
+        const linkedBases = [...new Set(dbScope.linkedBasePnus)].sort();
+        const linkedScope = new Set(dbScope.linkedPnus);
+        if (
+            linkedBases.length === 0 ||
+            linkedBases.length !== scannedBasePnus.length ||
+            linkedBases.some((pnu, index) => pnu !== scannedBasePnus[index]) ||
+            linkedBases.some((pnu) => !linkedScope.has(pnu))
+        ) {
+            review.push('SCOPE_NOT_LINKED');
+        }
+    }
     // 분류할 표제부 없음 (TITLE_COMPLETE_ZERO)
     if (anyTitleZero) {
         review.push('BUILDING_CLASSIFICATION_CONFLICT');
@@ -268,7 +317,7 @@ export function resolveParcelScopeCompleteness(input: ParcelScopeInput): ParcelS
     // resolved bylotCnt vs distinct attached PNU 수 정합성 (per PK)
     const distinctAttachedByPk = new Map<string, Set<string>>();
     for (const p of attached.pairs) {
-        const pk = normStr(p.mgmBldrgstPk);
+        const pk = normalizeRegistryManagementPk(p.mgmBldrgstPk);
         if (!pk) continue;
         const set = distinctAttachedByPk.get(pk) ?? new Set<string>();
         set.add(p.attachedPnu);
@@ -289,12 +338,12 @@ export function resolveParcelScopeCompleteness(input: ParcelScopeInput): ParcelS
         review.push(classification.issue);
     }
     // 일반건축물(LADFRL 계열) multi-PNU 금지
-    const effectivePnuCount = dbScope.dbState === 'LINKED' ? new Set(dbScope.linkedPnus).size : scannedPnus.length;
+    const effectivePnuCount = dbScope.dbState === 'LINKED' ? new Set(dbScope.linkedPnus).size : scannedBasePnus.length;
     if (classification.kind === 'CLASSIFIED' && classification.family === 'LADFRL' && effectivePnuCount > 1) {
         review.push('MULTI_PNU_GENERAL_BUILDING');
     }
     // LINKED인데 linkedPnus와 complete attached scan이 exact 일치하지 않으면 REVIEW
-    if (dbScope.dbState === 'LINKED' && !linkedExactMatch(dbScope, scannedPnus, attached.pairs)) {
+    if (dbScope.dbState === 'LINKED' && !linkedExactMatch(dbScope, scannedBasePnus, attached.pairs)) {
         review.push('SCOPE_NOT_LINKED');
     }
 
@@ -310,7 +359,7 @@ export function resolveParcelScopeCompleteness(input: ParcelScopeInput): ParcelS
     if (dbScope.dbState === 'NO_EVIDENCE') {
         // 관계 없음 + same-run ATTACHED_COMPLETE_ZERO + 관리 PK별 bylot0 + 단일 anchor + 분류 성립
         const allZero = bylot.evidence.length > 0 && bylot.evidence.every((e) => e.count === 0);
-        if (scannedPnus.length === 1 && classification.kind === 'CLASSIFIED' && allZero) {
+        if (scannedBasePnus.length === 1 && classification.kind === 'CLASSIFIED' && allZero) {
             return finalize('SINGLE_SCOPE_CONFIRMATION_REQUIRED', []);
         }
         return finalize('REVIEW_REQUIRED', ['SCOPE_NOT_LINKED']);
@@ -446,7 +495,7 @@ function buildExternalScopeDigest(baseScans: BasePnuScan[], bylot: BylotResoluti
         .map((b) => {
             const titleIdentity = sortedByCanonical(
                 scanRows(b.title).map((r) => ({
-                    mgmBldrgstPk: normStr(r.mgmBldrgstPk),
+                    mgmBldrgstPk: normalizeRegistryManagementPk(r.mgmBldrgstPk),
                     regstrGbCd: normStr(r.regstrGbCd),
                     mainPurpsCd: normStr(r.mainPurpsCd),
                     mainPurpsCdNm: normStr(r.mainPurpsCdNm),
@@ -455,13 +504,18 @@ function buildExternalScopeDigest(baseScans: BasePnuScan[], bylot: BylotResoluti
             );
             const attachedIdentity = sortedByCanonical(
                 scanRows(b.attached).map((r) => ({
-                    mgmBldrgstPk: normStr(r.mgmBldrgstPk),
+                    mgmBldrgstPk: normalizeRegistryManagementPk(r.mgmBldrgstPk),
                     base: `${normStr(r.sigunguCd)}${normStr(r.bjdongCd)}${normStr(r.platGbCd)}${normStr(r.bun)}${normStr(r.ji)}`,
                     atch: `${normStr(r.atchSigunguCd)}${normStr(r.atchBjdongCd)}${normStr(r.atchPlatGbCd)}${normStr(r.atchBun)}${normStr(r.atchJi)}`,
                 }))
             );
             const basisIdentity = b.basis
-                ? sortedByCanonical(scanRows(b.basis).map((r) => ({ mgmBldrgstPk: normStr(r.mgmBldrgstPk), bylotCnt: normStr(r.bylotCnt) })))
+                ? sortedByCanonical(
+                      scanRows(b.basis).map((r) => ({
+                          mgmBldrgstPk: normalizeRegistryManagementPk(r.mgmBldrgstPk),
+                          bylotCnt: normStr(r.bylotCnt),
+                      }))
+                  )
                 : null;
             return {
                 pnu: b.pnu,

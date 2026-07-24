@@ -24,7 +24,7 @@ function obs(over: Partial<LdaregObservationInput> = {}): LdaregObservationInput
 
 // ── source identity: primary vs fallback (§12.2) ─────────────────────
 
-test('agbldgSn이 PNU 내 유일하면 PRIMARY identity(targetPnu+agbldgSn)', () => {
+test('agbldgSn이 PNU 내 유일하면 PRIMARY identity(rootIdentity+agbldgSn v2)', () => {
     const r = dedupLdaregObservations([
         obs({ agbldgSn: '1', dong: '101동', ho: '101호' }),
         obs({ agbldgSn: '2', dong: '101동', ho: '102호' }),
@@ -32,6 +32,21 @@ test('agbldgSn이 PNU 내 유일하면 PRIMARY identity(targetPnu+agbldgSn)', ()
     assert.equal(r.records.length, 2);
     assert.equal(r.records.every((x) => x.identity.kind === 'PRIMARY'), true);
     assert.equal(r.issues.length, 0);
+});
+
+test('canonical v2 identity는 target PNU와 독립적이고 root가 바뀌면 달라진다', () => {
+    const base = dedupLdaregObservations([
+        obs({ targetPnu: '1111011700100010000', identityRoot: '1002003004005', agbldgSn: '1' }),
+    ]);
+    const attached = dedupLdaregObservations([
+        obs({ targetPnu: '1111011700100010001', identityRoot: '1002003004005', agbldgSn: '1' }),
+    ]);
+    const otherRoot = dedupLdaregObservations([
+        obs({ targetPnu: '1111011700100010001', identityRoot: '1002003004006', agbldgSn: '1' }),
+    ]);
+    assert.equal(base.records[0].identity.value, attached.records[0].identity.value);
+    assert.notEqual(base.records[0].identity.value, otherRoot.records[0].identity.value);
+    assert.match(base.records[0].identity.value, /^primary:v2:[0-9a-f]{64}$/);
 });
 
 test('동일 obs 반복은 1건으로 축약(stable identity, CURRENT)', () => {

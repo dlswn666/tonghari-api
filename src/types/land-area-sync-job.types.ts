@@ -96,6 +96,30 @@ export interface LandAreaSyncScopeSnapshot {
     propertyMembershipHash: string;
     currentLandTuples: LandAreaSyncLandTuple[];
     proposedLandAreas: LandAreaSyncProposedArea[];
+    /** LDAREG 분모 검증에 사용한 immutable same-run LADFRL scope 근거. */
+    ladfrlAreaEvidence: {
+        version: 'land-area-sync.ladfrl-scope.v1';
+        /** distinct resolved scope PNU별 canonical 양수면적(PNU 오름차순). */
+        parcels: Array<{ pnu: string; area: string }>;
+        /** parcels 면적의 canonical decimal 합계. */
+        totalArea: string;
+    } | null;
+    /**
+     * multi-PNU LDAREG가 query PNU만 다른 exact replica임을 증명하는 immutable 근거.
+     * LADFRL branch는 null이다.
+     */
+    replicationEvidence: {
+        version: 'land-area-sync.ldareg-replication.v2';
+        /** scanned set에 포함된 base PNU 중 정렬 첫 값. */
+        canonicalSourcePnu: string;
+        /** scannedPnus와 exact 같은 정렬 PNU 집합. */
+        comparedPnus: string[];
+        exactReplica: true;
+        /** query-specific pnu를 제외한 canonical LDAREG multiset 행 수(중복 포함). */
+        rowCount: number;
+        /** canonical multiset SHA-256. */
+        rowMultisetDigest: string;
+    } | null;
     projectionInputDigest: string;
     canonicalVersion: number;
 }

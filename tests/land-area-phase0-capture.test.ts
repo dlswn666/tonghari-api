@@ -37,8 +37,10 @@ import {
 const ZERO_PNU = '1168010100107000000';
 const POSITIVE_PNU = '1168010100107360024';
 const ATTACHED_PNU = '1168010100107360025';
-const ZERO_PK = 'RAW-MGM-ZERO';
-const POSITIVE_PK = 'RAW-MGM-POSITIVE';
+const ZERO_PK = '1001001001001';
+const ZERO_UP_PK = '1001001001002';
+const POSITIVE_PK = '2002002002001';
+const POSITIVE_UP_PK = '2002002002002';
 const SECRET = 'SECRET-CANARY-DO-NOT-EMIT';
 const DOMAIN = 'secret-domain.example';
 const OWNER = 'OWNER-CANARY-DO-NOT-EMIT';
@@ -77,7 +79,7 @@ function titleRows(pnu: string): BrTitleRow[] {
             {
                 pnu,
                 mgmBldrgstPk: ZERO_PK,
-                mgmUpBldrgstPk: `${ZERO_PK}-UP`,
+                mgmUpBldrgstPk: ZERO_UP_PK,
                 bylotCnt: '0',
                 regstrGbCd: '1',
                 regstrGbCdNm: '일반건축물대장',
@@ -93,7 +95,7 @@ function titleRows(pnu: string): BrTitleRow[] {
         {
             pnu,
             mgmBldrgstPk: POSITIVE_PK,
-            mgmUpBldrgstPk: `${POSITIVE_PK}-UP`,
+            mgmUpBldrgstPk: POSITIVE_UP_PK,
             bylotCnt: '1',
             regstrGbCd: '2',
             regstrGbCdNm: '집합건축물대장',
@@ -147,11 +149,12 @@ function attachedRows(pnu: string): BrAtchJibunRow[] {
 }
 
 function exposRows(pnu: string): BrExposRow[] {
+    if (pnu === ATTACHED_PNU) return [];
     return [
         {
             pnu,
             mgmBldrgstPk: pnu === ZERO_PNU ? ZERO_PK : POSITIVE_PK,
-            mgmUpBldrgstPk: pnu === ZERO_PNU ? `${ZERO_PK}-UP` : `${POSITIVE_PK}-UP`,
+            mgmUpBldrgstPk: pnu === ZERO_PNU ? ZERO_UP_PK : POSITIVE_UP_PK,
             dongNm: UNIT_DONG,
             flrNoNm: UNIT_FLOOR,
             hoNm: UNIT_HO,
@@ -167,7 +170,12 @@ function ladfrlRows(pnu: string): LadfrlRow[] {
     return [
         {
             pnu,
-            lndpclAr: pnu === ZERO_PNU ? '100.5' : '15622.1',
+            lndpclAr:
+                pnu === ZERO_PNU
+                    ? '100.5'
+                    : pnu === ATTACHED_PNU
+                      ? '187'
+                      : '177.6',
             lndcgrCode: '08',
             ownerNm: OWNER,
             [UNKNOWN_KEY]: SECRET,
@@ -181,7 +189,7 @@ function ldaregRows(pnu: string): LdaregRow[] {
         {
             pnu,
             agbldgSn: 'RAW-AGBLDG-SN',
-            ldaQotaRate: '181.7/15622.1',
+            ldaQotaRate: '24.6/364.6',
             clsSeCode: '0',
             clsSeCodeNm: '유효',
             buldNm: UNIT_DONG,
@@ -320,7 +328,7 @@ test('dry plan: 비식별 계획만 만들고 HTTP 호출은 0회다', () => {
     assert.match(plan.samples[0].aliasHash, /^[a-f0-9]{64}$/);
 });
 
-test('live capture: sample마다 6 endpoint를 고정 순서로 순차 호출하고 basis도 항상 호출한다', async () => {
+test('live capture: sample 6 endpoint 뒤 linked scope LADFRL/LDAREG/expos를 순차 호출한다', async () => {
     const { implementation, calls } = adapter();
     const artifact = await captureLandAreaPhase0({
         manifest: manifest(),
@@ -330,22 +338,25 @@ test('live capture: sample마다 6 endpoint를 고정 순서로 순차 호출하
     });
 
     assert.equal(artifact.gate.status, 'PASS');
+    const baseEndpointOrder = [
+        'getBrTitleInfo',
+        'getBrBasisOulnInfo',
+        'getBrAtchJibunInfo',
+        'getBrExposInfo',
+        'ladfrlList',
+        'ldaregList',
+    ];
+    for (const pnu of [ZERO_PNU, POSITIVE_PNU]) {
+        assert.deepEqual(
+            calls
+                .filter((call) => call.pnu === pnu)
+                .map((call) => call.endpoint),
+            baseEndpointOrder
+        );
+    }
     assert.deepEqual(
-        calls.map((call) => call.endpoint),
-        [
-            'getBrTitleInfo',
-            'getBrBasisOulnInfo',
-            'getBrAtchJibunInfo',
-            'getBrExposInfo',
-            'ladfrlList',
-            'ldaregList',
-            'getBrTitleInfo',
-            'getBrBasisOulnInfo',
-            'getBrAtchJibunInfo',
-            'getBrExposInfo',
-            'ladfrlList',
-            'ldaregList',
-        ]
+        calls.filter((call) => call.pnu === ATTACHED_PNU).map((call) => call.endpoint),
+        ['ladfrlList', 'ldaregList', 'getBrExposInfo']
     );
     assert.deepEqual(
         artifact.samples.map((sample) => sample.aliasHash),
@@ -386,6 +397,129 @@ test('ZERO/POSITIVE: exact 관리 PK의 bylotCnt와 부속지번 수를 교차�
         positive.evidence.bylotByManagementPk.records[0].managementPkHash,
         /^[a-f0-9]{64}$/
     );
+    assert.equal(positive.evidence.scopeLadfrl.status, 'PASS');
+    assert.deepEqual(
+        positive.evidence.scopeLadfrl.records.map((record) => record.area),
+        ['177.6', '187']
+    );
+    assert.equal(positive.evidence.scopeLadfrl.totalArea, '364.6');
+    assert.equal(positive.evidence.ldaregReplication.status, 'PASS');
+    assert.equal(positive.evidence.ldaregReplication.rowCount, 1);
+    assert.equal(positive.evidence.ldaregReplication.comparedPnuHashes.length, 2);
+    assert.match(
+        positive.evidence.ldaregReplication.rowMultisetDigest ?? '',
+        /^[a-f0-9]{64}$/
+    );
+});
+
+test('관리 PK numeric 응답은 digit string과 같은 canonical identity로 처리한다', async () => {
+    const numeric = adapter({
+        async scanTitle(pnu) {
+            numeric.calls.push({ endpoint: 'getBrTitleInfo', pnu });
+            return complete(
+                titleRows(pnu).map((row) => ({
+                    ...row,
+                    mgmBldrgstPk: Number(row.mgmBldrgstPk),
+                    ...(row.mgmUpBldrgstPk === undefined
+                        ? {}
+                        : { mgmUpBldrgstPk: Number(row.mgmUpBldrgstPk) }),
+                    bylotCnt: Number(row.bylotCnt),
+                }))
+            );
+        },
+        async scanBasis(pnu) {
+            numeric.calls.push({ endpoint: 'getBrBasisOulnInfo', pnu });
+            return complete(
+                basisRows(pnu).map((row) => ({
+                    ...row,
+                    mgmBldrgstPk: Number(row.mgmBldrgstPk),
+                    bylotCnt: Number(row.bylotCnt),
+                }))
+            );
+        },
+        async scanAttached(pnu) {
+            numeric.calls.push({ endpoint: 'getBrAtchJibunInfo', pnu });
+            return complete(
+                attachedRows(pnu).map((row) => ({
+                    ...row,
+                    mgmBldrgstPk: Number(row.mgmBldrgstPk),
+                }))
+            );
+        },
+        async scanExpos(pnu) {
+            numeric.calls.push({ endpoint: 'getBrExposInfo', pnu });
+            return complete(
+                exposRows(pnu).map((row) => ({
+                    ...row,
+                    mgmBldrgstPk: Number(row.mgmBldrgstPk),
+                    mgmUpBldrgstPk: Number(row.mgmUpBldrgstPk),
+                }))
+            );
+        },
+    });
+    const artifact = await captureLandAreaPhase0({
+        manifest: manifest(),
+        adapter: numeric.implementation,
+        buildingHubAuth: HUB_AUTH,
+        vworldAuth: VWORLD_AUTH,
+    });
+    assert.equal(artifact.gate.status, 'PASS');
+});
+
+test('unsafe number·음수·소수·invalid string 관리 PK는 endpoint별로 fail-closed한다', async () => {
+    const unsafe = adapter({
+        async scanTitle(pnu) {
+            unsafe.calls.push({ endpoint: 'getBrTitleInfo', pnu });
+            return complete(
+                titleRows(pnu).map((row) => ({
+                    ...row,
+                    mgmBldrgstPk: Number.MAX_SAFE_INTEGER + 1,
+                }))
+            );
+        },
+        async scanBasis(pnu) {
+            unsafe.calls.push({ endpoint: 'getBrBasisOulnInfo', pnu });
+            return complete(
+                basisRows(pnu).map((row) => ({
+                    ...row,
+                    mgmBldrgstPk: 'PK-INVALID',
+                }))
+            );
+        },
+        async scanAttached(pnu) {
+            unsafe.calls.push({ endpoint: 'getBrAtchJibunInfo', pnu });
+            return complete(
+                attachedRows(pnu).map((row) => ({
+                    ...row,
+                    mgmBldrgstPk: -1,
+                }))
+            );
+        },
+        async scanExpos(pnu) {
+            unsafe.calls.push({ endpoint: 'getBrExposInfo', pnu });
+            return complete(
+                exposRows(pnu).map((row) => ({
+                    ...row,
+                    mgmBldrgstPk: 1.5,
+                }))
+            );
+        },
+    });
+    const artifact = await captureLandAreaPhase0({
+        manifest: manifest(),
+        adapter: unsafe.implementation,
+        buildingHubAuth: HUB_AUTH,
+        vworldAuth: VWORLD_AUTH,
+    });
+    assert.equal(artifact.gate.status, 'FAIL');
+    for (const code of [
+        'TITLE_PK_INVALID',
+        'BASIS_PK_INVALID',
+        'ATTACHED_PK_INVALID',
+        'EXPOS_PK_INVALID',
+    ]) {
+        assert.ok(artifact.gate.failureCodes.includes(code), code);
+    }
 });
 
 test('exact-PK gate는 일부 PK만 맞거나 title에 없는 attached PK가 있어도 false-green하지 않는다', async () => {
@@ -396,7 +530,7 @@ test('exact-PK gate는 일부 PK만 맞거나 title에 없는 attached PK가 있
             return complete([
                 ...titleRows(pnu),
                 {
-                    mgmBldrgstPk: 'SECOND-MGM-PK',
+                    mgmBldrgstPk: '3003003003003',
                     bylotCnt: '1',
                     regstrGbCd: '2',
                     mainPurpsCd: '02003',
@@ -565,7 +699,7 @@ test('scan FAILED/INCOMPLETE를 그대로 보존하고 나머지 endpoint도 호
     assert.ok(artifact.gate.failureCodes.includes('SCAN_INCOMPLETE'));
     assert.equal(zero.policyCandidate, null);
     assert.equal(zero.checks.titleBasis.status, 'FAIL');
-    assert.equal(calls.length, 12);
+    assert.equal(calls.length, 15);
     assert.equal(JSON.stringify(artifact).includes(SECRET), false);
 });
 
@@ -615,7 +749,9 @@ test('artifact는 raw PNU·관리 PK·agbldgSn·unit identity·PII·secret·doma
         POSITIVE_PNU,
         ATTACHED_PNU,
         ZERO_PK,
+        ZERO_UP_PK,
         POSITIVE_PK,
+        POSITIVE_UP_PK,
         'RAW-AGBLDG-SN',
         SECRET,
         DOMAIN,
@@ -641,8 +777,10 @@ test('artifact는 raw PNU·관리 PK·agbldgSn·unit identity·PII·secret·doma
     ]) {
         assert.equal(serialized.includes(publicLabel), true, `artifact omitted: ${publicLabel}`);
     }
-    assert.match(serialized, /181\.7\/15622\.1/);
-    assert.match(serialized, /15622\.1/);
+    assert.match(serialized, /24\.6\/364\.6/);
+    assert.match(serialized, /177\.6/);
+    assert.match(serialized, /187/);
+    assert.match(serialized, /364\.6/);
     assert.match(serialized, /02003/);
     assert.match(serialized, /지하#층/);
 });
@@ -686,7 +824,7 @@ test('LDAREG는 같은 PNU의 LADFRL 면적과 분모가 허용 오차 안에서
             return complete(
                 ldaregRows(pnu).map((row) => ({
                     ...row,
-                    ldaQotaRate: '181.7/9999.9',
+                    ldaQotaRate: '24.6/9999.9',
                 }))
             );
         },
@@ -729,7 +867,7 @@ test('LDAREG는 같은 PNU의 LADFRL 면적과 분모가 허용 오차 안에서
                 ...ladfrlRows(pnu),
                 {
                     ...ladfrlRows(pnu)[0],
-                    lndpclAr: pnu === ZERO_PNU ? '101.5' : '15623.1',
+                    lndpclAr: pnu === ZERO_PNU ? '101.5' : '178.6',
                 },
             ]);
         },
@@ -742,8 +880,35 @@ test('LDAREG는 같은 PNU의 LADFRL 면적과 분모가 허용 오차 안에서
     });
     assert.equal(third.gate.status, 'FAIL');
     assert.ok(third.gate.failureCodes.includes('LADFRL_AREA_CONFLICT'));
+    assert.ok(third.gate.failureCodes.includes('LADFRL_SCOPE_AREA_INVALID'));
     assert.ok(third.gate.failureCodes.includes('LDAREG_DENOMINATOR_MISMATCH'));
     assert.ok(third.gate.failureCodes.includes('LADFRL_POSITIVE_EVIDENCE_MISSING'));
+});
+
+test('linked PNU의 LDAREG ratio가 base canonical multiset과 다르면 Phase 0 gate가 차단한다', async () => {
+    const mutated = adapter({
+        async scanLdareg(pnu) {
+            mutated.calls.push({ endpoint: 'ldaregList', pnu });
+            const rows = ldaregRows(pnu).map((row) =>
+                pnu === ATTACHED_PNU
+                    ? { ...row, ldaQotaRate: '25/364.6' }
+                    : row
+            );
+            return complete(rows);
+        },
+    });
+    const artifact = await captureLandAreaPhase0({
+        manifest: manifest(),
+        adapter: mutated.implementation,
+        buildingHubAuth: HUB_AUTH,
+        vworldAuth: VWORLD_AUTH,
+    });
+    const positive = artifact.samples.find(
+        (sample) => sample.expectedBylot === 'POSITIVE'
+    )!;
+    assert.equal(positive.evidence.ldaregReplication.status, 'FAIL');
+    assert.ok(positive.failureCodes.includes('LDAREG_SCOPE_REPLICA_INVALID'));
+    assert.equal(artifact.gate.status, 'FAIL');
 });
 
 test('sanitized inventory는 200건으로 제한하고 전체 수·digest·truncated를 남긴다', async () => {
