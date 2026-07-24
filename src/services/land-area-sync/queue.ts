@@ -31,8 +31,6 @@ import {
     getScopedJob,
     readLandAreaSync,
     freezeScopeSnapshot,
-    writeDiscoveryTerminal,
-    markScopedFailed,
     type LandAreaSyncJobRow,
 } from './repository';
 import {
@@ -40,8 +38,18 @@ import {
     readBuildingUnitCandidates,
     readCurrentLandTuples,
 } from './readers';
-import { runLandAreaSyncJob, type LandAreaSyncDeps } from './service';
-import type { LandAreaSyncDiscoveryRequest, LandAreaSyncJobInfo } from '../../types/land-area-sync-job.types';
+import {
+    runLandAreaSyncJob,
+    type LandAreaSyncDeps,
+} from './service';
+import {
+    markScopedFailed,
+    writeDiscoveryTerminal,
+} from './finalizer';
+import type {
+    LandAreaSyncDiscoveryRequest,
+    LandAreaSyncJobInfo,
+} from '../../types/land-area-sync-job.types';
 
 const logger = createLogger('LAND-AREA-SYNC-QUEUE');
 
@@ -118,7 +126,7 @@ class LandAreaSyncQueueService {
             }
         } catch (admissionError) {
             await markScopedFailed(
-                database.getClient(),
+                database,
                 jobId,
                 request.unionId,
                 'queue admission 실패로 작업을 시작하지 못했습니다.'
@@ -188,7 +196,7 @@ class LandAreaSyncQueueService {
                 this.jobs.delete(key);
                 const message = err instanceof Error ? err.message : 'LAND_AREA_SYNC 워커 오류';
                 logger.error(`LAND_AREA_SYNC job ${jobId} fatal error: ${message}`);
-                await markScopedFailed(getSupabaseService(databaseTarget).getClient(), jobId, unionId, message).catch(
+                await markScopedFailed(getSupabaseService(databaseTarget), jobId, unionId, message).catch(
                     () => undefined
                 );
             });
@@ -224,8 +232,20 @@ class LandAreaSyncQueueService {
                 applyRpc: (params) => database.applyPropertyLandAreaSync(params),
                 getScopedJob: (jobId, unionId) => getScopedJob(client, jobId, unionId),
                 freezeScopeSnapshot: (jobId, unionId, patch) => freezeScopeSnapshot(client, jobId, unionId, patch),
-                writeDiscoveryTerminal: (jobId, unionId, input) => writeDiscoveryTerminal(client, jobId, unionId, input),
-                markScopedFailed: (jobId, unionId, message) => markScopedFailed(client, jobId, unionId, message),
+                writeDiscoveryTerminal: (jobId, unionId, input) =>
+                    writeDiscoveryTerminal(
+                        database,
+                        jobId,
+                        unionId,
+                        input
+                    ),
+                markScopedFailed: (jobId, unionId, message) =>
+                    markScopedFailed(
+                        database,
+                        jobId,
+                        unionId,
+                        message
+                    ),
                 readBuildingUnits: (unionId, scopePnus) => readBuildingUnitCandidates(client, unionId, scopePnus),
                 readPropertyUnits: (unionId, scopePnus) => readPropertyUnitCandidates(client, unionId, scopePnus),
                 readCurrentLandTuples: (unionId, ids) => readCurrentLandTuples(client, unionId, ids),

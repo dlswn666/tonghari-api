@@ -158,6 +158,10 @@ apply RPC는 scopeState/outcome/counts/issues/`issuesTotal`/`issuesTruncated`/re
 `JOB_POLL_SOFT_TIMEOUT_AFTER_TERMINAL`로 FAIL하므로 cancel endpoint나 새 DB lock 없이도
 늦은 job write와 operation lock 조기 해제가 분리되지 않는다. terminal을 영구 확인할 수
 없으면 guardian도 lock을 영구 보유하는 것이 의도된 fail-closed 상태다.
+discovery/review/failed terminal도 direct `sync_jobs` UPDATE를 쓰지 않고
+`finalize_land_area_sync_job_v1`이 phase/outcome/counts/issues를 검증한 뒤 같은 방식의 DB
+transaction timestamp receipt로 원자 종결한다. APPLIED/PARTIAL은 이 finalizer가 거부하며
+기존 atomic apply RPC만 생성한다.
 discovery/confirmation POST 응답 자체가 유실된 경우도 실패로 바로 반환하지 않는다.
 runner가 POST 전에 UUID admission key를 생성하고, 5xx/timeout 뒤에는 `latest`나 job id를
 추정하지 않고 인증된 union+admissionKey+sourceDiscoveryJobId endpoint만 최대 10회 조회한다.

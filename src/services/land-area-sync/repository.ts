@@ -13,12 +13,7 @@ import {
     LAND_AREA_SYNC_JOB_TYPE,
     LAND_AREA_SYNC_SCHEMA_VERSION,
     type LandAreaSyncPreview,
-    type LandAreaSyncCounts,
-    type LandAreaSyncIssue,
-    type LandAreaSyncOutcome,
-    type LandAreaSyncScopeState,
 } from '../../types/land-area-sync-job.types';
-import { emptyCounts } from './preview';
 
 /** sync_jobs 행(LAND_AREA_SYNC 스코프에서 읽는 컬럼). */
 export interface LandAreaSyncJobRow {
@@ -147,11 +142,7 @@ async function mergeLandAreaSync(
     client: SupabaseClient,
     jobId: string,
     unionId: string,
-    patch:
-        | Record<string, unknown>
-        | ((
-              current: Record<string, unknown>
-          ) => Record<string, unknown>)
+    patch: Record<string, unknown>
 ): Promise<Record<string, unknown>> {
     const { data, error } = await client
         .from('sync_jobs')
@@ -171,11 +162,9 @@ async function mergeLandAreaSync(
         preview.landAreaSync && typeof preview.landAreaSync === 'object'
             ? (preview.landAreaSync as Record<string, unknown>)
             : {};
-    const resolvedPatch =
-        typeof patch === 'function' ? patch(land) : patch;
     return {
         ...preview,
-        landAreaSync: { ...land, ...resolvedPatch },
+        landAreaSync: { ...land, ...patch },
     };
 }
 
@@ -208,124 +197,5 @@ export async function freezeScopeSnapshot(
     if (error) {
         throw Object.assign(new Error('snapshot CAS 고정 실패'), { code: 'SNAPSHOT_CAS_FAILED', cause: error });
     }
-    return data?.id === jobId;
-}
-
-export interface TerminalInput {
-    status: 'COMPLETED' | 'FAILED';
-    scopeState: LandAreaSyncScopeState;
-    outcome: LandAreaSyncOutcome;
-    counts: LandAreaSyncCounts;
-    issues: LandAreaSyncIssue[];
-    issuesTotal: number;
-    issuesTruncated: boolean;
-    errorLog?: string;
-}
-
-/**
- * discovery 경로 terminal 기록(§14.2). 보호 대상 6키는 건드리지 않고 scopeState/outcome/counts/
- * issues 만 병합한다. status=PROCESSING 에서만 전이한다.
- */
-export async function writeDiscoveryTerminal(
-    client: SupabaseClient,
-    jobId: string,
-    unionId: string,
-    input: TerminalInput
-): Promise<boolean> {
-    const finalizedAt = new Date().toISOString();
-    const previewData = await mergeLandAreaSync(client, jobId, unionId, {
-        scopeState: input.scopeState,
-        outcome: input.outcome,
-        counts: input.counts,
-        issues: input.issues,
-        issuesTotal: input.issuesTotal,
-        issuesTruncated: input.issuesTruncated,
-        workerFinalization: { version: 1, finalizedAt },
-    });
-    const update: Record<string, unknown> = {
-        status: input.status,
-        progress: 100,
-        preview_data: previewData,
-        updated_at: finalizedAt,
-    };
-    if (input.errorLog !== undefined) update.error_log = input.errorLog;
-    const { data, error } = await client
-        .from('sync_jobs')
-        .update(update)
-        .eq('id', jobId)
-        .eq('union_id', unionId)
-        .eq('job_type', LAND_AREA_SYNC_JOB_TYPE)
-        .eq('status', 'PROCESSING')
-        .select('id')
-        .maybeSingle();
-    if (error) {
-        throw Object.assign(new Error('terminal 기록 실패'), { code: 'TERMINAL_WRITE_FAILED', cause: error });
-    }
-    return data?.id === jobId;
-}
-
-/**
- * id+union+type 스코프 FAILED 기록. RPC EXCEPTION(rollback) 후 job 을 FAILED 로 남기거나
- * admission 실패 시 사용한다. scopeState=FAILED·outcome=FAILED 로 병합한다.
- *
- * status=PROCESSING 으로 스코프해 이미 terminal(COMPLETED)에 도달한 job 이 사후 조회 실패 등으로
- * FAILED 로 뒤집히는 경로를 차단한다(I3 — apply RPC 성공 후 post-completion read throw → queue
- * fatal catch → markScopedFailed 가 COMPLETED job 을 FAILED 로 만드는 것을 막는다).
- */
-export async function markScopedFailed(
-    client: SupabaseClient,
-    jobId: string,
-    unionId: string,
-    message: string
-): Promise<boolean> {
-    const finalizedAt = new Date().toISOString();
-    const previewData = await mergeLandAreaSync(
-        client,
-        jobId,
-        unionId,
-        (current) => {
-            const issues = Array.isArray(current.issues)
-                ? current.issues
-                : [];
-            const issuesTotal =
-                Number.isSafeInteger(current.issuesTotal) &&
-                (current.issuesTotal as number) >= issues.length
-                    ? (current.issuesTotal as number)
-                    : issues.length;
-            return {
-                scopeState: 'FAILED',
-                outcome: 'FAILED',
-                counts:
-                    current.counts &&
-                    typeof current.counts === 'object' &&
-                    !Array.isArray(current.counts)
-                        ? current.counts
-                        : emptyCounts(),
-                issues,
-                issuesTotal,
-                issuesTruncated:
-                    typeof current.issuesTruncated === 'boolean'
-                        ? current.issuesTruncated
-                        : issuesTotal > issues.length,
-                workerFinalization: { version: 1, finalizedAt },
-            };
-        }
-    );
-    const { data, error } = await client
-        .from('sync_jobs')
-        .update({
-            status: 'FAILED',
-            progress: 100,
-            error_log: message,
-            preview_data: previewData,
-            updated_at: finalizedAt,
-        })
-        .eq('id', jobId)
-        .eq('union_id', unionId)
-        .eq('job_type', LAND_AREA_SYNC_JOB_TYPE)
-        .eq('status', 'PROCESSING')
-        .select('id')
-        .maybeSingle();
-    if (error) return false;
     return data?.id === jobId;
 }

@@ -75,7 +75,11 @@ export interface LandAreaSyncScanDeps {
 export interface LandAreaSyncTerminalInput {
     status: 'COMPLETED' | 'FAILED';
     scopeState: LandAreaSyncScopeState;
-    outcome: LandAreaSyncOutcome;
+    /** APPLIED/PARTIAL terminal은 atomic apply RPC에서만 생성한다. */
+    outcome: Exclude<
+        LandAreaSyncOutcome,
+        'APPLIED' | 'PARTIAL'
+    >;
     counts: LandAreaSyncCounts;
     issues: LandAreaSyncIssue[];
     issuesTotal: number;
@@ -809,7 +813,10 @@ async function finalizeDiscoveryTerminal(
     input: {
         status: 'COMPLETED' | 'FAILED';
         scopeState: LandAreaSyncScopeState;
-        outcome: LandAreaSyncOutcome;
+        outcome: Exclude<
+            LandAreaSyncOutcome,
+            'APPLIED' | 'PARTIAL'
+        >;
         issues: LandAreaSyncIssue[];
         counts: LandAreaSyncCounts;
         errorLog?: string;

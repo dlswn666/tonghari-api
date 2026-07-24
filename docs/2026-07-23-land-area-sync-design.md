@@ -953,6 +953,14 @@ apply_property_land_area_sync_v1(
 
 그 뒤 job의 external snapshot 대조, DB scope hash 재검증, freshness 검증, lifecycle 적용, projection을 수행한다. `p_result_summary={counts,extraIssues}`의 extra issue는 DB allowlist로 다시 정제하고 RPC 산출 issue와 dedup/cap한다. 최종 `scopeState/outcome/counts/issues/issuesTotal/issuesTruncated/workerFinalization`과 `status/progress`는 같은 transaction의 한 UPDATE에서 확정한다. API worker는 성공 뒤 별도 preview UPDATE를 하지 않는다.
 
+discovery/review/failed terminal은
+`public.finalize_land_area_sync_job_v1(uuid,uuid,text,text,text,jsonb,jsonb,integer,boolean,text)`
+한 경로로만 종결한다. API는 union/job/status/scopeState/outcome/counts/issues/total/truncated/errorLog를
+전달하고 DB가 PROCESSING row lock, phase/outcome·fixed counts·issue allowlist 검증,
+transaction timestamp receipt와 terminal payload의 원자 UPDATE를 담당한다. `APPLIED`/`PARTIAL`은
+이 finalizer에서 금지하며 기존 atomic apply RPC만 생성할 수 있다. API repository의 direct
+`sync_jobs` terminal UPDATE는 사용하지 않는다.
+
 ### 13.3 LADFRL
 
 - API parcel-scope gate가 후속 apply job에서 `SINGLE_PNU_CONFIRMED`를 반환해야 한다.

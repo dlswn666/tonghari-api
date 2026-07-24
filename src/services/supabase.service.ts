@@ -8,6 +8,7 @@ import type {
     ResolveScopeParams,
     CreateConfirmationJobParams,
     ApplyPropertyLandAreaSyncParams,
+    FinalizeLandAreaSyncJobParams,
 } from '../types/land-area-sync-job.types';
 
 const logger = createLogger('SUPABASE');
@@ -1463,6 +1464,43 @@ export class SupabaseService {
         return {
             data: typeof data === 'string' ? data : null,
             error: error ? { message: error.message, code: (error as { code?: string }).code } : null,
+        };
+    }
+
+    /**
+     * LAND_AREA_SYNC discovery/review/failed terminal finalizer RPC.
+     * APPLIED/PARTIAL terminal은 이 경로가 아니라 atomic apply RPC만 사용한다.
+     */
+    async finalizeLandAreaSyncJob(
+        params: FinalizeLandAreaSyncJobParams
+    ): Promise<{
+        data: boolean;
+        error: { message: string; code?: string } | null;
+    }> {
+        const { data, error } = await this.client.rpc(
+            'finalize_land_area_sync_job_v1',
+            {
+                p_union_id: params.p_union_id,
+                p_sync_job_id: params.p_sync_job_id,
+                p_status: params.p_status,
+                p_scope_state: params.p_scope_state,
+                p_outcome: params.p_outcome,
+                p_counts: params.p_counts,
+                p_issues: params.p_issues,
+                p_issues_total: params.p_issues_total,
+                p_issues_truncated:
+                    params.p_issues_truncated,
+                p_error_log: params.p_error_log,
+            }
+        );
+        return {
+            data: data === true,
+            error: error
+                ? {
+                      message: error.message,
+                      code: (error as { code?: string }).code,
+                  }
+                : null,
         };
     }
 

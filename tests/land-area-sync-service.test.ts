@@ -191,7 +191,7 @@ test('gate FAILED(title 실패)는 job 을 FAILED 로 종결하고 apply RPC 를
     assert.deepEqual(spy.terminalCalls, [{ status: 'FAILED', scopeState: 'FAILED', outcome: 'FAILED' }]);
 });
 
-test('discovery terminal 마지막 UPDATE가 0행이면 worker finalization 성공으로 반환하지 않는다', async () => {
+test('discovery finalizer RPC가 false면 worker finalization 성공으로 반환하지 않는다', async () => {
     const spy = emptySpy();
     const deps = makeDeps({
         resolver: noEvidence(MEMBER),

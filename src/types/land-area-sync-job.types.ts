@@ -283,6 +283,26 @@ export interface ApplyPropertyLandAreaSyncParams {
     };
 }
 
+/**
+ * discovery/review/failed terminal finalizer RPC 인자.
+ * APPLIED/PARTIAL은 이 RPC가 아니라 atomic apply RPC만 사용한다.
+ */
+export interface FinalizeLandAreaSyncJobParams {
+    p_union_id: string;
+    p_sync_job_id: string;
+    p_status: 'COMPLETED' | 'FAILED';
+    p_scope_state: LandAreaSyncScopeState;
+    p_outcome: Exclude<
+        LandAreaSyncOutcome,
+        'APPLIED' | 'PARTIAL'
+    >;
+    p_counts: LandAreaSyncCounts;
+    p_issues: LandAreaSyncIssue[];
+    p_issues_total: number;
+    p_issues_truncated: boolean;
+    p_error_log: string | null;
+}
+
 /** confirmation-job admission RPC 인자(migration [5.2]). */
 export interface CreateConfirmationJobParams {
     p_union_id: string;
