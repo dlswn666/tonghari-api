@@ -239,14 +239,15 @@ jobs:
           container_image_id_before="$(
             docker inspect --format '{{.Image}}' "${container_name}"
           )"
-          expected_image_id_before="$(
-            docker image inspect --format '{{.Id}}' "${EXPECTED_IMAGE_TAG}"
+          container_image_revision_before="$(
+            docker image inspect \
+              --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+              "${container_image_id_before}"
           )"
           if [[
             ! "${container_id_before}" =~ ^[0-9a-f]{64}$
             || ! "${container_image_id_before}" =~ ^sha256:[0-9a-f]{64}$
-            || ! "${expected_image_id_before}" =~ ^sha256:[0-9a-f]{64}$
-            || "${container_image_id_before}" != "${expected_image_id_before}"
+            || "${container_image_revision_before}" != "${EXPECTED_GIT_SHA}"
           ]]; then
             echo "Phase 0 target container image identity mismatch."
             exit 1
@@ -360,14 +361,16 @@ jobs:
           container_image_id_after="$(
             docker inspect --format '{{.Image}}' "${container_name}"
           )"
-          expected_image_id_after="$(
-            docker image inspect --format '{{.Id}}' "${EXPECTED_IMAGE_TAG}"
+          container_image_revision_after="$(
+            docker image inspect \
+              --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+              "${container_image_id_after}"
           )"
           if [[
             "${container_id_after}" != "${container_id_before}"
             || "${container_image_id_after}" != "${container_image_id_before}"
-            || "${expected_image_id_after}" != "${expected_image_id_before}"
-            || "${container_image_id_after}" != "${expected_image_id_after}"
+            || "${container_image_revision_after}" != "${container_image_revision_before}"
+            || "${container_image_revision_after}" != "${EXPECTED_GIT_SHA}"
           ]]; then
             echo "Phase 0 target container changed during capture."
             exit 1

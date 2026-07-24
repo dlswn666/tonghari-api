@@ -26,6 +26,8 @@ ARG GIT_SHA=unknown
 ARG BUILD_TIME=unknown
 ARG IMAGE_TAG=local
 
+LABEL org.opencontainers.image.revision="${GIT_SHA}"
+
 # 작업 디렉토리 설정
 WORKDIR /app
 

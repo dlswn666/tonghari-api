@@ -1532,6 +1532,10 @@ test('Phase 0 workflow는 승인 environment·pinned SSH/container·exclusive re
         path.join(process.cwd(), '.github/workflows/docker-build.yml'),
         'utf8'
     );
+    const dockerfile = await readFile(
+        path.join(process.cwd(), 'Dockerfile'),
+        'utf8'
+    );
     assert.match(
         workflow,
         /^name: Phase 0 Land Area First-Observation Read-Only Capture$/m
@@ -1578,10 +1582,21 @@ test('Phase 0 workflow는 승인 environment·pinned SSH/container·exclusive re
     );
     assert.match(workflow, /docker inspect --format '\{\{\.Id\}\}'/);
     assert.match(workflow, /docker inspect --format '\{\{\.Image\}\}'/);
-    assert.match(workflow, /docker image inspect --format '\{\{\.Id\}\}'/);
+    assert.match(
+        dockerfile,
+        /LABEL org\.opencontainers\.image\.revision="\$\{GIT_SHA\}"/
+    );
     assert.match(
         workflow,
-        /container_id_after[\s\S]*container_id_before[\s\S]*container_image_id_after[\s\S]*container_image_id_before/
+        /docker image inspect[\s\S]*org\.opencontainers\.image\.revision/
+    );
+    assert.match(
+        workflow,
+        /container_image_revision_before}" != "\$\{EXPECTED_GIT_SHA\}"/
+    );
+    assert.match(
+        workflow,
+        /container_id_after[\s\S]*container_id_before[\s\S]*container_image_id_after[\s\S]*container_image_id_before[\s\S]*container_image_revision_after[\s\S]*container_image_revision_before/
     );
     assert.match(
         workflow,
