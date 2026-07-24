@@ -1596,6 +1596,14 @@ test('Phase 0 workflow는 승인 environment·pinned SSH/container·exclusive re
     );
     assert.match(
         workflow,
+        /PHASE0_MANIFEST_PATH[\s\S]*flag: "wx"[\s\S]*mode: 0o600/
+    );
+    assert.doesNotMatch(
+        workflow,
+        /docker cp "\$\{host_manifest\}"[\s\S]*"\$\{target_container\}:\$\{container_manifest\}"/
+    );
+    assert.match(
+        workflow,
         /container_id_after[\s\S]*container_id_before[\s\S]*container_image_id_after[\s\S]*container_image_id_before[\s\S]*container_image_revision_after[\s\S]*container_image_revision_before/
     );
     assert.match(
