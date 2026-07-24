@@ -107,6 +107,7 @@ export async function getLatestScopedJob(
         .eq('union_id', unionId)
         .eq('job_type', LAND_AREA_SYNC_JOB_TYPE)
         .eq('preview_data->landAreaSync->>anchorPnu', anchorPnu)
+        .is('archived_at', null)
         .order('created_at', { ascending: false })
         .limit(1)
         .maybeSingle();
