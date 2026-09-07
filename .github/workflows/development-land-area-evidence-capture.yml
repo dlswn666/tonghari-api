@@ -147,12 +147,14 @@ jobs:
               ;;
             solsam-g1-34-api-readonly-production-20260907)
               # 삼양동 잔여 134필지 중 G1 — 데이터 정정(건물 유닛 연결·dong 정규화·
-              # 토토하우스 건물 분리, 2026-09-07) 뒤 canonical 재실행 대상 40 anchor(물건 75).
+              # 토토하우스 건물 분리, 2026-09-07) 뒤 canonical 재실행 대상 34 anchor(물건 53).
               # 명시 포함 목록(solsam-g1-34-include-20260907.json)으로만 생성했고
-              # 제외 목록(solsam-exclude-standard-20260904.json) 의 부분집합이다.
-              target_path="development-land-area-sync-manifests/solsam-g1-40-api-readonly-production-target-20260907.json"
-              target_count="40"
-              property_unit_count="75"
+              # 제외 목록(solsam-exclude-standard-20260904.json) 의 부분집합이다. 40필지
+              # 검증 캡처(run 34109690195) 에서 지하호 6필지가 PROPERTY_UNIT_NOT_FOUND 로
+              # REVIEW 되어 그 CAPTURED 34필지로 다시 잘랐다.
+              target_path="development-land-area-sync-manifests/solsam-g1-34-api-readonly-production-target-20260907.json"
+              target_count="34"
+              property_unit_count="53"
               ;;
             *)
               echo "::error::Target manifest is not repository-approved."

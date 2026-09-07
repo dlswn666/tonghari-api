@@ -137,9 +137,9 @@ jobs:
               full_refresh_mode="1"
               ;;
             solsam-g1-34-api-readonly-production-20260907)
-              # 삼양동 잔여 G1 — 데이터 정정 후 재실행 40 anchor(물건 75). 검증 캡처
-              # PASS 뒤에만 승인한다. 제외 목록의 다른 94필지는 이 run 에 없다.
-              target_path="development-land-area-sync-manifests/solsam-g1-40-api-readonly-production-target-20260907.json"
+              # 삼양동 잔여 G1 — 데이터 정정 후 재실행 34 anchor(물건 53). 검증 캡처
+              # PASS 뒤에만 승인한다. 제외 목록의 다른 100필지는 이 run 에 없다.
+              target_path="development-land-area-sync-manifests/solsam-g1-34-api-readonly-production-target-20260907.json"
               db_approval_path=""
               evidence_path=""
               full_refresh_mode="1"

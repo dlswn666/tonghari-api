@@ -2119,7 +2119,7 @@ test('삼양동 standard A/B production target은 전수 target의 서로소 부
 });
 
 const SOLSAM_G1_34_PRODUCTION_TARGET_URL = new URL(
-    '../development-land-area-sync-manifests/solsam-g1-40-api-readonly-production-target-20260907.json',
+    '../development-land-area-sync-manifests/solsam-g1-34-api-readonly-production-target-20260907.json',
     import.meta.url
 );
 const SOLSAM_EXCLUDE_STANDARD_URL = new URL(
@@ -2131,7 +2131,7 @@ const SOLSAM_G1_INCLUDE_URL = new URL(
     import.meta.url
 );
 
-test('삼양동 제외 목록(134)은 전수 − 창 A∪B 와 정확히 같고, 잔여 G1 target 은 그 부분집합이다', () => {
+test('삼양동 제외 목록(134)은 전수 − 창 A∪B 와 정확히 같고, 잔여 G1(34) target 은 그 부분집합이다', () => {
     const full = parseDevelopmentTargetManifest(
         JSON.parse(readFileSync(SOLSAM_FULL_1086_PRODUCTION_TARGET_URL, 'utf8'))
     );
@@ -2186,16 +2186,24 @@ test('삼양동 제외 목록(134)은 전수 − 창 A∪B 와 정확히 같고,
     assert.equal(g1.expectedUnionActivePnuDigest, full.expectedUnionActivePnuDigest);
     assert.equal(g1.databaseTarget, 'production');
     assert.equal(g1.unionId, full.unionId);
-    assert.equal(g1.targetCount, 40);
-    assert.equal(g1.expectedPropertyUnitCount, 75);
+    assert.equal(g1.targetCount, 34);
+    assert.equal(g1.expectedPropertyUnitCount, 53);
     assert.equal(g1.expectedUnionActivePropertyUnitCount, 1607);
     assert.equal(g1.expectedUnionActivePnuCount, 1086);
-    // G1 에서 뺀 4필지(후속): 791-1934 유닛 identity, 791-4143 관계 채택, 760-50/51 조합 확인.
+    // G1 에서 뺀 10필지: 후속 4(791-1934 유닛 identity, 791-4143 관계 채택, 760-50/51 조합 확인)
+    // + 40필지 검증 캡처(run 34109690195)에서 PROPERTY_UNIT_NOT_FOUND 로 REVIEW 된 지하호 6필지
+    // (로컬 매처 시뮬레이션과 달리 EC2 실캡처는 매칭 실패 — G2 로 회귀).
     for (const pnu of [
         '1130510100107911934',
         '1130510100107914143',
         '1130510100107600050',
         '1130510100107600051',
+        '1130510100107600121',
+        '1130510100108360011',
+        '1130510100108360031',
+        '1130510100108360050',
+        '1130510100108360069',
+        '1130510100108360070',
     ]) {
         assert.ok(excludedSet.has(pnu));
         assert.ok(!g1.anchors.includes(pnu));
@@ -2208,10 +2216,10 @@ test('삼양동 제외 목록(134)은 전수 − 창 A∪B 와 정확히 같고,
     // digest 핀 — 저장소 함수 재계산 값(2026-09-07).
     assert.equal(
         g1.scopeDigest,
-        '13111c6f4e4e425ce710a1ab51f472cd65bbfa7386ac11374e0029f0d3708415'
+        '3f9aa25d82105c490c5f14dd778d46f4bad51141f1962dd27fee2e10f84d2992'
     );
     assert.equal(
         g1.manifestDigest,
-        'e3070b17d96a55be34ea1bc6926e0e28af71e5d6d4c4b145aabb7e7ede62ff5c'
+        'cf1c2e11dec90cf994707e8df70a7f578ceb583fd667e12b9d0f3c87424133cb'
     );
 });
