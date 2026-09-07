@@ -2118,7 +2118,7 @@ test('삼양동 standard A/B production target은 전수 target의 서로소 부
     );
 });
 
-const SOLSAM_G1_40_PRODUCTION_TARGET_URL = new URL(
+const SOLSAM_G1_34_PRODUCTION_TARGET_URL = new URL(
     '../development-land-area-sync-manifests/solsam-g1-40-api-readonly-production-target-20260907.json',
     import.meta.url
 );
@@ -2127,7 +2127,7 @@ const SOLSAM_EXCLUDE_STANDARD_URL = new URL(
     import.meta.url
 );
 const SOLSAM_G1_INCLUDE_URL = new URL(
-    '../development-land-area-sync-manifests/solsam-g1-40-include-20260907.json',
+    '../development-land-area-sync-manifests/solsam-g1-34-include-20260907.json',
     import.meta.url
 );
 
@@ -2142,7 +2142,7 @@ test('삼양동 제외 목록(134)은 전수 − 창 A∪B 와 정확히 같고,
         JSON.parse(readFileSync(SOLSAM_STANDARD_B_101_PRODUCTION_TARGET_URL, 'utf8'))
     );
     const g1 = parseDevelopmentTargetManifest(
-        JSON.parse(readFileSync(SOLSAM_G1_40_PRODUCTION_TARGET_URL, 'utf8'))
+        JSON.parse(readFileSync(SOLSAM_G1_34_PRODUCTION_TARGET_URL, 'utf8'))
     );
     const exclude = JSON.parse(readFileSync(SOLSAM_EXCLUDE_STANDARD_URL, 'utf8')) as {
         excluded_pnus: string[];

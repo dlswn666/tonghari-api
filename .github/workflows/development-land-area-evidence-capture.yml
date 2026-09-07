@@ -21,7 +21,7 @@ on:
           - solsam-full-1086-api-readonly-production-20260904
           - solsam-standard-a-851-api-readonly-production-20260904
           - solsam-standard-b-101-api-readonly-production-20260904
-          - solsam-g1-40-api-readonly-production-20260907
+          - solsam-g1-34-api-readonly-production-20260907
 
 permissions:
   contents: read
@@ -145,10 +145,10 @@ jobs:
               target_count="101"
               property_unit_count="137"
               ;;
-            solsam-g1-40-api-readonly-production-20260907)
+            solsam-g1-34-api-readonly-production-20260907)
               # 삼양동 잔여 134필지 중 G1 — 데이터 정정(건물 유닛 연결·dong 정규화·
               # 토토하우스 건물 분리, 2026-09-07) 뒤 canonical 재실행 대상 40 anchor(물건 75).
-              # 명시 포함 목록(solsam-g1-40-include-20260907.json)으로만 생성했고
+              # 명시 포함 목록(solsam-g1-34-include-20260907.json)으로만 생성했고
               # 제외 목록(solsam-exclude-standard-20260904.json) 의 부분집합이다.
               target_path="development-land-area-sync-manifests/solsam-g1-40-api-readonly-production-target-20260907.json"
               target_count="40"

@@ -822,7 +822,7 @@ test('두 워크플로의 라벨·case·target 파일명은 서로 정합하고 
             'mia-seven-full-278-official-components-api-readonly-production-20260812',
             'mia-seven-standard-267-api-readonly-production-20260812',
             'solsam-full-1086-api-readonly-production-20260904',
-            'solsam-g1-40-api-readonly-production-20260907',
+            'solsam-g1-34-api-readonly-production-20260907',
             'solsam-standard-a-851-api-readonly-production-20260904',
             'solsam-standard-b-101-api-readonly-production-20260904',
         ]
@@ -835,7 +835,7 @@ test('두 워크플로의 라벨·case·target 파일명은 서로 정합하고 
             .filter((label) => label.startsWith('solsam-'))
             .sort(),
         [
-            'solsam-g1-40-api-readonly-production-20260907',
+            'solsam-g1-34-api-readonly-production-20260907',
             'solsam-standard-a-851-api-readonly-production-20260904',
             'solsam-standard-b-101-api-readonly-production-20260904',
         ]
@@ -843,7 +843,7 @@ test('두 워크플로의 라벨·case·target 파일명은 서로 정합하고 
     for (const label of [
         'solsam-standard-a-851-api-readonly-production-20260904',
         'solsam-standard-b-101-api-readonly-production-20260904',
-        'solsam-g1-40-api-readonly-production-20260907',
+        'solsam-g1-34-api-readonly-production-20260907',
     ]) {
         const selection = workflow.slice(
             workflow.indexOf(`${label})`),
