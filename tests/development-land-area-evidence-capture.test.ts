@@ -2117,3 +2117,101 @@ test('삼양동 standard A/B production target은 전수 target의 서로소 부
         '2edb14c69bff3203bbfc87ecad8cbb4d6518dce24c6df353cfef1917aa9c036e'
     );
 });
+
+const SOLSAM_G1_40_PRODUCTION_TARGET_URL = new URL(
+    '../development-land-area-sync-manifests/solsam-g1-40-api-readonly-production-target-20260907.json',
+    import.meta.url
+);
+const SOLSAM_EXCLUDE_STANDARD_URL = new URL(
+    '../development-land-area-sync-manifests/solsam-exclude-standard-20260904.json',
+    import.meta.url
+);
+const SOLSAM_G1_INCLUDE_URL = new URL(
+    '../development-land-area-sync-manifests/solsam-g1-40-include-20260907.json',
+    import.meta.url
+);
+
+test('삼양동 제외 목록(134)은 전수 − 창 A∪B 와 정확히 같고, 잔여 G1 target 은 그 부분집합이다', () => {
+    const full = parseDevelopmentTargetManifest(
+        JSON.parse(readFileSync(SOLSAM_FULL_1086_PRODUCTION_TARGET_URL, 'utf8'))
+    );
+    const a = parseDevelopmentTargetManifest(
+        JSON.parse(readFileSync(SOLSAM_STANDARD_A_851_PRODUCTION_TARGET_URL, 'utf8'))
+    );
+    const b = parseDevelopmentTargetManifest(
+        JSON.parse(readFileSync(SOLSAM_STANDARD_B_101_PRODUCTION_TARGET_URL, 'utf8'))
+    );
+    const g1 = parseDevelopmentTargetManifest(
+        JSON.parse(readFileSync(SOLSAM_G1_40_PRODUCTION_TARGET_URL, 'utf8'))
+    );
+    const exclude = JSON.parse(readFileSync(SOLSAM_EXCLUDE_STANDARD_URL, 'utf8')) as {
+        excluded_pnus: string[];
+        entries: Array<{ pnu: string; bucket: string; option: string }>;
+    };
+    const include = JSON.parse(readFileSync(SOLSAM_G1_INCLUDE_URL, 'utf8')) as {
+        included_pnus: string[];
+    };
+    // 제외 목록: 러너는 필지별 사람 확인 없이 confirm 을 자동 발급하고
+    // allowManualOverwrite:true 이므로, 편입면적<공부면적 필지(예 791-3275 35.8㎡ vs
+    // 토지대장 2,086㎡)는 이 목록에서 빠지는 순간 재실행 한 번에 조용히 덮인다.
+    const excludedSet = new Set(exclude.excluded_pnus);
+    assert.equal(exclude.excluded_pnus.length, 134);
+    assert.equal(excludedSet.size, 134);
+    assert.equal(exclude.entries.length, 134);
+    const done = new Set([...a.anchors, ...b.anchors]);
+    assert.deepEqual(
+        full.anchors.filter((pnu) => !done.has(pnu)),
+        [...excludedSet].sort()
+    );
+    for (const pnu of [
+        '1130510100107913275', // 791-3275 시·도유지 도로, 편입 35.8 / 공부 2086
+        '1130510100107600091', // 760-91 군유지 도로, 편입 532 / 공부 3134
+        '1130510100108380080', // 838-80 사유 도로, 편입 5 / 공부 69
+        '1130510100113540014', // 1354-14 토지 없음(NULL 이 정답)
+        '1130510100107913087', // 791-3087 등록부 결함 HOLD
+    ]) {
+        assert.ok(excludedSet.has(pnu));
+        assert.ok(!g1.anchors.includes(pnu));
+    }
+    // G1: 명시 포함 목록으로만 생성 — anchors == included_pnus, 제외 목록의 부분집합,
+    // 창 A/B 와 서로소, union identity 는 전수와 동일.
+    if (g1.version !== DEVELOPMENT_TARGET_MANIFEST_VERSION_V3) {
+        throw new Error('v3 target expected');
+    }
+    assert.deepEqual(g1.anchors, [...include.included_pnus].sort());
+    assert.deepEqual(g1.allowedScopePnus, g1.anchors);
+    assert.ok(g1.anchors.every((pnu) => excludedSet.has(pnu)));
+    assert.ok(g1.anchors.every((pnu) => !done.has(pnu)));
+    assert.deepEqual(g1.expectedUnionActivePnus, full.expectedUnionActivePnus);
+    assert.equal(g1.expectedUnionActivePnuDigest, full.expectedUnionActivePnuDigest);
+    assert.equal(g1.databaseTarget, 'production');
+    assert.equal(g1.unionId, full.unionId);
+    assert.equal(g1.targetCount, 40);
+    assert.equal(g1.expectedPropertyUnitCount, 75);
+    assert.equal(g1.expectedUnionActivePropertyUnitCount, 1607);
+    assert.equal(g1.expectedUnionActivePnuCount, 1086);
+    // G1 에서 뺀 4필지(후속): 791-1934 유닛 identity, 791-4143 관계 채택, 760-50/51 조합 확인.
+    for (const pnu of [
+        '1130510100107911934',
+        '1130510100107914143',
+        '1130510100107600050',
+        '1130510100107600051',
+    ]) {
+        assert.ok(excludedSet.has(pnu));
+        assert.ok(!g1.anchors.includes(pnu));
+    }
+    // 제외 목록 entries 는 G1 필지를 옵션 (a) 계열로 분류하고 있어야 한다.
+    const entryByPnu = new Map(exclude.entries.map((entry) => [entry.pnu, entry]));
+    for (const pnu of g1.anchors) {
+        assert.ok(entryByPnu.get(pnu)?.option.startsWith('a'), `${pnu} 는 G1(a) 여야 한다`);
+    }
+    // digest 핀 — 저장소 함수 재계산 값(2026-09-07).
+    assert.equal(
+        g1.scopeDigest,
+        '13111c6f4e4e425ce710a1ab51f472cd65bbfa7386ac11374e0029f0d3708415'
+    );
+    assert.equal(
+        g1.manifestDigest,
+        'e3070b17d96a55be34ea1bc6926e0e28af71e5d6d4c4b145aabb7e7ede62ff5c'
+    );
+});

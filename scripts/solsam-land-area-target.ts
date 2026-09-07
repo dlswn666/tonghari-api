@@ -11,7 +11,10 @@
  *   tsx scripts/solsam-land-area-target.ts \
  *     --label solsam-full-1086-api-readonly-production-20260904 \
  *     --out development-land-area-sync-manifests/solsam-full-1086-api-readonly-production-target-20260904.json \
- *     [--exclude <json: {"excluded_pnus":[...]}>] [--mode full|non-manual|manual-only]
+ *     [--exclude <json: {"excluded_pnus":[...]}>] [--include <json: {"included_pnus":[...]}>]
+ *     [--mode full|non-manual|manual-only]
+ *   --include 는 anchors 를 명시 집합으로 좁힌다(활성 PNU ∩ included). 잔여 필지를
+ *   묶음(G1 등)으로 처리할 때 쓰며, --exclude 와 함께 주면 둘 다 적용된다.
  */
 import { readFileSync } from 'node:fs';
 import { mkdir, open } from 'node:fs/promises';
@@ -46,6 +49,7 @@ function parseArgs(argv: string[]): {
     label: string;
     out: string;
     excludeFile: string | null;
+    includeFile: string | null;
     mode: Mode;
 } {
     const args = new Map<string, string>();
@@ -69,7 +73,31 @@ function parseArgs(argv: string[]): {
     if (!['full', 'non-manual', 'manual-only'].includes(mode)) {
         throw new Error('MODE_INVALID');
     }
-    return { label, out, excludeFile: args.get('exclude') ?? null, mode };
+    return {
+        label,
+        out,
+        excludeFile: args.get('exclude') ?? null,
+        includeFile: args.get('include') ?? null,
+        mode,
+    };
+}
+
+function readIncludedPnus(file: string | null): Set<string> | null {
+    if (!file) return null;
+    const parsed = JSON.parse(readFileSync(file, 'utf8')) as {
+        included_pnus?: unknown;
+    };
+    if (!Array.isArray(parsed.included_pnus) || parsed.included_pnus.length === 0) {
+        throw new Error('INCLUDE_INVALID');
+    }
+    const set = new Set<string>();
+    for (const pnu of parsed.included_pnus) {
+        if (typeof pnu !== 'string' || !PNU_RE.test(pnu)) {
+            throw new Error(`INCLUDE_PNU_INVALID: ${String(pnu)}`);
+        }
+        set.add(pnu);
+    }
+    return set;
 }
 
 function readExcludedPnus(file: string | null): Set<string> {
@@ -89,7 +117,9 @@ function readExcludedPnus(file: string | null): Set<string> {
 }
 
 async function main(): Promise<void> {
-    const { label, out, excludeFile, mode } = parseArgs(process.argv.slice(2));
+    const { label, out, excludeFile, includeFile, mode } = parseArgs(
+        process.argv.slice(2)
+    );
 
     const url = process.env.SUPABASE_URL?.trim();
     const key = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
@@ -160,8 +190,21 @@ async function main(): Promise<void> {
         );
     }
 
+    const included = readIncludedPnus(includeFile);
+    if (included) {
+        const includedNotActive = [...included].filter(
+            (pnu) => !activePnus.includes(pnu)
+        );
+        if (includedNotActive.length > 0) {
+            throw new Error(
+                `INCLUDE_NOT_ACTIVE: ${includedNotActive.join(', ')}`
+            );
+        }
+    }
+
     const anchors = activePnus.filter((pnu) => {
         if (excluded.has(pnu)) return false;
+        if (included && !included.has(pnu)) return false;
         if (mode === 'non-manual') return !manualPnus.has(pnu);
         if (mode === 'manual-only') return manualPnus.has(pnu);
         return true;
@@ -246,6 +289,7 @@ async function main(): Promise<void> {
                     (row) => row.land_area_source === 'MANUAL'
                 ).length,
                 excludedCount: excluded.size,
+                includedCount: included ? included.size : null,
                 anchorCount: anchors.length,
                 expectedPropertyUnitCount,
                 expectedUnionActivePropertyUnitCount,

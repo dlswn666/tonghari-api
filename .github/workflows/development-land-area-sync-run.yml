@@ -16,6 +16,7 @@ on:
           - mia-seven-standard-267-api-readonly-production-20260812
           - solsam-standard-a-851-api-readonly-production-20260904
           - solsam-standard-b-101-api-readonly-production-20260904
+          - solsam-g1-40-api-readonly-production-20260907
 permissions:
   contents: read
 
@@ -131,6 +132,14 @@ jobs:
               # 삼양동(solsam) 운영 창 B — MANUAL 출처 101 anchor(물건 137), 값 불변·
               # 출처 전환. allowlist 입력 길이 상한 때문에 창 A 와 분리한다.
               target_path="development-land-area-sync-manifests/solsam-standard-b-101-api-readonly-production-target-20260904.json"
+              db_approval_path=""
+              evidence_path=""
+              full_refresh_mode="1"
+              ;;
+            solsam-g1-40-api-readonly-production-20260907)
+              # 삼양동 잔여 G1 — 데이터 정정 후 재실행 40 anchor(물건 75). 검증 캡처
+              # PASS 뒤에만 승인한다. 제외 목록의 다른 94필지는 이 run 에 없다.
+              target_path="development-land-area-sync-manifests/solsam-g1-40-api-readonly-production-target-20260907.json"
               db_approval_path=""
               evidence_path=""
               full_refresh_mode="1"
