@@ -229,7 +229,7 @@ export type PublicDataMcpReviewPromptArgs = z.infer<
 export const PUBLIC_DATA_MCP_SERVER_INSTRUCTIONS = [
     '이 서버는 VWorld와 공공데이터포털의 공개 GIS 자료를 읽기 전용으로 조회한다.',
     '도구 결과의 provider, source, asOf, attribution을 유지하고 답변에서 출처를 표시한다.',
-    'VWorld 주소·공간 조회 결과는 다른 저장소나 내부 DB에 저장하지 않는다.',
+    '이 서버는 조회만 수행하며, 결과를 이용한 후속 DB 작업은 별도 작업 경로에서 수행한다.',
     '공시가격은 과세·행정 기준 자료이며 감정평가액이나 현재 시가로 단정하지 않는다.',
     '대지권등록부와 건축물대장은 참고용 공공자료이며 등기부상 권리의 존부·귀속·순위를 확정하지 않는다.',
     '기준연도와 lastUpdtDt가 있으면 함께 제시하고, asOf는 조회 시각이지 원자료의 최신 보증일이 아님을 알린다.',
@@ -241,10 +241,10 @@ export const PUBLIC_DATA_MCP_SERVER_INSTRUCTIONS = [
 
 export const PUBLIC_DATA_MCP_POLICY_V1 = `# 통하리 공개 GIS 데이터 이용 정책 v1
 
-## 조회와 보관
+## 조회 범위와 후속 작업
 
 - 공개 도구는 주소/PNU로 특정한 자료를 조회하는 읽기 전용 도구다. 동기화, 내부 DB 조회·수정, 임의 endpoint 호출은 제공하지 않는다.
-- VWorld 주소·공간 조회 결과는 다른 저장소, 캐시 또는 통하리 내부 DB에 저장하지 않는다.
+- 이 서버는 조회만 수행하며, 결과를 이용한 후속 DB 작업은 별도 작업 경로에서 수행한다.
 - 전체 조회는 기존 인스펙터의 14개 자료를 source별로 반환하며, 건물호수조회는 운영자가 별도 이용허락을 확보한 범위에서 제공한다.
 - API key, bearer token, provider 원문 오류 body, stack, 소유자 식별정보는 결과에 포함하지 않는다.
 
@@ -276,7 +276,7 @@ export function buildPublicDataMcpReviewPromptMessage(
 1. 주소만 있으면 먼저 ${RESOLVE_ADDRESS_TO_PNU_TOOL_NAME}으로 exact PNU를 확인하세요.
 2. 질문에 필요한 도구만 호출하고, PARTIAL·FAILED·INCOMPLETE를 NO_DATA로 바꾸지 마세요.
 3. 결과의 provider, source, asOf, attribution과 데이터 기준연도·lastUpdtDt를 답변에 표시하세요.
-4. VWorld 결과를 저장하지 마세요. 공시가격은 감정평가가 아니며 대지권등록부·건축물대장은 등기 권리를 확정하지 않는다고 명시하세요.
+4. 공시가격은 감정평가가 아니며 대지권등록부·건축물대장은 등기 권리를 확정하지 않는다고 명시하세요.
 
 사용자 입력(JSON):
 ${input}`;

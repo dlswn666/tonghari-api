@@ -1,5 +1,9 @@
 # 통하리 공공 GIS MCP v1 acceptance
 
+> 2026-09-08 변경: 소비자에게 결과 저장을 금지하던 내부 지시는 사용자 요청으로
+> 제거한다. 이 서버 자체가 DB·queue에 쓰지 않는 구조는 유지한다.
+> 최신 계약은 `2026-09-08-gis-mcp-storage-instructions-acceptance.md`를 따른다.
+
 ## 정본과 목적
 
 - 구조 정본: 현행 법률 MCP의 `POST /mcp` Streamable HTTP, client별 digest
@@ -72,7 +76,8 @@
   소유자 이름/연락처를 반환하거나 로그에 남기지 않는다.
 - [x] 기존 5개 도구는 `buldHoCoList`를 호출하지 않는다. 전체 조회 도구는 사용자가 별도 이용허락 확보를 확인한 2026-09-06 요청 범위에서 호출한다. 상세 정본은 `2026-09-06-gis-mcp-full-lookup-acceptance.md`다.
 - [x] 폐기된 data.go.kr `ContinuousLandInfoService`를 사용하지 않는다.
-- [x] geocoder 결과를 캐시/DB/sync job에 저장하지 않는다.
+- [x] MCP 서버 자체는 geocoder 결과를 캐시/DB/sync job에 저장하지 않는다.
+  소비자의 후속 저장을 금지하는 경고·지시는 제공하지 않는다.
 - [x] 공시가격을 감정평가로, 대지권/건축물대장을 등기상 권리 확정으로 표현하지 않는다.
 
 ## 실행 순서와 완료 기준

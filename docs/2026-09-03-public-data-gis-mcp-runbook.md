@@ -329,7 +329,9 @@ enabled_tools = [
 
 1. VWorld 운영키 신청/변경 내역에 통하리 상용 MCP 조회 용도가 포함됐는지 확인한다.
 2. 건축HUB 운영계정과 호출량을 확인하고 필요하면 활용사례 등록 후 증설한다.
-3. geocoder 결과를 영구 저장하지 않고 모든 응답에 VWorld 출처를 유지한다.
+3. MCP 서버의 조회 경로에는 영구 저장을 추가하지 않고 모든 응답에 VWorld 출처를 유지한다.
+   소비자의 별도 저장 경로까지 금지하는 내부 경고·지시는 2026-09-08 사용자 요청으로 제거했다.
+   원천 서비스의 이용조건이나 자료별 이용허락을 변경한다는 의미는 아니다.
 4. Caddy/API의 proxy raw/digest가 같은 발급 쌍인지 값을 출력하지 않고 확인한다.
 5. 최초 배포 전 승인된 initial activation `prepare`로 EC2 `.env`에 초기 client 한 건의
    `GIS_MCP_TOKEN_REGISTRY_JSON`을 중복 없이 정확히 한 번 staging한다. file·JSON·legacy

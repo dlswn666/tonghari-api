@@ -80,6 +80,26 @@ test('전체 조회는 14 source를 정해진 순서로 반환하고 좌표/PNU 
     }
 });
 
+test('전체 조회는 저장 금지 경고만 제거하고 출처·기준일·권리·가격 경고를 보존한다', async () => {
+    const { provider } = fixture();
+    const result = await provider.execute(input(), { signal: new AbortController().signal });
+    const data = FullGisDataSchema.parse(result.data);
+    assert.equal(result.tool, 'lookup_full_gis_public_data_v1');
+    assert.equal(result.status, 'SUCCESS');
+    assert.equal(result.asOf, new Date(NOW()).toISOString());
+    assert.ok(result.provider && result.source && result.attribution);
+    assert.equal(data.steps.length, 14);
+    for (const step of data.steps) {
+        assert.ok(step.provider && step.source && step.asOf && step.attribution);
+        assert.deepEqual(step.pagination, { offset: 0, limit: 10, returned: 1, total: 1, hasMore: false, nextOffset: null });
+    }
+    for (const warning of ['DATA_REFERENCE_DATE_MUST_BE_CONFIRMED',
+        'PUBLIC_RECORD_DOES_NOT_CONFIRM_REGISTERED_RIGHTS', 'OFFICIAL_PRICE_IS_NOT_APPRAISAL']) {
+        assert.ok(result.warnings.includes(warning));
+    }
+    assert.equal(result.warnings.includes('VWORLD_RESULT_MUST_NOT_BE_STORED'), false);
+});
+
 test('PNU 불일치는 종속 11개 조회를 차단하고 양쪽 조회 증거를 보존한다', async () => {
     const { calls, provider } = fixture();
     const result = await provider.execute(input({ pnu: OTHER_PNU }), {

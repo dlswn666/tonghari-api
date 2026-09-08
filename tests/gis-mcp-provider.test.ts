@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createPublicDataMcpProviderV1 } from '../src/services/public-data-mcp/provider';
+import type { PublicDataMcpToolInput, PublicDataMcpToolName } from '../src/services/public-data-mcp/policy';
 
 const pnu = '1130510100107911982';
 const signal = new AbortController().signal;
@@ -35,6 +36,39 @@ function provider(overrides: Record<string, unknown> = {}) {
         now: () => Date.parse('2026-09-03T00:00:00.000Z'),
     });
 }
+
+for (const candidate of [
+    { tool: 'resolve_address_to_pnu_v1', input: { address: '서울특별시 강북구 미아동 1' }, status: 'SUCCESS', warnings: [] },
+    { tool: 'lookup_parcel_public_data_v1', input: { pnu }, status: 'SUCCESS',
+        warnings: ['DATA_REFERENCE_DATE_MUST_BE_CONFIRMED', 'OFFICIAL_PRICE_IS_NOT_APPRAISAL'] },
+    { tool: 'lookup_housing_official_price_v1', input: { pnu, year: 2026, offset: 0, limit: 20 }, status: 'INCOMPLETE',
+        warnings: ['DATA_REFERENCE_DATE_MUST_BE_CONFIRMED', 'OFFICIAL_PRICE_IS_NOT_APPRAISAL'] },
+    { tool: 'lookup_land_right_registration_v1', input: { pnu, offset: 0, limit: 1 }, status: 'NO_DATA',
+        warnings: ['DATA_REFERENCE_DATE_MUST_BE_CONFIRMED', 'PUBLIC_RECORD_DOES_NOT_CONFIRM_REGISTERED_RIGHTS'] },
+] satisfies Array<{ tool: PublicDataMcpToolName; input: PublicDataMcpToolInput; status: string; warnings: string[] }>) {
+    test(`${candidate.tool} 결과는 저장 금지 경고 없이 조회 상태·출처·해석 한계를 유지한다`, async () => {
+        const result = await provider().execute(candidate.tool, candidate.input, { signal });
+        assert.equal(result.tool, candidate.tool);
+        assert.equal(result.status, candidate.status);
+        assert.deepEqual(result.query, candidate.tool === 'lookup_parcel_public_data_v1'
+            ? { ...candidate.input, year: null } : candidate.input);
+        assert.ok(result.provider);
+        assert.ok(result.source);
+        assert.ok(result.attribution);
+        assert.equal(result.asOf, '2026-09-03T00:00:00.000Z');
+        for (const warning of candidate.warnings) assert.ok(result.warnings.includes(warning));
+        assert.equal(result.warnings.includes('VWORLD_RESULT_MUST_NOT_BE_STORED'), false);
+    });
+}
+
+test('주소 PNU 불완전 경고는 저장 금지 지시 제거와 무관하게 유지한다', async () => {
+    const result = await provider({
+        async getPNUFromAddress() { return { pnu: '', x: '127.0', y: '37.5' }; },
+    }).execute('resolve_address_to_pnu_v1', { address: '미확정 주소' }, { signal });
+    assert.equal(result.status, 'PARTIAL');
+    assert.ok(result.warnings.includes('PNU_RESOLUTION_INCOMPLETE'));
+    assert.equal(result.warnings.includes('VWORLD_RESULT_MUST_NOT_BE_STORED'), false);
+});
 
 test('provider는 정규화 결과만 반환하고 ambiguous null을 NO_DATA로 확정하지 않는다', async () => {
     const result = await provider().execute(
@@ -119,6 +153,10 @@ test('건축물대장은 allowlist projection과 offset/limit만 반환한다', 
     const text = JSON.stringify(result);
     assert.equal(result.status, 'SUCCESS');
     assert.equal(result.pagination?.returned, 1);
+    assert.deepEqual(result.pagination, { offset: 1, limit: 1, returned: 1, total: 2, hasMore: false });
+    assert.ok(result.warnings.includes('DATA_REFERENCE_DATE_MUST_BE_CONFIRMED'));
+    assert.ok(result.warnings.includes('PUBLIC_RECORD_DOES_NOT_CONFIRM_REGISTERED_RIGHTS'));
+    assert.equal(result.warnings.includes('VWORLD_RESULT_MUST_NOT_BE_STORED'), false);
     assert.equal(text.includes('raw-registry-id'), false);
     assert.equal(text.includes('owner-canary'), false);
     assert.equal(text.includes('metadata'), false);

@@ -19,7 +19,11 @@ import {
 } from '../src/services/legal-research/mcp-policy';
 import type { LegalMcpCallContext } from '../src/services/legal-research/mcp-server';
 import { TONGHARI_MCP_SUPPORTED_PROTOCOL_VERSIONS } from '../src/services/mcp-protocol';
-import { PUBLIC_DATA_MCP_TOOL_NAMES } from '../src/services/public-data-mcp/policy';
+import {
+    PUBLIC_DATA_MCP_POLICY_RESOURCE_URI,
+    PUBLIC_DATA_MCP_REVIEW_PROMPT_NAME,
+    PUBLIC_DATA_MCP_TOOL_NAMES,
+} from '../src/services/public-data-mcp/policy';
 import type { PublicDataMcpCallContext } from '../src/services/public-data-mcp/server';
 
 const CODEX_PROTOCOL_VERSION = '2025-06-18';
@@ -248,6 +252,55 @@ describe('Codex MCP 2025-06-18 stateless 호환 계약', () => {
         assert.equal(gisContext?.principal.clientId, 'tonghari-gis-mcp');
         assert.deepEqual(gisContext?.principal.scopes, ['gis:read']);
     });
+
+    for (const surface of ['initialize', 'tools/list', 'resources/list', 'resources/read', 'prompts/get'] as const) {
+        it(`GIS ${surface} 실제 응답에는 소비자 대상 저장 금지 지시가 없다`, async () => {
+            const params = surface === 'initialize' ? {
+                protocolVersion: CODEX_PROTOCOL_VERSION, capabilities: {},
+                clientInfo: { name: 'storage-contract-test', version: '1.0.0' },
+            } : surface === 'resources/read' ? { uri: PUBLIC_DATA_MCP_POLICY_RESOURCE_URI }
+                : surface === 'prompts/get' ? {
+                    name: PUBLIC_DATA_MCP_REVIEW_PROMPT_NAME,
+                    arguments: { question: '공개 GIS 자료를 검토해 주세요.' },
+                } : {};
+            const response = await legacyRequest(surface, params, {
+                endpoint: gisEndpoint, token: GIS_TOKEN,
+                proxyHeader: 'x-tonghari-gis-mcp-proxy-token', proxyToken: GIS_PROXY_TOKEN,
+                protocolVersion: CODEX_PROTOCOL_VERSION,
+            }, 40);
+            assert.equal(response.response.status, 200);
+            assert.ok(response.body.result);
+            const result = response.body.result;
+            if (surface === 'tools/list') {
+                assert.deepEqual(result.tools.map((tool: { name: string }) => tool.name), [...PUBLIC_DATA_MCP_TOOL_NAMES]);
+                for (const tool of result.tools) {
+                    assert.equal(tool.annotations.readOnlyHint, true);
+                    assert.equal(tool.annotations.destructiveHint, false);
+                }
+            } else if (surface === 'resources/list') {
+                assert.equal(result.resources.length, 1);
+                assert.equal(result.resources[0].uri, PUBLIC_DATA_MCP_POLICY_RESOURCE_URI);
+                assert.match(result.resources[0].description, /출처/);
+                assert.match(result.resources[0].description, /기준일/);
+            } else {
+                const text = surface === 'initialize' ? result.instructions
+                    : surface === 'resources/read' ? result.contents[0].text
+                        : result.messages[0].content.text;
+                assert.match(text, /provider/);
+                assert.match(text, /source/);
+                assert.match(text, /asOf/);
+                assert.match(text, /attribution/);
+                assert.match(text, /기준연도/);
+                assert.match(text, /lastUpdtDt/);
+                assert.match(text, /PARTIAL/);
+                assert.match(text, /감정평가/);
+                assert.match(text, /등기/);
+                if (surface === 'resources/read') assert.match(text, /별도 이용허락/);
+            }
+            assert.doesNotMatch(JSON.stringify(result),
+                /VWORLD_RESULT_MUST_NOT_BE_STORED|VWorld[^\n]*저장하지|결과를 저장하지|면적·지분[^\n]*DB에 저장하지|출처, 비저장/);
+        });
+    }
 
     it('법률 MCP는 Codex 버전에서 정확한 2개 도구와 인증 principal을 유지한다', async () => {
         const options: LegacyRequestOptions = {

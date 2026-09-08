@@ -296,7 +296,7 @@ export function createPublicDataMcpServer(
         {
             title: '주소를 PNU로 확인',
             description:
-                '1~300자 주소를 VWorld에서 조회해 exact 19자리 PNU와 일시 좌표를 반환한다. 결과를 저장하지 않는다.',
+                '1~300자 주소를 VWorld에서 조회해 exact 19자리 PNU와 좌표를 반환하는 읽기 전용 도구다.',
             inputSchema: ResolveAddressToPnuInputV1Schema,
             outputSchema: PublicDataMcpResultV1Schema,
             annotations: readOnlyAnnotations,
@@ -385,7 +385,7 @@ export function createPublicDataMcpServer(
         LOOKUP_FULL_GIS_PUBLIC_DATA_TOOL_NAME,
         {
             title: '명부 대조용 전체 GIS 공부 조회',
-            description: '주소 또는 exact PNU의 14개 GIS 자료를 항목별 출처·상태와 함께 조회한다. 표제부·전유부·층별개요·가격·대지권·건물호수조회를 포함한다. 주소 입력 시 지오코딩·역지오코딩도 조회한다. 각 자료의 hasMore와 nextOffset을 확인하고 offsets로 이어 조회한다. 면적·지분의 원래 의미를 보존하며 DB에 저장하지 않는다.',
+            description: '주소 또는 exact PNU의 14개 GIS 자료를 항목별 출처·상태와 함께 조회한다. 표제부·전유부·층별개요·가격·대지권·건물호수조회를 포함한다. 주소 입력 시 지오코딩·역지오코딩도 조회한다. 각 자료의 hasMore와 nextOffset을 확인하고 offsets로 이어 조회한다. 면적·지분의 원래 의미를 보존하는 읽기 전용 조회 도구이며, 후속 DB 작업은 별도 경로에서 수행한다.',
             inputSchema: LookupFullGisPublicDataInputV1Schema,
             outputSchema: PublicDataMcpResultV1Schema,
             annotations: readOnlyAnnotations,
@@ -417,12 +417,12 @@ export function createPublicDataMcpServer(
         PUBLIC_DATA_MCP_POLICY_RESOURCE_URI,
         {
             title: '통하리 공개 GIS 데이터 이용 정책 v1',
-            description: '출처, 비저장, 기준일과 법적·가격 해석 한계',
+            description: '조회 범위, 출처, 기준일과 법적·가격 해석 한계',
             mimeType: 'text/markdown',
             annotations: {
                 audience: ['assistant'],
                 priority: 1,
-                lastModified: '2026-09-06T00:00:00+09:00',
+                lastModified: '2026-09-08T00:00:00+09:00',
             },
         },
         async (uri) => ({
