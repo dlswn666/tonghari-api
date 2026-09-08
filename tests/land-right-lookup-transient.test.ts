@@ -330,6 +330,206 @@ function scopeConfirmation(
     };
 }
 
+function apartmentTitle(
+    dong = '101동',
+    rootPk = ROOT_PK,
+    bylotCnt = '1'
+): BrTitleRow {
+    return {
+        ...titleRow(bylotCnt, MULTIPLEX, rootPk),
+        dongNm: dong,
+        mainAtchGbCd: '0',
+        mainPurpsCd: '02000',
+        mainPurpsCdNm: '공동주택',
+        etcPurps: '아파트',
+        grndFlrCnt: 15,
+        totArea: 9500,
+    };
+}
+
+function apartmentProof(input: {
+    title?: StrictScan<BrTitleRow>;
+    attached?: StrictScan<BrAtchJibunRow>;
+    basis?: StrictScan<BrBasisOulnRow>;
+} = {}) {
+    const otherPk = '9008007006005';
+    return scopeConfirmation({
+        title: complete([
+            apartmentTitle('102동', otherPk),
+            apartmentTitle('00101동'),
+        ]),
+        attached: complete([
+            attachedRow(ATTACHED_PNU, OFFICIAL_ATTACHED_PNU, otherPk),
+            attachedRow(ATTACHED_PNU, OFFICIAL_ATTACHED_PNU),
+        ]),
+        ...input,
+    });
+}
+
+async function lookupApartment(proof = apartmentProof()) {
+    return lookupLandRightTransient(
+        { unionId: UNION_ID, propertyUnitId: PROPERTY_ID },
+        {
+            repository: repository(),
+            ned: ned(success).value,
+            auth: { key: 'server-only', domain: 'admin.example.com' },
+            scopeConfirmation: proof,
+        }
+    );
+}
+
+test('다동 아파트는 첫 표제부가 아니라 숫자 동 exact 대상 root와 전체 공식 부속지 근거를 쓴다', async () => {
+    const proof = apartmentProof();
+    const result = await lookupApartment(proof);
+    assert.equal(result.status, 'INCOMPLETE');
+    assert.equal(result.code, 'PROPERTY_SCOPE_INCOMPLETE');
+    assert.equal(result.scopeResolution?.strategy, 'LDAREG');
+    assert.equal(result.scopeResolution?.scopePnuCount, 2);
+    assert.equal(result.scopeResolution?.buildingRootCount, 1,
+        '전체 PNU의 동 수가 아니라 exact 선택된 대상 root 수다');
+    assert.deepEqual(result.parcels.map((row) => row.pnu).sort(),
+        [ATTACHED_PNU, OFFICIAL_ATTACHED_PNU].sort());
+    assert.ok(proof.calls.includes(`resolver:${OFFICIAL_ATTACHED_PNU}`));
+    assert.doesNotMatch(JSON.stringify(result.scopeResolution), new RegExp(ROOT_PK));
+});
+
+test('다동 아파트의 숫자 동 모호성·부속동·self/up 충돌·추정 명칭은 확인 후보가 아니다', async () => {
+    const cases = [
+        [apartmentTitle('102동', '9008007006005'), apartmentTitle('103동')],
+        [apartmentTitle('101동', '9008007006005'), apartmentTitle('00101동')],
+        [apartmentTitle(), { ...apartmentTitle(), dongNm: '0101' }],
+        [apartmentTitle('102동', '9008007006005'), { ...apartmentTitle(), mgmUpBldrgstPk: '9008007006005' }],
+        [apartmentTitle('102동', '9008007006005'), { ...apartmentTitle(), mainAtchGbCd: '1' }],
+        [apartmentTitle('102동', '9008007006005'), apartmentTitle('제101동')],
+        [apartmentTitle('102동', '9008007006005'), apartmentTitle('101동 1라인')],
+        [apartmentTitle('102동', '9008007006005'), { ...apartmentTitle(), etcPurps: '아파트,근린생활시설' }],
+        [apartmentTitle('102동', '9008007006005'), { ...apartmentTitle(), mainPurpsCd: '02001' }],
+        [apartmentTitle('102동', '9008007006005'), { ...apartmentTitle(), regstrGbCd: '1' }],
+        [apartmentTitle('102동', 'invalid'), apartmentTitle()],
+    ];
+    for (const titleRows of cases) {
+        const result = await lookupApartment(apartmentProof({ title: complete(titleRows) }));
+        assert.equal(result.scopeResolution, undefined, JSON.stringify(titleRows));
+        assert.ok(result.warnings.includes('SCOPE_CONFIRMATION_EVIDENCE_CONFLICT'));
+    }
+});
+
+test('아파트 전체 root bylot·부속지 원문 불완전이나 다른 동의 다른 범위는 추정 병합하지 않는다', async () => {
+    const otherPk = '9008007006005';
+    const proofs = [
+        apartmentProof({ attached: incomplete('getBrAtchJibunInfo') }),
+        apartmentProof({ title: incomplete('getBrTitleInfo') }),
+        apartmentProof({ attached: complete([attachedRow(ATTACHED_PNU, OFFICIAL_ATTACHED_PNU)]) }),
+        apartmentProof({ attached: complete([
+            attachedRow(ATTACHED_PNU, OFFICIAL_ATTACHED_PNU),
+            attachedRow(ATTACHED_PNU, OFFICIAL_ATTACHED_PNU),
+            attachedRow(ATTACHED_PNU, OFFICIAL_ATTACHED_PNU, otherPk),
+        ]) }),
+        apartmentProof({ title: complete([
+            apartmentTitle('101동', ROOT_PK, '2'), apartmentTitle('102동', otherPk),
+        ]) }),
+        apartmentProof({ title: complete([
+            apartmentTitle(), apartmentTitle('102동', otherPk, '0'),
+        ]) }),
+        apartmentProof({ title: complete([
+            apartmentTitle(), apartmentTitle('102동', otherPk, '2'),
+        ]) }),
+        apartmentProof({ attached: complete([
+            attachedRow(ATTACHED_PNU, ATTACHED_PNU),
+            attachedRow(ATTACHED_PNU, OFFICIAL_ATTACHED_PNU, otherPk),
+        ]) }),
+        apartmentProof({ attached: complete([
+            attachedRow(ATTACHED_PNU, OFFICIAL_ATTACHED_PNU),
+            attachedRow(ATTACHED_PNU, OFFICIAL_ATTACHED_PNU, otherPk),
+            attachedRow(ATTACHED_PNU, OFFICIAL_ATTACHED_PNU, '9008007006999'),
+        ]) }),
+        apartmentProof({ attached: complete([
+            attachedRow(ATTACHED_PNU, OFFICIAL_ATTACHED_PNU),
+            attachedRow(ATTACHED_PNU, SIBLING_PNU, otherPk),
+        ]) }),
+        apartmentProof({ attached: complete([
+            attachedRow(ATTACHED_PNU, OFFICIAL_ATTACHED_PNU),
+            attachedRow(SIBLING_PNU, OFFICIAL_ATTACHED_PNU, otherPk),
+        ]) }),
+        apartmentProof({ title: complete([
+            apartmentTitle(),
+            { ...apartmentTitle('102동', otherPk), bylotCnt: undefined },
+        ]), basis: incomplete('getBrBasisOulnInfo') }),
+        apartmentProof({ title: complete([
+            apartmentTitle(),
+            { ...apartmentTitle('102동', otherPk), bylotCnt: undefined },
+        ]), basis: completeZero() }),
+    ];
+    for (const proof of proofs) {
+        const result = await lookupApartment(proof);
+        assert.equal(result.scopeResolution, undefined);
+    }
+});
+
+test('아파트는 단일 공식 동과 bylot0도 지원하되 단일 표제부의 다른 동을 자동 선택하지 않는다', async () => {
+    for (const pair of [
+        apartmentTitle('101동', ROOT_PK, '0'),
+        { ...apartmentTitle('101동', ROOT_PK, '0'), mainPurpsCd: '02001', mainPurpsCdNm: '아파트' },
+    ]) {
+        const result = await lookupApartment(apartmentProof({
+            title: complete([pair]), attached: completeZero(),
+        }));
+        assert.equal(result.scopeResolution?.strategy, 'LDAREG');
+        assert.equal(result.scopeResolution?.scopePnuCount, 1);
+    }
+    const mismatch = await lookupApartment(apartmentProof({
+        title: complete([apartmentTitle('102동', ROOT_PK, '0')]),
+        attached: completeZero(),
+    }));
+    assert.equal(mismatch.scopeResolution, undefined);
+});
+
+test('아파트 scope digest는 제외 동의 식별과 전체 source 근거를 보존하고 순서만 바뀌면 같다', async () => {
+    const otherPk = '9008007006005';
+    const original = await lookupApartment();
+    const reordered = await lookupApartment(apartmentProof({
+        title: complete([apartmentTitle('00101동'), apartmentTitle('102동', otherPk)]),
+        attached: complete([
+            attachedRow(ATTACHED_PNU, OFFICIAL_ATTACHED_PNU),
+            attachedRow(ATTACHED_PNU, OFFICIAL_ATTACHED_PNU, otherPk),
+        ]),
+    }));
+    const renamedSibling = await lookupApartment(apartmentProof({
+        title: complete([apartmentTitle('00101동'), apartmentTitle('103동', otherPk)]),
+    }));
+    assert.match(original.scopeResolution?.evidenceDigest ?? '', /^sha256:[a-f0-9]{64}$/);
+    assert.equal(original.scopeResolution?.evidenceDigest, reordered.scopeResolution?.evidenceDigest);
+    assert.notEqual(original.scopeResolution?.evidenceDigest, renamedSibling.scopeResolution?.evidenceDigest);
+});
+
+test('다동 아파트는 대상 이외 동에 공식 부속지가 없는 경우에도 전체 bylot0 검증을 유지한다', async () => {
+    const otherPk = '9008007006005';
+    const result = await lookupApartment(apartmentProof({
+        title: complete([apartmentTitle(), apartmentTitle('102동', otherPk, '0')]),
+        attached: complete([attachedRow(ATTACHED_PNU, OFFICIAL_ATTACHED_PNU)]),
+    }));
+    assert.equal(result.scopeResolution?.scopePnuCount, 2);
+});
+
+test('다동 아파트 27개 동과 관리동의 공통 부속지를 임의 root 탈락 없이 검증한다', async () => {
+    const rows = Array.from({ length: 27 }, (_, index) =>
+        apartmentTitle(String(index + 101), index === 0 ? ROOT_PK : String(9008007006000 + index))
+    );
+    rows.push({
+        ...titleRow('0', DETACHED, '9008007006100'),
+        dongNm: '관리사무소', mainAtchGbCd: '1',
+    });
+    const result = await lookupApartment(apartmentProof({
+        title: complete(rows),
+        attached: complete(rows.slice(0, 27).map((row) =>
+            attachedRow(ATTACHED_PNU, OFFICIAL_ATTACHED_PNU, String(row.mgmBldrgstPk))
+        )),
+    }));
+    assert.equal(result.scopeResolution?.strategy, 'LDAREG');
+    assert.equal(result.scopeResolution?.buildingRootCount, 1);
+    assert.equal(result.scopeResolution?.scopePnuCount, 2);
+});
+
 test('group relation 조회는 (기준 PNU, 관리번호) exact pair를 교차곱 limit과 분리한다', async () => {
     const exactA = {
         union_id: UNION_ID,

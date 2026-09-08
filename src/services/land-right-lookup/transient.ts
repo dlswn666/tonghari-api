@@ -40,6 +40,7 @@ import {
     resolveParcelScopeCompleteness,
     resolveSameRunOfficialReadOnlyComponent,
     type DbScopeResolution,
+    type ParcelScopeResult,
 } from '../land-area-sync/scope';
 import {
     BYLOT_SOURCE_POLICY,
@@ -49,7 +50,7 @@ import {
     isOptionalRegistryManagementPkValid,
     normalizeRegistryManagementPk,
 } from '../land-area-sync/registry-pk';
-import { buildingHubRowsMatchPnu } from '../gis-shared/pnu';
+import { assembleAttachedPnus, buildingHubRowsMatchPnu } from '../gis-shared/pnu';
 
 const UUID_RE =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -57,8 +58,10 @@ const PNU_RE = /^\d{10}[12]\d{8}$/;
 const MAX_PUBLIC_SCALAR_LENGTH = 500;
 export const MAX_LAND_RIGHT_SCOPE_PNUS = 20;
 export const MAX_LAND_RIGHT_RELATION_ROWS = 100;
+const PROPERTY_MEMBERSHIP_PAGE_SIZE = 1000;
+const MAX_PROPERTY_MEMBERSHIP_ROWS = 50000;
 const SCOPE_EVIDENCE_DIGEST_VERSION =
-    'land-right-lookup/scope-evidence@1';
+    'land-right-lookup/scope-evidence@2';
 const HEX_64_RE = /^[a-f0-9]{64}$/i;
 
 interface PropertyUnitRow {
@@ -292,20 +295,46 @@ export function createSupabaseLandRightLookupRepository(
 
         async findPropertyMembership(unionId, pnus, signal) {
             if (pnus.length === 0) return [];
-            let query = client
-                .from('property_units')
-                .select(
-                    'id, union_id, building_unit_id, pnu, is_deleted, dong, ho, land_area, land_area_source'
-                )
-                .eq('union_id', unionId)
-                .eq('is_deleted', false)
-                .in('pnu', pnus);
-            if (signal) query = query.abortSignal(signal);
-            const { data, error } = await query;
-            if (error) throw databaseReadFailure();
-            return Array.isArray(data)
-                ? (data as PropertyMembershipRow[])
-                : [];
+            const rows: PropertyMembershipRow[] = [];
+            let expectedCount: number | undefined;
+            let previousId: string | undefined;
+
+            // PostgREST의 기본 1,000행 제한을 완전한 membership으로 오인하지 않는다.
+            // 매 페이지의 전체 count와 고유 ID 순서를 확인하고 resolver hash로 재검증한다.
+            do {
+                if (signal?.aborted) throw databaseReadFailure();
+                let query = client
+                    .from('property_units')
+                    .select(
+                        'id, union_id, building_unit_id, pnu, is_deleted, dong, ho, land_area, land_area_source',
+                        { count: 'exact' }
+                    )
+                    .eq('union_id', unionId)
+                    .eq('is_deleted', false)
+                    .in('pnu', pnus)
+                    .order('id', { ascending: true })
+                    .range(rows.length, rows.length + PROPERTY_MEMBERSHIP_PAGE_SIZE - 1);
+                if (signal) query = query.abortSignal(signal);
+                const { data, error, count } = await query;
+                if (
+                    error || !Array.isArray(data) || !Number.isSafeInteger(count) ||
+                    count === null || count < 0 || count > MAX_PROPERTY_MEMBERSHIP_ROWS ||
+                    (expectedCount !== undefined && count !== expectedCount) ||
+                    data.length > PROPERTY_MEMBERSHIP_PAGE_SIZE ||
+                    rows.length + data.length > count ||
+                    (data.length === 0 && rows.length < count)
+                ) throw databaseReadFailure();
+                expectedCount = count;
+                for (const row of data as PropertyMembershipRow[]) {
+                    if (
+                        typeof row.id !== 'string' || !UUID_RE.test(row.id) ||
+                        (previousId !== undefined && row.id.toLowerCase() <= previousId)
+                    ) throw databaseReadFailure();
+                    previousId = row.id.toLowerCase();
+                    rows.push(row);
+                }
+            } while (rows.length < expectedCount);
+            return rows;
         },
     };
 }
@@ -749,9 +778,23 @@ function normalizeResolverMembership(
     );
 }
 
+interface SelectedTitleRoot {
+    rootPk: string;
+    selectedTitleRows: BrTitleRow[];
+}
+
+/** 숫자 동의 접미사·선행 0만 동치로 본다. 문자동/복합동 추정은 하지 않는다. */
+function numericDongIdentity(value: unknown): string | null {
+    if (typeof value !== 'string') return null;
+    const match = value.normalize('NFKC').trim().match(/^(\d+)(?:동)?$/u);
+    if (!match || /^0+$/.test(match[1])) return null;
+    return match[1].replace(/^0+(?=\d)/, '');
+}
+
 function strictTitleRoot(
-    title: StrictScan<BrTitleRow>
-): string | null {
+    title: StrictScan<BrTitleRow>,
+    expectedDong: string | null
+): SelectedTitleRoot | null {
     if (title.state !== 'COMPLETE') return null;
     const selfRoots = new Set<string>();
     const resolverRoots = new Set<string>();
@@ -765,14 +808,99 @@ function strictTitleRoot(
         selfRoots.add(self);
         resolverRoots.add(root);
     }
-    if (
-        selfRoots.size !== 1 ||
-        resolverRoots.size !== 1 ||
-        [...selfRoots][0] !== [...resolverRoots][0]
-    ) {
-        return null;
+    if (selfRoots.size === 1 && resolverRoots.size === 1 &&
+        [...selfRoots][0] === [...resolverRoots][0]) {
+        return { rootPk: [...selfRoots][0], selectedTitleRows: title.rows };
     }
-    return [...resolverRoots][0];
+    const targetDong = numericDongIdentity(expectedDong);
+    if (!targetDong) return null;
+    const selectedTitleRows = title.rows.filter(
+        (row) => numericDongIdentity(row.dongNm) === targetDong
+    );
+    // 같은 숫자 동을 서로 다른 표제부/중복 행이 주장하면 선출하지 않는다.
+    if (selectedTitleRows.length !== 1) return null;
+    const selected = selectedTitleRows[0];
+    if (nullableString(selected.mainAtchGbCd) !== '0') return null;
+    const rootPk = normalizeRegistryManagementPk(selected.mgmBldrgstPk);
+    const upPk = normalizeRegistryManagementPk(selected.mgmUpBldrgstPk);
+    if (!rootPk || (upPk !== null && upPk !== rootPk)) return null;
+    // 동일 self PK의 다른 동 표기 역시 식별 충돌이다.
+    if (title.rows.filter((row) =>
+        normalizeRegistryManagementPk(row.mgmBldrgstPk) === rootPk
+    ).length !== 1) return null;
+    return { rootPk, selectedTitleRows };
+}
+
+/** 자동동기화 allowlist를 넓히지 않는, 공식자료 조회 전용 아파트 exact 계약. */
+function isExactApartmentTitle(rows: readonly BrTitleRow[]): boolean {
+    return rows.length === 1 && rows.every((row) =>
+        nullableString(row.regstrGbCd) === '2' &&
+        nullableString(row.mainAtchGbCd) === '0' &&
+        ((nullableString(row.mainPurpsCd) === '02001' &&
+            nullableString(row.mainPurpsCdNm) === '아파트' &&
+            (nullableString(row.etcPurps) === null || nullableString(row.etcPurps) === '아파트')) ||
+        (nullableString(row.mainPurpsCd) === '02000' &&
+            nullableString(row.mainPurpsCdNm) === '공동주택' &&
+            nullableString(row.etcPurps) === '아파트'))
+    );
+}
+
+/**
+ * 다동 아파트는 조회 대상 동을 정하되 전체 bylot/부속지번의 완전성을 유지한다.
+ * 다른 동의 부속지는 없거나 대상 동과 정확히 같아야 한다. 다른 범위를 합집합으로
+ * 추정하지 않으며 공통 자동동기화 gate의 아파트 미지원 분류만 이 read-only 경로에서 분리한다.
+ */
+function apartmentOfficialMemberPnus(input: {
+    anchorPnu: string;
+    rootPk: string;
+    expectedDong: string | null;
+    selectedTitleRows: readonly BrTitleRow[];
+    attached: StrictScan<BrAtchJibunRow>;
+    gate: ParcelScopeResult;
+}): string[] | null {
+    const { anchorPnu, rootPk, selectedTitleRows, attached, gate } = input;
+    const classification = gate.classification;
+    if (!isExactApartmentTitle(selectedTitleRows) ||
+        numericDongIdentity(input.expectedDong) === null ||
+        numericDongIdentity(selectedTitleRows[0]?.dongNm) !== numericDongIdentity(input.expectedDong) ||
+        gate.state !== 'REVIEW_REQUIRED' || gate.bylot.status !== 'RESOLVED' ||
+        classification.kind !== 'REVIEW_REQUIRED' ||
+        !['UNSUPPORTED_HOUSING_TYPE', 'CONTRADICTORY_OTHER_PURPOSE_SIGNAL'].includes(classification.reason) ||
+        // 공통 조립기는 base/attached만으로 중복 제거한다. 여러 동이 같은 부속지를
+        // 공유할 때의 개수 축은 아래에서 관리 PK별로 원문 전체를 다시 검증한다.
+        gate.issues.some((issue) => issue !== classification.issue &&
+            issue !== 'SCOPE_CACHE_SCAN_CONFLICT' && issue !== 'BYLOT_ATTACHED_COUNT_MISMATCH') ||
+        (attached.state !== 'COMPLETE' && attached.state !== 'COMPLETE_ZERO')) return null;
+    const assembledRows = attached.rows.map((row) => assembleAttachedPnus([{
+        mgmBldrgstPk: normalizeRegistryManagementPk(row.mgmBldrgstPk) ?? '',
+        sigunguCd: row.sigunguCd ?? '',
+        bjdongCd: row.bjdongCd ?? '',
+        platGbCd: row.platGbCd ?? '',
+        bun: row.bun ?? '',
+        ji: row.ji ?? '',
+        atchSigunguCd: row.atchSigunguCd ?? '',
+        atchBjdongCd: row.atchBjdongCd ?? '',
+        atchPlatGbCd: row.atchPlatGbCd ?? '',
+        atchBun: row.atchBun ?? '',
+        atchJi: row.atchJi ?? '',
+    }]));
+    const pairs = assembledRows.flatMap((row) => row.pairs);
+    if (assembledRows.some((row) => row.rejected.length > 0) ||
+        pairs.some((pair) => pair.basePnu !== anchorPnu) ||
+        new Set(pairs.map((pair) => `${pair.mgmBldrgstPk}|${pair.basePnu}|${pair.attachedPnu}`)).size !== pairs.length) return null;
+    const selectedPnus = [...new Set(pairs.filter((pair) =>
+        normalizeRegistryManagementPk(pair.mgmBldrgstPk) === rootPk
+    ).map((pair) => pair.attachedPnu))].sort();
+    const selectedBylot = gate.bylot.evidence.find((row) => row.mgmBldrgstPk === rootPk);
+    if (!selectedBylot || selectedBylot.count !== selectedPnus.length) return null;
+    for (const evidence of gate.bylot.evidence) {
+        const pnus = [...new Set(pairs.filter((pair) =>
+            normalizeRegistryManagementPk(pair.mgmBldrgstPk) === evidence.mgmBldrgstPk
+        ).map((pair) => pair.attachedPnu))].sort();
+        if (evidence.count !== pnus.length || (pnus.length > 0 &&
+            JSON.stringify(pnus) !== JSON.stringify(selectedPnus))) return null;
+    }
+    return [anchorPnu, ...selectedPnus].sort();
 }
 
 function dbScopeIsExactNoEvidence(
@@ -905,6 +1033,16 @@ function buildScopeEvidenceDigest(input: {
                     ? strictScanSummary(input.basis)
                     : null,
             },
+            // 동 선출에 참여한 필드는 공통 scope digest가 다루지 않으므로 별도로 묶는다.
+            // 전체 응답의 행을 유지하여 다른 동의 식별 변경도 fresh 검토에서 감지한다.
+            titleSelectionEvidence: (input.title.state === 'COMPLETE' ? input.title.rows : [])
+                .map((row) => ({
+                    selfPk: normalizeRegistryManagementPk(row.mgmBldrgstPk),
+                    upPk: normalizeRegistryManagementPk(row.mgmUpBldrgstPk),
+                    dong: nullableString(row.dongNm),
+                    mainAtchGbCd: nullableString(row.mainAtchGbCd),
+                }))
+                .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))),
         }),
         'hex'
     );
@@ -977,8 +1115,8 @@ async function resolveOfficialScopeEvidence(
             title.rows as Array<Record<string, unknown>>,
             input.propertyPnu
         );
-    const rootPk = titlePnuExact ? strictTitleRoot(title) : null;
-    if (!rootPk) {
+    const selectedTitle = titlePnuExact ? strictTitleRoot(title, input.expectedDong) : null;
+    if (!selectedTitle) {
         return {
             kind: 'HOLD',
             warning:
@@ -987,6 +1125,7 @@ async function resolveOfficialScopeEvidence(
                     : 'SCOPE_CONFIRMATION_EVIDENCE_CONFLICT',
         };
     }
+    const { rootPk, selectedTitleRows } = selectedTitle;
 
     const initialDbScope = await resolveScopeForPnu(
         input.unionId,
@@ -1040,11 +1179,22 @@ async function resolveOfficialScopeEvidence(
         dbScope: initialDbScope,
         baseScans: [baseScan],
         policy,
+        landRightRootIdentity: rootPk,
     });
 
     let memberPnus: string[];
     let officialComponentDigest: string | null = null;
-    if (
+    const apartmentPnus = apartmentOfficialMemberPnus({
+        anchorPnu: input.propertyPnu,
+        rootPk,
+        expectedDong: input.expectedDong,
+        selectedTitleRows,
+        attached,
+        gate,
+    });
+    if (apartmentPnus) {
+        memberPnus = apartmentPnus;
+    } else if (
         gate.state === 'SINGLE_SCOPE_CONFIRMATION_REQUIRED' &&
         gate.issues.length === 0 &&
         gate.classification.kind === 'CLASSIFIED' &&
@@ -1057,6 +1207,7 @@ async function resolveOfficialScopeEvidence(
             dbScope: initialDbScope,
             baseScans: [baseScan],
             policy,
+            landRightRootIdentity: rootPk,
         });
         if (!component || gate.classification.kind !== 'CLASSIFIED') {
             return {
@@ -1204,7 +1355,7 @@ async function resolveOfficialScopeEvidence(
     }
 
     if (
-        gate.classification.kind !== 'CLASSIFIED' ||
+        (!apartmentPnus && gate.classification.kind !== 'CLASSIFIED') ||
         !HEX_64_RE.test(gate.externalScopeDigest)
     ) {
         return {
@@ -1212,7 +1363,9 @@ async function resolveOfficialScopeEvidence(
             warning: 'SCOPE_CONFIRMATION_EVIDENCE_CONFLICT',
         };
     }
-    const strategy = gate.classification.family;
+    const strategy = apartmentPnus ? 'LDAREG' :
+        gate.classification.kind === 'CLASSIFIED' ? gate.classification.family : null;
+    if (!strategy) return { kind: 'HOLD', warning: 'SCOPE_CONFIRMATION_EVIDENCE_CONFLICT' };
     if (
         strategy === 'LADFRL' &&
         (memberPnus.length !== 1 || membership.length !== 1)
@@ -1250,6 +1403,7 @@ async function resolveOfficialScopeEvidence(
                 basePnuCount: 1,
                 scopePnuCount: memberPnus.length,
                 propertyUnitCount: membership.length,
+                // 전체 PNU의 동 수가 아닌 exact 선출된 대지권 대상 root의 수다.
                 buildingRootCount: 1,
             },
         },
