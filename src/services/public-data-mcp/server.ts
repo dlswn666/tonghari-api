@@ -6,6 +6,8 @@ import {
 } from '@modelcontextprotocol/server';
 import {
     GIS_MCP_REQUIRED_SCOPE,
+    LOOKUP_BUILDING_FOOTPRINTS_TOOL_NAME,
+    LookupBuildingFootprintsInputV1Schema,
     LOOKUP_BUILDING_REGISTER_TOOL_NAME,
     LOOKUP_HOUSING_OFFICIAL_PRICE_TOOL_NAME,
     LOOKUP_LAND_RIGHT_REGISTRATION_TOOL_NAME,
@@ -268,7 +270,7 @@ async function executeTool(
     }
 }
 
-/** 기존 5개와 전체 조회 1개의 read-only surface를 등록하는 순수 factory다. */
+/** 기존 5개, 전체 조회, 건물 윤곽의 read-only surface를 등록하는 순수 factory다. */
 export function createPublicDataMcpServer(
     dependencies: PublicDataMcpServerDependencies
 ): McpServer {
@@ -391,6 +393,18 @@ export function createPublicDataMcpServer(
             annotations: readOnlyAnnotations,
         },
         (input, context) => executeTool(dependencies, LOOKUP_FULL_GIS_PUBLIC_DATA_TOOL_NAME, input, context)
+    );
+
+    server.registerTool(
+        LOOKUP_BUILDING_FOOTPRINTS_TOOL_NAME,
+        {
+            title: '동별 건물 윤곽 조회',
+            description: 'EPSG:4326 bbox [서쪽경도, 남쪽위도, 동쪽경도, 북쪽위도]의 VWorld 건축물정보 윤곽과 동명·건물명·층수를 조회한다. BBOX는 2km² 이하, 각 축 0.05도 이하이고 page는 1부터, limit은 기본 20·최대 100이다. hasMore이면 같은 bbox·limit으로 다음 page를 조회한다. feature ID는 건축물대장 PK/PNU가 아니며 전체 단지나 동별 매칭 완성을 보증하지 않는다. 읽기 전용이며 후속 저장은 별도 경로에서 수행한다.',
+            inputSchema: LookupBuildingFootprintsInputV1Schema,
+            outputSchema: PublicDataMcpResultV1Schema,
+            annotations: readOnlyAnnotations,
+        },
+        (input, context) => executeTool(dependencies, LOOKUP_BUILDING_FOOTPRINTS_TOOL_NAME, input, context)
     );
 
     server.registerPrompt(

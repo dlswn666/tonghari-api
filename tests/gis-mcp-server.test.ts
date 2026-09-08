@@ -26,7 +26,7 @@ function context(): ServerContext {
     } as ServerContext;
 }
 
-test('서버는 기존 5개와 전체 조회 도구, prompt 1개, resource 1개를 등록한다', () => {
+test('서버는 기존 5개와 전체 조회·건물 윤곽 도구, prompt 1개, resource 1개를 등록한다', () => {
     const server = createPublicDataMcpServer({ async execute() { return {}; } });
     const registered = server as unknown as RegisteredServer;
     assert.deepEqual(Object.keys(registered._registeredTools), [...PUBLIC_DATA_MCP_TOOL_NAMES]);

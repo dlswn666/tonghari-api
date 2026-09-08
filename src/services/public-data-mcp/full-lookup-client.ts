@@ -87,10 +87,10 @@ function delay(ms: number, signal: AbortSignal): Promise<void> {
     });
 }
 
-// 모든 full client 인스턴스가 VWorld의 같은 호출 간격과 실제 socket 직렬화를 공유한다.
+// 전체 조회와 건물 윤곽 client가 VWorld의 같은 호출 간격과 실제 socket 직렬화를 공유한다.
 let vworldTail: Promise<void> = Promise.resolve();
 let vworldLastStartedAt = 0;
-async function inVworldSlot<T>(operation: () => Promise<T>, interval: number, signal: AbortSignal): Promise<T> {
+export async function inVworldSlot<T>(operation: () => Promise<T>, interval: number, signal: AbortSignal): Promise<T> {
     const previous = vworldTail;
     let release!: () => void;
     vworldTail = new Promise<void>((resolve) => { release = resolve; });

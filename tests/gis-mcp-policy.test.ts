@@ -12,7 +12,7 @@ import {
     ResolveAddressToPnuInputV1Schema,
 } from '../src/services/public-data-mcp/policy';
 
-test('GIS MCP 공개 계약은 기존 5개와 전체 조회 도구 및 별도 scope를 고정한다', () => {
+test('GIS MCP 공개 계약은 기존 5개와 전체 조회·건물 윤곽 도구 및 별도 scope를 고정한다', () => {
     assert.equal(PUBLIC_DATA_MCP_SERVER_NAME, 'tonghari-public-gis');
     assert.equal(GIS_MCP_REQUIRED_SCOPE, 'gis:read');
     assert.equal(GIS_MCP_CLIENT_ID, 'tonghari-gis-mcp');
@@ -24,6 +24,7 @@ test('GIS MCP 공개 계약은 기존 5개와 전체 조회 도구 및 별도 sc
         'lookup_housing_official_price_v1',
         'lookup_land_right_registration_v1',
         'lookup_full_gis_public_data_v1',
+        'lookup_building_footprints_v1',
     ]);
 });
 

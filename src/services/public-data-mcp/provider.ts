@@ -13,6 +13,12 @@ import {
     type LookupFullGisPublicDataInputV1,
 } from './full-lookup-contract';
 import { createFullGisLookupProvider } from './full-lookup-provider';
+import { createBuildingFootprintsProvider } from './building-footprints-provider';
+import { createBuildingFootprintsClient } from './building-footprints-client';
+import {
+    BUILDING_FOOTPRINTS_ATTRIBUTION, BUILDING_FOOTPRINTS_SOURCE, LOOKUP_BUILDING_FOOTPRINTS_TOOL_NAME,
+    type BuildingFootprintsClient, type LookupBuildingFootprintsInputV1,
+} from './building-footprints-contract';
 import {
     LandRightLookupBudget,
     type NedFetchResult,
@@ -64,6 +70,9 @@ export const PUBLIC_DATA_MCP_TOOL_PROVENANCE: Record<
     PublicDataMcpToolName,
     { provider: string; source: string; attribution: string }
 > = {
+    [LOOKUP_BUILDING_FOOTPRINTS_TOOL_NAME]: {
+        provider: 'VWorld', source: BUILDING_FOOTPRINTS_SOURCE, attribution: BUILDING_FOOTPRINTS_ATTRIBUTION,
+    },
     [LOOKUP_FULL_GIS_PUBLIC_DATA_TOOL_NAME]: {
         provider: 'VWorld / 공공데이터포털 건축HUB',
         source: [...new Set(FULL_GIS_SOURCE_IDS.map((id) => FULL_GIS_SOURCE_META[id].source))].join(', '),
@@ -139,6 +148,7 @@ type LandRightProviderMethods = Pick<
 >;
 
 export interface PublicDataMcpProviderDependenciesV1 {
+    buildingFootprints?: BuildingFootprintsClient;
     gis?: GisProviderMethods;
     landRight?: LandRightProviderMethods;
     vworldAuth?: VworldAuth;
@@ -165,6 +175,10 @@ function queryFor(
     input: PublicDataMcpToolInput
 ): Record<string, unknown> {
     switch (tool) {
+        case LOOKUP_BUILDING_FOOTPRINTS_TOOL_NAME: {
+            const footprints = input as LookupBuildingFootprintsInputV1;
+            return { bbox: footprints.bbox, page: footprints.page, limit: footprints.limit };
+        }
         case LOOKUP_FULL_GIS_PUBLIC_DATA_TOOL_NAME:
             return { ...(input as LookupFullGisPublicDataInputV1) };
         case RESOLVE_ADDRESS_TO_PNU_TOOL_NAME:
@@ -434,6 +448,7 @@ export function createPublicDataMcpProviderV1(
     };
     const now = dependencies.now ?? Date.now;
     let fullLookup: ReturnType<typeof createFullGisLookupProvider> | undefined;
+    let footprints: ReturnType<typeof createBuildingFootprintsProvider> | undefined;
 
     async function resolveAddress(
         input: ResolveAddressToPnuInputV1,
@@ -843,6 +858,10 @@ export function createPublicDataMcpProviderV1(
         async execute(tool, input, context) {
             context.signal.throwIfAborted();
             switch (tool) {
+                case LOOKUP_BUILDING_FOOTPRINTS_TOOL_NAME:
+                    footprints ??= createBuildingFootprintsProvider({ now, client: dependencies.buildingFootprints
+                        ?? createBuildingFootprintsClient({ vworldKey: vworldAuth.key, vworldDomain: vworldAuth.domain }) });
+                    return footprints.execute(input as LookupBuildingFootprintsInputV1, context);
                 case LOOKUP_FULL_GIS_PUBLIC_DATA_TOOL_NAME:
                     fullLookup ??= createFullGisLookupProvider({ now });
                     return fullLookup.execute(input as LookupFullGisPublicDataInputV1, context);

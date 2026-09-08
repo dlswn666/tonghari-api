@@ -1,5 +1,10 @@
 import * as z from 'zod/v4';
 import {
+    BuildingFootprintsDataSchema, LOOKUP_BUILDING_FOOTPRINTS_TOOL_NAME,
+    LookupBuildingFootprintsInputV1Schema, type LookupBuildingFootprintsInputV1,
+} from './building-footprints-contract';
+export { LOOKUP_BUILDING_FOOTPRINTS_TOOL_NAME, LookupBuildingFootprintsInputV1Schema } from './building-footprints-contract';
+import {
     LOOKUP_FULL_GIS_PUBLIC_DATA_TOOL_NAME,
     FullGisDataSchema,
     type LookupFullGisPublicDataInputV1,
@@ -7,7 +12,7 @@ import {
 export { LOOKUP_FULL_GIS_PUBLIC_DATA_TOOL_NAME, LookupFullGisPublicDataInputV1Schema } from './full-lookup-contract';
 
 export const PUBLIC_DATA_MCP_SERVER_NAME = 'tonghari-public-gis';
-export const PUBLIC_DATA_MCP_SERVER_VERSION = '1.1.0';
+export const PUBLIC_DATA_MCP_SERVER_VERSION = '1.2.0';
 export const GIS_MCP_REQUIRED_SCOPE = 'gis:read' as const;
 export const GIS_MCP_CLIENT_ID = 'tonghari-gis-mcp' as const;
 
@@ -29,6 +34,7 @@ export const PUBLIC_DATA_MCP_TOOL_NAMES = [
     LOOKUP_HOUSING_OFFICIAL_PRICE_TOOL_NAME,
     LOOKUP_LAND_RIGHT_REGISTRATION_TOOL_NAME,
     LOOKUP_FULL_GIS_PUBLIC_DATA_TOOL_NAME,
+    LOOKUP_BUILDING_FOOTPRINTS_TOOL_NAME,
 ] as const;
 
 export const PUBLIC_DATA_MCP_REVIEW_PROMPT_NAME =
@@ -115,6 +121,7 @@ export type PublicDataMcpToolName =
     (typeof PUBLIC_DATA_MCP_TOOL_NAMES)[number];
 
 export type PublicDataMcpToolInputByName = {
+    [LOOKUP_BUILDING_FOOTPRINTS_TOOL_NAME]: LookupBuildingFootprintsInputV1;
     [LOOKUP_FULL_GIS_PUBLIC_DATA_TOOL_NAME]: LookupFullGisPublicDataInputV1;
     [RESOLVE_ADDRESS_TO_PNU_TOOL_NAME]: ResolveAddressToPnuInputV1;
     [LOOKUP_PARCEL_PUBLIC_DATA_TOOL_NAME]: LookupParcelPublicDataInputV1;
@@ -202,6 +209,22 @@ export const PublicDataMcpResultV1Schema = z.object({
     }).strict().optional(),
     warnings: z.array(z.string().min(1).max(160)).max(30),
 }).strict().superRefine((value, context) => {
+    if (value.tool === LOOKUP_BUILDING_FOOTPRINTS_TOOL_NAME) {
+        if (Object.keys(value.data).length === 0 && ['FAILED', 'INCOMPLETE'].includes(value.status)) return;
+        const data = BuildingFootprintsDataSchema.safeParse(value.data);
+        const query = LookupBuildingFootprintsInputV1Schema.safeParse(value.query);
+        const pagination = value.pagination;
+        if (!data.success || !query.success || !pagination
+            || !['SUCCESS', 'NO_DATA'].includes(value.status)
+            || pagination.offset !== (query.data.page - 1) * query.data.limit
+            || pagination.limit !== query.data.limit || pagination.returned !== data.data.features.length
+            || pagination.returned !== Math.min(pagination.limit, Math.max(0, pagination.total - pagination.offset))
+            || pagination.hasMore !== (pagination.offset + pagination.returned < pagination.total)
+            || (value.status === 'NO_DATA') !== (pagination.total === 0)) {
+            context.addIssue({ code: 'custom', message: '건물 윤곽 자료와 페이지 계약이 일치하지 않습니다.', path: ['data'] });
+        }
+        return;
+    }
     if (value.tool !== LOOKUP_FULL_GIS_PUBLIC_DATA_TOOL_NAME) return;
     // 전송/인증 단계의 안전 오류는 data={}이며, 실제 전체 조회 결과는 14항목 계약을 따른다.
     if (Object.keys(value.data).length === 0 && ['FAILED', 'INCOMPLETE'].includes(value.status)) return;
@@ -236,6 +259,7 @@ export const PUBLIC_DATA_MCP_SERVER_INSTRUCTIONS = [
     'FAILED, INCOMPLETE, PARTIAL 상태를 NO_DATA로 바꾸거나 누락 자료를 추정하지 않는다.',
     '명부 작성·공부 대조를 위한 전체 조회에는 lookup_full_gis_public_data_v1을 사용한다. 14개 자료의 개별 상태와 pagination을 확인한다.',
     'hasMore=true인 자료는 offsets에 해당 자료의 nextOffset을 넣어 이어 조회한다. allSourcesQueried와 allRecordsReturned를 구분한다.',
+    '동별 건물 윤곽은 lookup_building_footprints_v1의 제한된 EPSG:4326 bbox로 별도 조회한다. hasMore=true이면 같은 bbox·limit으로 page를 1 증가시킨다. feature ID를 건축물대장 PK나 PNU로 해석하지 않는다.',
     '표제부·전유부·층별개요 면적과 대지권 분수는 원래 의미를 유지하고, 사람별 소유지분이나 명부 적용 면적으로 자동 변환하지 않는다.',
 ].join('\n');
 
@@ -243,9 +267,10 @@ export const PUBLIC_DATA_MCP_POLICY_V1 = `# 통하리 공개 GIS 데이터 이�
 
 ## 조회 범위와 후속 작업
 
-- 공개 도구는 주소/PNU로 특정한 자료를 조회하는 읽기 전용 도구다. 동기화, 내부 DB 조회·수정, 임의 endpoint 호출은 제공하지 않는다.
+- 공개 도구는 주소/PNU 또는 2km² 이하의 제한된 BBOX로 특정한 자료를 조회하는 읽기 전용 도구다. 동기화, 내부 DB 조회·수정, 임의 endpoint 호출은 제공하지 않는다.
 - 이 서버는 조회만 수행하며, 결과를 이용한 후속 DB 작업은 별도 작업 경로에서 수행한다.
 - 전체 조회는 기존 인스펙터의 14개 자료를 source별로 반환하며, 건물호수조회는 운영자가 별도 이용허락을 확보한 범위에서 제공한다.
+- 건물 윤곽은 별도 도구가 LT_C_BLDGINFO의 실제 Polygon/MultiPolygon과 허용된 건물 속성을 반환한다. 동명 누락을 추정하지 않으며, 원천 feature ID는 PNU 또는 건축물대장 PK가 아니다. 페이지 전체 수집과 특정 동 매칭은 후속 검증이다.
 - API key, bearer token, provider 원문 오류 body, stack, 소유자 식별정보는 결과에 포함하지 않는다.
 
 ## 출처와 기준일

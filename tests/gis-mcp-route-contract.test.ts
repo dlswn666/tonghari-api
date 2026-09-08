@@ -137,7 +137,7 @@ describe('GIS MCP Streamable HTTP 공개 계약', () => {
         };
     }
 
-    it('tools/list와 tools/call이 6개 read-only surface와 gis:read principal을 유지한다', async () => {
+    it('tools/list와 tools/call이 7개 read-only surface와 gis:read principal을 유지한다', async () => {
         const listed = await request('tools/list');
         assert.equal(listed.response.status, 200);
         assert.equal(listed.response.headers.get('cache-control'), 'no-store');
