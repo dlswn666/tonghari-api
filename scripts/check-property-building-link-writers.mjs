@@ -95,6 +95,35 @@ function callPath(call) {
     return null;
 }
 
+// 파일 어느 범위에든 Buffer를 가리는 값 선언/대입이 있으면 보수적으로 예외를 적용하지 않는다.
+// 순수 전역 Buffer 또는 node:buffer의 명시적 Buffer import만 DB .from 오탐에서 제외한다.
+function hasUnsafeBufferBinding(sourceFile) {
+    let unsafe = false;
+    const visit = (node) => {
+        const valueDeclaration = ts.isVariableDeclaration(node) || ts.isParameter(node)
+            || ts.isBindingElement(node) || ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node)
+            || ts.isClassDeclaration(node) || ts.isClassExpression(node) || ts.isEnumDeclaration(node)
+            || ts.isModuleDeclaration(node) || ts.isImportEqualsDeclaration(node)
+            || ts.isImportClause(node) || ts.isImportSpecifier(node) || ts.isNamespaceImport(node);
+        if (valueDeclaration && node.name && ts.isIdentifier(node.name) && node.name.text === 'Buffer') {
+            const declaration = ts.isImportSpecifier(node) ? node.parent?.parent?.parent : null;
+            const isBuiltinImport = declaration && ts.isImportDeclaration(declaration)
+                && staticString(declaration.moduleSpecifier) === 'node:buffer'
+                && (node.propertyName?.text ?? node.name.text) === 'Buffer';
+            if (!isBuiltinImport) unsafe = true;
+        }
+        if (ts.isBinaryExpression(node)
+            && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
+            && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) {
+            const left = node.left.getText(sourceFile);
+            if (/\bBuffer\b/.test(left)) unsafe = true;
+        }
+        ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+    return unsafe;
+}
+
 function lineAt(sourceFile, node) {
     return sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
 }
@@ -521,6 +550,7 @@ function scanSourceText(source, relativePath) {
         scriptKind,
     );
     const declarations = collectVariableDeclarations(sourceFile);
+    const safeBuiltinBuffer = !hasUnsafeBufferBinding(sourceFile);
     const propertyUnitMutations = [];
     const buildingMutations = [];
     const rpcCalls = [];
@@ -585,6 +615,7 @@ function scanSourceText(source, relativePath) {
             ts.isCallExpression(node)
             && isMethodCall(node, 'from')
             && callPath(node) !== 'Array.from'
+            && !(safeBuiltinBuffer && callPath(node) === 'Buffer.from')
         ) {
             const table = staticString(node.arguments[0]);
             const chained = chainCallsAfter(node);

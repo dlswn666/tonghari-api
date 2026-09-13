@@ -158,9 +158,13 @@ export const env = {
     QUEUE_MAX_SIZE: getEnvNumber('QUEUE_MAX_SIZE', 100),
 
     // KG이니시스 통합인증
+    KG_INICIS_ENABLED: parseExactTrueFeatureFlag(process.env.KG_INICIS_ENABLED),
+    KG_INICIS_DATABASE_TARGET: getEnvVar('KG_INICIS_DATABASE_TARGET', false),
     KG_INICIS_MID: getEnvVar('KG_INICIS_MID', false),
     KG_INICIS_API_KEY: getEnvVar('KG_INICIS_API_KEY', false),
-    KG_INICIS_ALLOWED_HOSTS: process.env.KG_INICIS_ALLOWED_HOSTS || '',
+    KG_INICIS_SEED_IV: getEnvVar('KG_INICIS_SEED_IV', false),
+    KG_INICIS_CALLBACK_BASE_URL: getEnvVar('KG_INICIS_CALLBACK_BASE_URL', false),
+    KG_INICIS_ID_PROVIDERS: getEnvVar('KG_INICIS_ID_PROVIDERS', false),
 
     // GIS & Public Data API
     VWORLD_API_KEY: process.env.VWORLD_API_KEY || '',

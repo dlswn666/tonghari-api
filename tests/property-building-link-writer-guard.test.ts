@@ -365,3 +365,35 @@ async function writeWithDynamicBuilderOperation(client: any, operation: string) 
         /dynamic-builder-alias-operation-not-resolved/,
     );
 });
+
+test('표준 Buffer.from 인코딩은 Supabase 동적 table builder가 아니다', () => {
+    const inventory = scanSourceText(`
+export function decode(value: string, iv: string) {
+    const ciphertext = Buffer.from(value, 'base64');
+    const ivBytes = Buffer.from(iv, 'utf8');
+    return { ciphertext, ivBytes };
+}
+`, 'src/buffer-encoding.ts');
+    assert.doesNotThrow(() => validateInventoryAgainstPolicy(inventory, policyFor(inventory)));
+    assert.equal(inventory.propertyUnitMutations.length, 0);
+    assert.equal(inventory.buildingMutations.length, 0);
+});
+
+test('Buffer shadow/alias는 DB writer 검사를 우회할 수 없다', () => {
+    for (const source of [
+        `const Buffer = client; Buffer.from('buildings').update({ updated_at: 'now' });`,
+        `function write(Buffer: any) { Buffer.from('building_units').delete(); }`,
+        `const { Buffer } = clients; Buffer.from('property_units').update({ dong: '101' });`,
+        `import { Buffer } from 'db-client'; Buffer.from('buildings').delete();`,
+        `Buffer = client; Buffer.from('buildings').delete();`,
+        `Buffer.from = client.from; Buffer.from('buildings').delete();`,
+    ]) {
+        const inventory = scanSourceText(source, 'src/shadow-buffer.ts');
+        assert.ok(inventory.buildingMutations.length + inventory.propertyUnitMutations.length > 0, source);
+    }
+    const builtin = scanSourceText(`
+import { Buffer } from 'node:buffer';
+export function decode(value: string) { return Buffer.from(value, 'base64'); }
+`, 'src/builtin-buffer.ts');
+    assert.doesNotThrow(() => validateInventoryAgainstPolicy(builtin, policyFor(builtin)));
+});

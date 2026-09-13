@@ -11,7 +11,8 @@ function authenticateRequest(
     req: Request,
     res: Response,
     next: NextFunction,
-    allowDevelopment: boolean
+    allowDevelopment: boolean,
+    allowIdentityVerification = false
 ): void {
     const authHeader = req.headers.authorization;
 
@@ -39,6 +40,11 @@ function authenticateRequest(
         return;
     }
 
+    if (verifyResult.payload.purpose === 'IDENTITY_VERIFICATION' && !allowIdentityVerification) {
+        res.status(403).json({ success: false, error: 'Token purpose is not allowed.', code: 'TOKEN_PURPOSE_INVALID' });
+        return;
+    }
+
     if (verifyResult.databaseTarget === 'development' && !allowDevelopment) {
         res.status(403).json({
             success: false,
@@ -56,6 +62,10 @@ function authenticateRequest(
         isBlocked: verifyResult.payload.isBlocked,
         actorUserId: verifyResult.payload.actorUserId,
         purpose: verifyResult.payload.purpose,
+        assemblyId: verifyResult.payload.assemblyId,
+        verificationPurpose: verifyResult.payload.verificationPurpose,
+        issuedAt: verifyResult.payload.iat,
+        expiresAt: verifyResult.payload.exp,
         scope: verifyResult.payload.scope,
         operation: verifyResult.payload.operation,
         issuer: verifyResult.payload.iss,
@@ -67,7 +77,7 @@ function authenticateRequest(
     next();
 }
 
-/** 운영 전용 기본 인증. 알림톡/SMS/KG이니시스 등 미분기 side effect를 dev 토큰에서 차단한다. */
+/** 운영 전용 기본 인증. 알림톡/SMS 등 미분기 side effect를 dev 토큰에서 차단한다. */
 export const authMiddleware = (
     req: Request,
     res: Response,
@@ -80,5 +90,12 @@ export const databaseTargetAuthMiddleware = (
     res: Response,
     next: NextFunction
 ): void => authenticateRequest(req, res, next, true);
+
+/** 본인확인 라우터의 추가 목적 검증과 함께 사용한다. */
+export const identityVerificationAuthMiddleware = (
+    req: Request,
+    res: Response,
+    next: NextFunction
+): void => authenticateRequest(req, res, next, true, true);
 
 export default authMiddleware;

@@ -183,9 +183,9 @@ const server = app.listen(env.PORT, () => {
     logger.info(`GIS Config - DATA_PORTAL_API_KEY: ${env.DATA_PORTAL_API_KEY ? 'SET' : 'NOT SET'}`);
     logger.info(`GIS Config - LAND_AREA_SYNC: ${env.LAND_AREA_SYNC_ENABLED ? 'ENABLED' : 'DISABLED'}`);
 
-    // KG이니시스 통합인증 환경 변수 상태 로깅
-    const kgInicisConfigured = env.KG_INICIS_MID && env.KG_INICIS_API_KEY;
-    logger.info(`KG이니시스 Config - ${kgInicisConfigured ? 'CONFIGURED' : 'NOT CONFIGURED (통합인증 API 비활성)'}`);
+    // 계정 값 존재와 실제 사용 가능 여부를 구분하고 민감한 설정은 출력하지 않는다.
+    const identityReadiness = kgInicisService.getReadiness(env.KG_INICIS_DATABASE_TARGET);
+    logger.info(`KG이니시스 - ${!identityReadiness.enabled ? 'DISABLED' : identityReadiness.available ? 'READY' : 'UNAVAILABLE'}`);
 });
 
 // Graceful shutdown

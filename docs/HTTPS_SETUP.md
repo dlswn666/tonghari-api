@@ -175,7 +175,7 @@ ALIMTALK_PROXY_URL = https://api.tonghari.kr
 | 항목 | 변경 | 주의 |
 |---|---|---|
 | johapon-dev (Vercel dev 프로젝트) | `ALIMTALK_PROXY_URL=https://api.tonghari.kr`로 통일, `ALLOW_INSECURE_GIS_PROXY_FOR_SYNTHETIC_DEV` 제거 가능 | HTTPS는 가드를 항상 통과하므로 합성dev 예외 불필요해짐 |
-| `NEXT_PUBLIC_API_URL` (운영/dev) | `https://api.tonghari.kr` | KG이니시스 콜백 URL(successUrl/failUrl)이 이 값 기반 — KG이니시스 측에 등록된 URL이 있으면 함께 변경 확인 |
+| `KG_INICIS_CALLBACK_BASE_URL` (대상 환경별) | `https://<web-origin>/api/identity-verification/callback` | 본인확인 콜백은 Web BFF에서 수신한 뒤 API로 중계한다. API origin을 콜백으로 사용하지 않는다. 연결 전에는 비워 두고, 실제 설정 시 생성 URL 전체 128바이트 한도를 확인한다. |
 | tonghari-api `KG_INICIS_ALLOWED_HOSTS` | `api.tonghari.kr` 포함하도록 갱신 | SEC-2: 비어 있으면 검증 스킵되므로 반드시 값 유지 |
 | 보안 그룹 3100 | 위 항목 전부 전환 후 공개 인바운드 차단 | 차단 전 `docker logs`로 3100 직접 호출 잔존 여부 확인. 차단 전에는 법률 MCP 외부 운영 금지 |
 

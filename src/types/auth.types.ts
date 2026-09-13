@@ -15,7 +15,9 @@ export interface JwtPayload {
     /** 감사 로그용 내부 users.id. 권한 판정에는 사용하지 않음 */
     actorUserId?: string;
     /** shared-secret 토큰의 허용 용도 */
-    purpose?: 'MEMBER_QUEUE' | 'GIS_SYSTEM_ADMIN' | 'CONSENT_QUEUE';
+    purpose?: 'MEMBER_QUEUE' | 'GIS_SYSTEM_ADMIN' | 'CONSENT_QUEUE' | 'IDENTITY_VERIFICATION';
+    assemblyId?: string;
+    verificationPurpose?: 'ENTRY' | 'VOTE';
     /** 개발 환경의 제한된 읽기 토큰 범위 */
     scope?: 'GIS_ADDRESS_READ';
     /** MEMBER_QUEUE 토큰이 호출할 수 있는 단일 작업 */
@@ -68,7 +70,11 @@ export interface AuthenticatedUser {
     role?: 'SYSTEM_ADMIN' | 'ADMIN' | 'USER';
     isBlocked?: boolean;
     actorUserId?: string;
-    purpose?: 'MEMBER_QUEUE' | 'GIS_SYSTEM_ADMIN' | 'CONSENT_QUEUE';
+    purpose?: 'MEMBER_QUEUE' | 'GIS_SYSTEM_ADMIN' | 'CONSENT_QUEUE' | 'IDENTITY_VERIFICATION';
+    assemblyId?: string;
+    verificationPurpose?: 'ENTRY' | 'VOTE';
+    issuedAt?: number;
+    expiresAt?: number;
     scope?: 'GIS_ADDRESS_READ';
     operation?:
         | 'MEMBER_INVITE_SYNC'

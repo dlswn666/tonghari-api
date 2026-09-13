@@ -39,6 +39,22 @@ export const errorHandler = (
         return;
     }
 
+    // 전역 JSON/form 파서 오류에는 err.body로 인증 token과 개인정보가 붙을 수 있다.
+    // KG 경로는 라우터 진입 전 오류도 원문/stack을 로그나 응답에 전달하지 않는다.
+    const normalizedPath = req.path.toLowerCase();
+    if (normalizedPath === '/api/kg-inicis' || normalizedPath.startsWith('/api/kg-inicis/')) {
+        const parserError = err as Error & { status?: number };
+        const status = parserError.status === 400 || parserError.status === 413 ? parserError.status : 500;
+        res.setHeader('Cache-Control', 'no-store');
+        res.setHeader('Referrer-Policy', 'no-referrer');
+        res.status(status).json({
+            success: false,
+            error: '본인확인 요청을 처리할 수 없습니다. 다시 시도해 주세요.',
+            code: status === 400 || status === 413 ? 'INVALID_PARAMS' : 'IDENTITY_VERIFICATION_FAILED',
+        });
+        return;
+    }
+
     // 일반 에러인 경우
     console.error('Unhandled error:', err);
 
@@ -64,4 +80,3 @@ export const notFoundHandler = (
 };
 
 export default errorHandler;
-
