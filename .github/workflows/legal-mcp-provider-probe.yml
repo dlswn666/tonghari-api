@@ -1,0 +1,118 @@
+name: Legal MCP Provider Probe
+
+# 공개 서울 조례의 고정 검색·상세 각 1회만 실행하는 읽기 전용 진단.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tonghari-api-legal-provider-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Checkout exact main revision
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - name: Probe fixed public ordinance with the running parser
+        shell: bash
+        env:
+          PROBE_EVENT_NAME: ${{ github.event_name }}
+          PROBE_REF: ${{ github.ref }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_SSH_FINGERPRINT: ${{ secrets.EC2_SSH_FINGERPRINT }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          [[ "${PROBE_EVENT_NAME}" == workflow_dispatch ]] \
+            || { echo '::error::workflow_dispatch is required.'; exit 1; }
+          [[ "${PROBE_REF}" == refs/heads/main ]] \
+            || { echo '::error::refs/heads/main is required.'; exit 1; }
+          for secret_name in EC2_HOST EC2_USERNAME EC2_SSH_KEY EC2_SSH_FINGERPRINT; do
+            [[ -n "${!secret_name:-}" ]] \
+              || { echo '::error::Required EC2 connection secret is missing.'; exit 1; }
+          done
+          [[ "${EC2_USERNAME}" =~ ^[a-z_][a-z0-9_-]*$ ]] \
+            || { echo '::error::Invalid EC2 username.'; exit 1; }
+          [[ "${#EC2_HOST}" -le 253 \
+            && "${EC2_HOST}" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] \
+            || { echo '::error::Invalid EC2 host.'; exit 1; }
+          [[ -f scripts/legal-mcp-provider-probe.cjs && ! -L scripts/legal-mcp-provider-probe.cjs ]] \
+            || { echo '::error::Probe script is missing.'; exit 1; }
+          node --check scripts/legal-mcp-provider-probe.cjs
+
+          local_root="$(mktemp -d "${RUNNER_TEMP}/legal-provider-probe.XXXXXX")"
+          key_path="${local_root}/id"
+          known_hosts_path="${local_root}/known_hosts"
+          cleanup() {
+            rm -f -- "${key_path}" "${known_hosts_path}"
+            rmdir -- "${local_root}"
+          }
+          trap cleanup EXIT
+          install -m 600 /dev/null "${key_path}"
+          printf '%s\n' "${EC2_SSH_KEY}" > "${key_path}"
+          host_keys="$(ssh-keyscan -T 10 -t ed25519,ecdsa,rsa "${EC2_HOST}" 2>/dev/null)"
+          matched=""
+          while IFS= read -r host_key; do
+            [[ -n "${host_key}" ]] || continue
+            fingerprint="$(printf '%s\n' "${host_key}" | ssh-keygen -lf - -E sha256 | awk '{print $2}')"
+            if [[ "${fingerprint}" == "${EC2_SSH_FINGERPRINT}" ]]; then
+              matched="${host_key}"
+              break
+            fi
+          done <<< "${host_keys}"
+          [[ -n "${matched}" ]] \
+            || { echo '::error::EC2 fingerprint mismatch.'; exit 1; }
+          printf '%s\n' "${matched}" > "${known_hosts_path}"
+          chmod 600 "${known_hosts_path}"
+          ssh_options=(
+            -i "${key_path}"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o ConnectTimeout=10
+            -o ServerAliveInterval=10
+            -o ServerAliveCountMax=3
+            -o "UserKnownHostsFile=${known_hosts_path}"
+          )
+
+          remote_script="$(cat <<'REMOTE'
+          set -Eeuo pipefail
+          fail() { printf 'PROBE_FAILED: %s\n' "$1" >&2; exit 1; }
+          app_root="${HOME}/alimtalk-proxy"
+          lock_path="${app_root}/.tonghari-api-production.lock"
+          [[ -d "${app_root}" && ! -L "${app_root}" \
+            && "$(realpath -e -- "${app_root}")" == "${app_root}" ]] \
+            || fail 'application directory contract is invalid'
+          check_lock() {
+            [[ -f "${lock_path}" && ! -L "${lock_path}" \
+              && "$(stat -c '%u:%a' "${lock_path}")" == "$(id -u):600" ]] \
+              || fail 'production lock contract is invalid'
+          }
+          check_lock
+          exec 9<"${lock_path}"
+          flock -s -w 15 9 || fail 'production lock acquisition timed out'
+          check_lock
+          [[ "$(stat -Lc '%d:%i' "/proc/$$/fd/9")" == "$(stat -c '%d:%i' "${lock_path}")" ]] \
+            || fail 'production lock changed while acquired'
+          [[ "$(docker container inspect --format '{{.State.Running}}' alimtalk-proxy 2>/dev/null)" == true ]] \
+            || fail 'application container is not running'
+          timeout 75s docker exec -i --workdir /app alimtalk-proxy node - 2>/dev/null
+          REMOTE
+          )"
+          printf -v remote_command 'timeout 100s bash -c %q' "${remote_script}"
+          if ! timeout 115s ssh "${ssh_options[@]}" "${EC2_USERNAME}@${EC2_HOST}" \
+            "${remote_command}" < scripts/legal-mcp-provider-probe.cjs 2>/dev/null; then
+            echo '::error::Provider probe failed; inspect the sanitized JSON result.'
+            exit 1
+          fi
