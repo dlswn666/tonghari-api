@@ -150,6 +150,31 @@ test('현행 자치법규 provider는 ordin/nw=1과 정확한 org/sborg를 고�
     assert.equal(JSON.stringify(result).includes(SECRET_OC), false);
 });
 
+test('실측 조례 상세 구조를 읽어도 요청 MST와 ID의 불일치를 계속 거부한다', async () => {
+    // 2026-09-15 운영 probe에서 확인한 구조이며 조문 내용은 합성 테스트 값이다.
+    const xml = `<LawService><자치법규기본정보>
+      <자치법규일련번호>2130189</자치법규일련번호><자치법규ID>2001619</자치법규ID>
+      <자치법규명>서울특별시 도시 및 주거환경정비 조례</자치법규명>
+      <지자체기관명>서울특별시</지자체기관명><시행일자>20260518</시행일자>
+      </자치법규기본정보><조문><조><조문번호>2</조문번호><조문여부>Y</조문여부>
+      <조제목>정의</조제목><조내용>합성 조문 내용</조내용></조></조문></LawService>`;
+    const client = new LawOpenApiClient({ oc: SECRET_OC, httpGet: async () => ({ data: xml }) });
+
+    const byMst = await client.getCurrentOrdinanceDetail({ mst: '2130189' });
+    const byId = await client.getCurrentOrdinanceDetail({ ordinanceId: '2001619' });
+    assert.equal(byMst.ordinanceId, '2001619');
+    assert.equal(byId.mst, '2130189');
+    assert.equal(byMst.articles[0].content, '합성 조문 내용');
+    assert.equal(byMst.effectiveDate, '20260518');
+
+    for (const input of [{ mst: '9999999' }, { ordinanceId: '9999999' }]) {
+        await assert.rejects(
+            client.getCurrentOrdinanceDetail(input),
+            (error: unknown) => error instanceof LegalOpenApiError && error.code === 'SOURCE_MISMATCH',
+        );
+    }
+});
+
 test('판례 provider는 prec/ddes 후보 100건을 고정하고 JO와 본문검색을 분리한다', async () => {
     const { client, calls } = createFixtureClient();
     const byLaw = await client.searchCases({

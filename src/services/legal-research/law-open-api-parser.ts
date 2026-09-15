@@ -563,16 +563,47 @@ function lawLikeNode(parsedRoot: XmlRecord, keys: string[]): XmlRecord {
     return found ?? unwrapSingleRoot(parsedRoot);
 }
 
+function parseOrdinanceAddenda(node: XmlRecord): LawAddendum[] {
+    const container = pickRecord(node, '부칙');
+    const fields = ['부칙공포일자', '부칙공포번호', '부칙내용'] as const;
+    const values = fields.map((field) => pick(container, field));
+    if (!values.some(Array.isArray)) {
+        return unitsFromContainer(node, ['부칙'], ['부칙단위', '부칙']).map(parseAddendum);
+    }
+
+    // 실측 자치법규 XML은 같은 필드가 순서대로 반복된다. 날짜·번호·본문을
+    // 하나로 합치지 않고 같은 index끼리 연결하되 불완전한 대응은 거부한다.
+    if (pick(container, '부칙단위', '부칙') !== undefined) {
+        throw new LegalOpenApiError('SCHEMA_DRIFT');
+    }
+    const columns = values.map((value) => {
+        if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
+            throw new LegalOpenApiError('SCHEMA_DRIFT');
+        }
+        return value as string[];
+    });
+    const count = columns[0].length;
+    if (count === 0 || columns.some((column) => column.length !== count)) {
+        throw new LegalOpenApiError('SCHEMA_DRIFT');
+    }
+    return Array.from({ length: count }, (_, index) => parseAddendum(
+        Object.fromEntries(fields.map((field, column) => [field, columns[column][index]])),
+    ));
+}
+
 function parseLawLikeDetail(parsedRoot: XmlRecord, ordinance: boolean): CurrentLawDetail | CurrentOrdinanceDetail {
     const node = lawLikeNode(
         parsedRoot,
         ordinance ? ['자치법규', 'ordinservice'] : ['법령', 'lawservice'],
     );
-    const basic = pickRecord(node, '기본정보') ?? node;
-    const articles = unitsFromContainer(node, ['조문'], ['조문단위', '조문'])
+    const basic = pickRecord(node, '기본정보')
+        ?? (ordinance ? pickRecord(node, '자치법규기본정보') : undefined)
+        ?? node;
+    const articles = unitsFromContainer(node, ['조문'], ordinance ? ['조문단위', '조', '조문'] : ['조문단위', '조문'])
         .map(parseArticle);
-    const addenda = unitsFromContainer(node, ['부칙'], ['부칙단위', '부칙'])
-        .map(parseAddendum);
+    const addenda = ordinance
+        ? parseOrdinanceAddenda(node)
+        : unitsFromContainer(node, ['부칙'], ['부칙단위', '부칙']).map(parseAddendum);
     const appendices = unitsFromContainer(node, ['별표'], ['별표단위', '별표'])
         .map(parseAppendix);
 

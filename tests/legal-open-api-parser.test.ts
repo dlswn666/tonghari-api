@@ -89,6 +89,94 @@ test('자치법규 본문도 조문·부칙·별표의 단일 노드를 보존�
     assert.equal(parsed.appendices[0].title, '기준');
 });
 
+// 2026-09-15 운영 provider probe에서 확인한 구조만 재현한다. 조문 원문은 저장하지 않는다.
+const observedOrdinanceBasicXml = `<자치법규기본정보>
+  <자치법규ID>2001619</자치법규ID><자치법규일련번호>2130189</자치법규일련번호>
+  <자치법규명>서울특별시 도시 및 주거환경정비 조례</자치법규명>
+  <지자체기관명>서울특별시</지자체기관명><자치법규종류>조례</자치법규종류>
+  <공포일자>20260518</공포일자><공포번호>10117</공포번호><시행일자>20260518</시행일자>
+</자치법규기본정보>`;
+const observedParallelAddendaXml = `<부칙>
+  <부칙공포일자>20250101</부칙공포일자><부칙공포번호>10001</부칙공포번호><부칙내용>TESTTEXT_ADDENDUM_ONE</부칙내용>
+  <부칙공포일자>20260518</부칙공포일자><부칙공포번호>10117</부칙공포번호><부칙내용>TESTTEXT_ADDENDUM_TWO</부칙내용>
+</부칙>`;
+
+test('실측 자치법규 조문 > 조 배열에서 표제와 실제 조문·원문을 구분한다', () => {
+    const detail = parseCurrentOrdinanceDetailXml(`<LawService>${observedOrdinanceBasicXml}
+      <조문>
+        <조><조문번호>0</조문번호><조문여부>N</조문여부><조제목></조제목><조내용>TESTTEXT_HEADING</조내용></조>
+        <조><조문번호>2</조문번호><조문여부>Y</조문여부><조제목>TESTTEXT_TITLE_2</조제목><조내용>TESTTEXT_ARTICLE_2</조내용></조>
+        <조><조문번호>36</조문번호><조문여부>Y</조문여부><조제목>TESTTEXT_TITLE_36</조제목><조내용>TESTTEXT_ARTICLE_36</조내용></조>
+      </조문>${observedParallelAddendaXml}
+    </LawService>`);
+
+    assert.equal(detail.articles.length, 3);
+    assert.deepEqual(detail.articles.map((article) => ({
+        number: article.articleNumber, isArticle: article.isArticle, title: article.title, content: article.content,
+    })), [
+        { number: '0', isArticle: false, title: undefined, content: 'TESTTEXT_HEADING' },
+        { number: '2', isArticle: true, title: 'TESTTEXT_TITLE_2', content: 'TESTTEXT_ARTICLE_2' },
+        { number: '36', isArticle: true, title: 'TESTTEXT_TITLE_36', content: 'TESTTEXT_ARTICLE_36' },
+    ]);
+});
+
+test('자치법규 조문 > 조 단일 노드도 배열과 같은 조문으로 파싱한다', () => {
+    const detail = parseCurrentOrdinanceDetailXml(`<LawService>${observedOrdinanceBasicXml}
+      <조문><조><조문번호>2</조문번호><조문여부>Y</조문여부><조제목>TESTTEXT_TITLE</조제목><조내용>TESTTEXT_ARTICLE</조내용></조></조문>
+    </LawService>`);
+
+    assert.equal(detail.articles.length, 1);
+    assert.equal(detail.articles[0].articleNumber, '2');
+    assert.equal(detail.articles[0].content, 'TESTTEXT_ARTICLE');
+    assert.equal(detail.articles[0].isArticle, true);
+});
+
+test('실측 LawService 자치법규기본정보와 평행 배열 부칙을 개별 시행이력으로 보존한다', () => {
+    const detail = parseCurrentOrdinanceDetailXml(`<LawService>
+      ${observedOrdinanceBasicXml}${observedParallelAddendaXml}
+      <별표단위><별표번호>1</별표번호><별표제목>TESTTEXT_APPENDIX_ONE</별표제목><별표내용>TESTTEXT_ONE</별표내용></별표단위>
+      <별표단위><별표번호>2</별표번호><별표제목>TESTTEXT_APPENDIX_TWO</별표제목><별표내용>TESTTEXT_TWO</별표내용></별표단위>
+    </LawService>`);
+
+    assert.equal(detail.mst, '2130189');
+    assert.equal(detail.ordinanceId, '2001619');
+    assert.equal(detail.name, '서울특별시 도시 및 주거환경정비 조례');
+    assert.equal(detail.effectiveDate, '20260518');
+    assert.deepEqual(detail.addenda, [
+        { promulgationDate: '20250101', promulgationNo: '10001', content: 'TESTTEXT_ADDENDUM_ONE' },
+        { promulgationDate: '20260518', promulgationNo: '10117', content: 'TESTTEXT_ADDENDUM_TWO' },
+    ]);
+    assert.deepEqual(detail.appendices.map((appendix) => appendix.number), ['1', '2']);
+});
+
+test('평행 배열이 아닌 단일 자치법규 부칙도 하나의 이력으로 유지한다', () => {
+    const detail = parseCurrentOrdinanceDetailXml(`<LawService>${observedOrdinanceBasicXml}
+      <부칙><부칙공포일자>20260518</부칙공포일자><부칙공포번호>10117</부칙공포번호><부칙내용>TESTTEXT_SINGLE</부칙내용></부칙>
+    </LawService>`);
+
+    assert.deepEqual(detail.addenda, [
+        { promulgationDate: '20260518', promulgationNo: '10117', content: 'TESTTEXT_SINGLE' },
+    ]);
+});
+
+test('자치법규 평행 부칙 배열의 길이·타입·단위가 어긋나면 임의 결합하지 않는다', async (t) => {
+    const mutations = [
+        ['공포일자 누락', observedParallelAddendaXml.replace(/<부칙공포일자>[^<]+<\/부칙공포일자>/g, '')],
+        ['공포번호 길이 불일치', observedParallelAddendaXml.replace('<부칙공포번호>10001</부칙공포번호>', '')],
+        ['본문 길이 불일치', observedParallelAddendaXml.replace('<부칙내용>TESTTEXT_ADDENDUM_ONE</부칙내용>', '')],
+        ['본문 객체로 변경', observedParallelAddendaXml.replace('TESTTEXT_ADDENDUM_ONE', '<임의필드>TESTTEXT_UNKNOWN</임의필드>')],
+        ['단위형·평행형 혼합', observedParallelAddendaXml.replace('</부칙>', '<부칙단위><부칙내용>TESTTEXT_EXTRA</부칙내용></부칙단위></부칙>')],
+    ];
+    for (const [name, addendaXml] of mutations) {
+        await t.test(name, () => {
+            assert.throws(
+                () => parseCurrentOrdinanceDetailXml(`<자치법규><자치법규ID>2001619</자치법규ID>${addendaXml}</자치법규>`),
+                (error: unknown) => error instanceof LegalOpenApiError && error.code === 'SCHEMA_DRIFT',
+            );
+        });
+    }
+});
+
 test('판례 목록 링크와 판례 전문 필드를 구분해 파싱한다', () => {
     const list = parseCaseSearchXml(`<LawSearch><totalCnt>1</totalCnt><page>1</page><prec>
       <판례일련번호>700</판례일련번호><사건명>조합설립인가무효</사건명><사건번호>2025두1234</사건번호>
