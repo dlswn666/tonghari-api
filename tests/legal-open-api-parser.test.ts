@@ -131,6 +131,77 @@ test('자치법규 조문 > 조 단일 노드도 배열과 같은 조문으로 �
     assert.equal(detail.articles[0].isArticle, true);
 });
 
+test('자치법규 복합 조문번호는 원문 선두 표제와 숫자 관계가 일치할 때만 분리한다', async (t) => {
+    const examples = [
+        { raw: '200', text: '제2조(정의) TESTTEXT', main: '2', branch: undefined },
+        { raw: '000200', text: '제2조(정의) TESTTEXT', main: '2', branch: undefined },
+        { raw: '201', text: '제2조의1(정의) TESTTEXT', main: '2', branch: '1' },
+        { raw: '000201', text: '제2조의1(정의) TESTTEXT', main: '2', branch: '1' },
+        { raw: '3600', text: '제36조(기준) TESTTEXT', main: '36', branch: undefined },
+        { raw: '200', text: '제200조(기준) TESTTEXT', main: '200', branch: undefined },
+        { raw: '2', text: '제2조(정의) TESTTEXT', main: '2', branch: undefined },
+        { raw: '2', explicitBranch: '1', text: '제2조의1(정의) TESTTEXT', main: '2', branch: '1' },
+        { raw: '201', explicitBranch: '1', text: '제2조의1(정의) TESTTEXT', main: '2', branch: '1' },
+    ];
+    for (const example of examples) {
+        await t.test(`${example.raw} + ${example.text}`, () => {
+            const branchXml = example.explicitBranch === undefined ? '' : `<조문가지번호>${example.explicitBranch}</조문가지번호>`;
+            const detail = parseCurrentOrdinanceDetailXml(`<LawService>${observedOrdinanceBasicXml}
+              <조문><조><조문번호>${example.raw}</조문번호>${branchXml}<조문여부>Y</조문여부><조내용>${example.text}</조내용></조></조문>
+            </LawService>`);
+            assert.equal(detail.articles[0].articleNumber, example.main);
+            assert.equal(detail.articles[0].branchNumber, example.branch);
+            assert.equal(detail.articles[0].content, example.text);
+        });
+    }
+});
+
+test('조례 원문 표제와 숫자 코드·별도 가지번호가 충돌하면 확정하지 않는다', async (t) => {
+    const examples = [
+        { raw: '200', text: '제3조(정의) TESTTEXT' },
+        { raw: '201', text: '제2조(정의) TESTTEXT' },
+        { raw: '201', branch: '2', text: '제2조의1(정의) TESTTEXT' },
+        { raw: '201', branch: '0', text: '제2조의1(정의) TESTTEXT' },
+        { raw: '2', branch: '2', text: '제2조의1(정의) TESTTEXT' },
+        { raw: '2', text: '제2조의1(정의) TESTTEXT' },
+        { raw: 'invalid', text: '제2조(정의) TESTTEXT' },
+        { raw: '201', branch: 'invalid', text: '제2조의1(정의) TESTTEXT' },
+    ];
+    for (const [index, example] of examples.entries()) {
+        await t.test(`불일치 ${index + 1}`, () => {
+            const branchXml = example.branch === undefined ? '' : `<조문가지번호>${example.branch}</조문가지번호>`;
+            assert.throws(
+                () => parseCurrentOrdinanceDetailXml(`<LawService>${observedOrdinanceBasicXml}
+                  <조문><조><조문번호>${example.raw}</조문번호>${branchXml}<조내용>${example.text}</조내용></조></조문>
+                </LawService>`),
+                (error: unknown) => error instanceof LegalOpenApiError && error.code === 'SCHEMA_DRIFT',
+            );
+        });
+    }
+});
+
+test('조례 표제가 아닌 참조문구·중간 인용·비조문은 번호 추정에 사용하지 않는다', () => {
+    for (const content of ['제2조에 따른 TESTTEXT', 'TESTTEXT 제2조(정의)', 'TESTTEXT']) {
+        const detail = parseCurrentOrdinanceDetailXml(`<LawService>${observedOrdinanceBasicXml}
+          <조문><조><조문번호>200</조문번호><조내용>${content}</조내용></조></조문>
+        </LawService>`);
+        assert.equal(detail.articles[0].articleNumber, '200');
+        assert.equal(detail.articles[0].content, content);
+    }
+    const heading = parseCurrentOrdinanceDetailXml(`<LawService>${observedOrdinanceBasicXml}
+      <조문><조><조문번호>200</조문번호><조문여부>N</조문여부><조내용>제2조(정의) TESTTEXT</조내용></조></조문>
+    </LawService>`);
+    assert.equal(heading.articles[0].articleNumber, '200');
+    assert.equal(heading.articles[0].isArticle, false);
+});
+
+test('국가법령 조문번호에는 조례 복합 코드 변환을 적용하지 않는다', () => {
+    const detail = parseCurrentLawDetailXml(`<법령><기본정보><법령ID>202</법령ID></기본정보>
+      <조문><조문단위><조문번호>200</조문번호><조문내용>제2조(정의) TESTTEXT</조문내용></조문단위></조문>
+    </법령>`);
+    assert.equal(detail.articles[0].articleNumber, '200');
+});
+
 test('실측 LawService 자치법규기본정보와 평행 배열 부칙을 개별 시행이력으로 보존한다', () => {
     const detail = parseCurrentOrdinanceDetailXml(`<LawService>
       ${observedOrdinanceBasicXml}${observedParallelAddendaXml}

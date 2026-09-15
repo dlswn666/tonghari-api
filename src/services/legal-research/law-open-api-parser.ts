@@ -521,6 +521,39 @@ function parseArticle(record: XmlRecord): LawArticle {
     };
 }
 
+function parseOrdinanceArticle(record: XmlRecord): LawArticle {
+    const article = parseArticle(record);
+    if (!article.isArticle) return article;
+    const heading = article.content.match(/^제\s*(\d+)\s*조(?:의\s*(\d+))?(?=[\s(（]|$)/);
+    if (!heading) return article;
+
+    const explicitBranch = pickText(record, '조문가지번호');
+    const numericParts = [article.articleNumber, heading[1], heading[2] ?? '0'];
+    if (explicitBranch) numericParts.push(explicitBranch);
+    if (numericParts.some((value) => !/^\d{1,30}$/.test(value))) {
+        throw new LegalOpenApiError('SCHEMA_DRIFT');
+    }
+    const rawNumber = BigInt(article.articleNumber);
+    const mainNumber = BigInt(heading[1]);
+    const branchNumber = BigInt(heading[2] ?? '0');
+    const suppliedBranch = explicitBranch ? BigInt(explicitBranch) : undefined;
+    if (mainNumber === 0n || (heading[2] !== undefined && branchNumber === 0n)
+        || (suppliedBranch !== undefined && suppliedBranch !== branchNumber)) {
+        throw new LegalOpenApiError('SCHEMA_DRIFT');
+    }
+
+    // 조례의 실측 복합 코드(main * 100 + branch)는 원문 표제와 일치할 때만
+    // 분리한다. 기존 단순 번호는 별도 가지번호까지 맞는 경우 그대로 인정한다.
+    const matchesLegacy = rawNumber === mainNumber && (suppliedBranch ?? 0n) === branchNumber;
+    const matchesComposite = rawNumber === mainNumber * 100n + branchNumber;
+    if (!matchesLegacy && !matchesComposite) throw new LegalOpenApiError('SCHEMA_DRIFT');
+    return {
+        ...article,
+        articleNumber: mainNumber.toString(),
+        branchNumber: branchNumber === 0n ? undefined : branchNumber.toString(),
+    };
+}
+
 function parseAddendum(record: XmlRecord): LawAddendum {
     return {
         promulgationDate: pickText(record, '부칙공포일자') || undefined,
@@ -600,7 +633,7 @@ function parseLawLikeDetail(parsedRoot: XmlRecord, ordinance: boolean): CurrentL
         ?? (ordinance ? pickRecord(node, '자치법규기본정보') : undefined)
         ?? node;
     const articles = unitsFromContainer(node, ['조문'], ordinance ? ['조문단위', '조', '조문'] : ['조문단위', '조문'])
-        .map(parseArticle);
+        .map(ordinance ? parseOrdinanceArticle : parseArticle);
     const addenda = ordinance
         ? parseOrdinanceAddenda(node)
         : unitsFromContainer(node, ['부칙'], ['부칙단위', '부칙']).map(parseAddendum);
